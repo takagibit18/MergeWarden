@@ -26,6 +26,8 @@ def _stub_sandbox(monkeypatch, *, exit_code: int = 0, stdout: str = "", stderr: 
         return SandboxResult(
             command=" ".join(kwargs["argv"]),
             cwd=str(kwargs["cwd"]),
+            backend=kwargs.get("backend", ""),
+            workspace_root=str(kwargs["cwd"]),
             exit_code=exit_code,
             stdout=stdout,
             stderr=stderr,
@@ -61,6 +63,8 @@ def test_run_command_tool_returns_structured_success(monkeypatch) -> None:
     assert result["exit_code"] == 0
     assert result["stdout"] == "ok\n"
     assert result["timed_out"] is False
+    assert result["backend"] == "subprocess"
+    assert result["workspace_root"] == str(repo_root.resolve())
     assert captured["argv"] == ["python", "-V"]
 
 
@@ -129,7 +133,14 @@ def test_run_command_tool_blocks_path_outside_workspace(monkeypatch) -> None:
     allowed_root = Path(__file__).resolve().parent
     outside_dir = Path(__file__).resolve().parent.parent / "src"
 
+    def _unexpected_sandbox(**kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("sandbox should not be called for workspace escape")
+
     monkeypatch.setattr(Path, "cwd", lambda: allowed_root)
+    monkeypatch.setattr(
+        "src.tools.run_command_tool.run_sandboxed_command",
+        _unexpected_sandbox,
+    )
 
     with pytest.raises(PathNotAllowedError):
         asyncio.run(tool.execute(command="pytest tests", cwd=str(outside_dir)))

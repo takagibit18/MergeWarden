@@ -18,7 +18,6 @@ from typing import Protocol
 from src.config import get_settings
 from src.security.exec_policy import truncate_output
 from src.security.sandbox import SandboxResult
-from src.tools.path_utils import get_tool_workspace_root
 
 _ENV_WHITELIST: frozenset[str] = frozenset(
     {
@@ -68,18 +67,24 @@ def _truncate_process_output(
     *,
     command_display: str,
     cwd: Path,
+    backend: str,
+    workspace_root: Path,
     stdout_raw: str,
     stderr_raw: str,
     exit_code: int,
     timed_out: bool,
     start: float,
     max_output_bytes: int,
+    container_cwd: str | None = None,
 ) -> SandboxResult:
     stdout, stdout_truncated = truncate_output(stdout_raw, max_output_bytes)
     stderr, stderr_truncated = truncate_output(stderr_raw, max_output_bytes)
     return SandboxResult(
         command=command_display,
         cwd=str(cwd),
+        backend=backend,
+        workspace_root=str(workspace_root),
+        container_cwd=container_cwd,
         exit_code=exit_code,
         stdout=stdout,
         stderr=stderr,
@@ -98,6 +103,7 @@ class ExecBackend(Protocol):
         *,
         argv: list[str],
         cwd: Path,
+        workspace_root: Path,
         timeout_ms: int,
         env: dict[str, str] | None = None,
         max_output_bytes: int = 65536,
@@ -112,6 +118,7 @@ class LocalSubprocessBackend:
         *,
         argv: list[str],
         cwd: Path,
+        workspace_root: Path,
         timeout_ms: int,
         env: dict[str, str] | None = None,
         max_output_bytes: int = 65536,
@@ -134,6 +141,8 @@ class LocalSubprocessBackend:
             return _truncate_process_output(
                 command_display=command_display,
                 cwd=resolved_cwd,
+                backend="subprocess",
+                workspace_root=workspace_root,
                 stdout_raw=completed.stdout or "",
                 stderr_raw=completed.stderr or "",
                 exit_code=int(completed.returncode),
@@ -155,10 +164,25 @@ class LocalSubprocessBackend:
             return _truncate_process_output(
                 command_display=command_display,
                 cwd=resolved_cwd,
+                backend="subprocess",
+                workspace_root=workspace_root,
                 stdout_raw=stdout_raw,
                 stderr_raw=stderr_raw,
                 exit_code=-1,
                 timed_out=True,
+                start=start,
+                max_output_bytes=max_output_bytes,
+            )
+        except FileNotFoundError:
+            return _truncate_process_output(
+                command_display=command_display,
+                cwd=resolved_cwd,
+                backend="subprocess",
+                workspace_root=workspace_root,
+                stdout_raw="",
+                stderr_raw=f"Executable not found: {argv[0]}",
+                exit_code=127,
+                timed_out=False,
                 start=start,
                 max_output_bytes=max_output_bytes,
             )
@@ -191,9 +215,14 @@ class DockerBackend:
         workspace_root: Path,
         cwd: Path,
         env: dict[str, str] | None,
-    ) -> list[str]:
+    ) -> tuple[list[str], str]:
         settings = get_settings()
         container_root = settings.execute_docker_workdir
+        container_cwd = self._container_cwd(
+            workspace_root=workspace_root,
+            cwd=cwd,
+            container_root=container_root,
+        )
         docker_argv = [
             "docker",
             "run",
@@ -207,11 +236,7 @@ class DockerBackend:
             "--mount",
             f"type=bind,source={workspace_root},target={container_root}",
             "-w",
-            self._container_cwd(
-                workspace_root=workspace_root,
-                cwd=cwd,
-                container_root=container_root,
-            ),
+            container_cwd,
         ]
         if settings.execute_docker_memory_mb > 0:
             docker_argv.extend(["--memory", f"{settings.execute_docker_memory_mb}m"])
@@ -220,24 +245,22 @@ class DockerBackend:
         docker_argv.extend(self._container_env_args(env))
         docker_argv.append(settings.execute_docker_image)
         docker_argv.extend(argv)
-        return docker_argv
+        return docker_argv, container_cwd
 
     def run(
         self,
         *,
         argv: list[str],
         cwd: Path,
+        workspace_root: Path,
         timeout_ms: int,
         env: dict[str, str] | None = None,
         max_output_bytes: int = 65536,
     ) -> SandboxResult:
         resolved_cwd = Path(cwd).resolve()
-        workspace_root = (get_tool_workspace_root() or resolved_cwd).resolve()
-        if not resolved_cwd.is_relative_to(workspace_root):
-            workspace_root = resolved_cwd
         command_display = " ".join(argv)
         effective_env = env if env is not None else build_scrubbed_env()
-        docker_argv = self._build_docker_argv(
+        docker_argv, container_cwd = self._build_docker_argv(
             argv=argv,
             workspace_root=workspace_root,
             cwd=resolved_cwd,
@@ -258,12 +281,15 @@ class DockerBackend:
             return _truncate_process_output(
                 command_display=command_display,
                 cwd=resolved_cwd,
+                backend="docker",
+                workspace_root=workspace_root,
                 stdout_raw=completed.stdout or "",
                 stderr_raw=completed.stderr or "",
                 exit_code=int(completed.returncode),
                 timed_out=False,
                 start=start,
                 max_output_bytes=max_output_bytes,
+                container_cwd=container_cwd,
             )
         except subprocess.TimeoutExpired as exc:
             stdout_raw = ""
@@ -279,17 +305,22 @@ class DockerBackend:
             return _truncate_process_output(
                 command_display=command_display,
                 cwd=resolved_cwd,
+                backend="docker",
+                workspace_root=workspace_root,
                 stdout_raw=stdout_raw,
                 stderr_raw=stderr_raw,
                 exit_code=-1,
                 timed_out=True,
                 start=start,
                 max_output_bytes=max_output_bytes,
+                container_cwd=container_cwd,
             )
         except FileNotFoundError:
             return _truncate_process_output(
                 command_display=command_display,
                 cwd=resolved_cwd,
+                backend="docker",
+                workspace_root=workspace_root,
                 stdout_raw="",
                 stderr_raw=(
                     "Docker executable not found on PATH. Install Docker Desktop/Engine "
@@ -299,6 +330,7 @@ class DockerBackend:
                 timed_out=False,
                 start=start,
                 max_output_bytes=max_output_bytes,
+                container_cwd=container_cwd,
             )
 
 
