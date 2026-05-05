@@ -38,6 +38,9 @@ def test_run_sandboxed_command_returns_completed_process_output(monkeypatch) -> 
     assert result.stdout == "ok"
     assert result.timed_out is False
     assert result.cwd == str(repo_root.resolve())
+    assert result.backend == "subprocess"
+    assert result.workspace_root == str(repo_root.resolve())
+    assert result.container_cwd is None
     assert captured["args"][0] == ["pytest", "-q"]
     assert captured["kwargs"]["shell"] is False
     assert result.stdout_truncated is False
@@ -92,6 +95,75 @@ def test_run_sandboxed_command_truncates_large_output(monkeypatch) -> None:
     assert result.stdout.endswith("[truncated]")
 
 
+def test_run_sandboxed_command_rejects_missing_cwd_before_backend(monkeypatch) -> None:
+    repo_root = Path(__file__).resolve().parent.parent
+    missing_cwd = repo_root / "missing-cwd"
+
+    def _unexpected_run(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("backend should not be called for invalid cwd")
+
+    monkeypatch.setattr(subprocess, "run", _unexpected_run)
+
+    with tool_workspace_root(repo_root):
+        result = run_sandboxed_command(
+            argv=["pytest"],
+            cwd=missing_cwd,
+            timeout_ms=1000,
+            backend="subprocess",
+        )
+
+    assert result.exit_code == 126
+    assert result.backend == "subprocess"
+    assert result.workspace_root == str(repo_root.resolve())
+    assert result.cwd == str(missing_cwd.resolve())
+    assert "Working directory does not exist" in result.stderr
+
+
+def test_run_sandboxed_command_rejects_workspace_escape_before_backend(monkeypatch) -> None:
+    repo_root = Path(__file__).resolve().parent.parent
+    outside_cwd = repo_root.parent
+
+    def _unexpected_run(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("backend should not be called for workspace escape")
+
+    monkeypatch.setattr(subprocess, "run", _unexpected_run)
+
+    with tool_workspace_root(repo_root):
+        result = run_sandboxed_command(
+            argv=["pytest"],
+            cwd=outside_cwd,
+            timeout_ms=1000,
+            backend="docker",
+        )
+
+    assert result.exit_code == 126
+    assert result.backend == "docker"
+    assert result.workspace_root == str(repo_root.resolve())
+    assert result.cwd == str(outside_cwd.resolve())
+    assert "outside the allowed workspace" in result.stderr
+
+
+def test_run_sandboxed_command_subprocess_handles_missing_executable(monkeypatch) -> None:
+    repo_root = Path(__file__).resolve().parent.parent
+
+    def _raise_missing_binary(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise FileNotFoundError("missing-binary")
+
+    monkeypatch.setattr(subprocess, "run", _raise_missing_binary)
+
+    result = run_sandboxed_command(
+        argv=["missing-binary"],
+        cwd=repo_root,
+        timeout_ms=1000,
+        backend="subprocess",
+    )
+
+    assert result.exit_code == 127
+    assert result.backend == "subprocess"
+    assert result.workspace_root == str(repo_root.resolve())
+    assert "Executable not found" in result.stderr
+
+
 def test_run_sandboxed_command_docker_backend_builds_expected_argv(monkeypatch) -> None:
     repo_root = Path(__file__).resolve().parent.parent
     nested_cwd = repo_root / "src"
@@ -111,7 +183,7 @@ def test_run_sandboxed_command_docker_backend_builds_expected_argv(monkeypatch) 
     monkeypatch.setattr(subprocess, "run", _fake_run)
 
     with tool_workspace_root(repo_root):
-        run_sandboxed_command(
+        result = run_sandboxed_command(
             argv=["pytest", "-q", "tests/test_config.py"],
             cwd=nested_cwd,
             timeout_ms=1000,
@@ -125,6 +197,9 @@ def test_run_sandboxed_command_docker_backend_builds_expected_argv(monkeypatch) 
 
     docker_argv = captured["args"][0]
 
+    assert result.backend == "docker"
+    assert result.workspace_root == str(repo_root.resolve())
+    assert result.container_cwd == "/workspace/src"
     assert docker_argv[:2] == ["docker", "run"]
     assert "--rm" in docker_argv
     assert "--network" in docker_argv
@@ -198,5 +273,7 @@ def test_run_sandboxed_command_docker_backend_handles_missing_docker_binary(
         )
 
     assert result.exit_code == 127
+    assert result.backend == "docker"
+    assert result.workspace_root == str(repo_root.resolve())
     assert result.timed_out is False
     assert "Docker executable not found" in result.stderr

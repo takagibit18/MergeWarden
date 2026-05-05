@@ -46,8 +46,9 @@
 
 1. LLM 产生 tool_calls → **高危门控**通过与否；
 2. **`RunCommandTool` / `RunTestsTool`** → **`exec_policy.resolve_command`**（及 `validate_extra_args` 等）；
-3. **`ExecBackend.run`**（默认 `LocalSubprocessBackend`：`subprocess.run(argv, shell=False)` + 环境清洗 + 输出截断）；
-4. 返回 **`SandboxResult`**（含 stdout/stderr 及截断标志）。
+3. **`run_sandboxed_command`** 统一解析 `workspace_root` 与 `cwd`，拒绝缺失目录、非目录与 workspace 逃逸；
+4. **`ExecBackend.run`**（默认 `LocalSubprocessBackend`：`subprocess.run(argv, shell=False)` + 环境清洗 + 输出截断）；
+5. 返回 **`SandboxResult`**（含 stdout/stderr、截断标志、后端与工作区观测字段）。
 
 ```mermaid
 flowchart TD
@@ -55,8 +56,9 @@ flowchart TD
     Gate["_is_high_risk_allowed (CI / plan / confirm)"]
     Tool[RunCommandTool / RunTestsTool]
     Policy["exec_policy: resolve_command / validate_extra_args"]
+    Scope["sandbox: resolve workspace_root / cwd"]
     Backend["ExecBackend.run (subprocess | docker)"]
-    Result[SandboxResult + truncation flags]
+    Result[SandboxResult + truncation / observability fields]
     Err[记录为 security 类别]
 
     Plan --> Gate
@@ -64,7 +66,9 @@ flowchart TD
     Gate -- allowed --> Tool
     Tool --> Policy
     Policy -- not allowed --> Err
-    Policy --> Backend
+    Policy --> Scope
+    Scope -- invalid cwd --> Result
+    Scope --> Backend
     Backend --> Result
 ```
 
@@ -76,7 +80,7 @@ flowchart TD
 |------|-----------|
 | 首词白名单、argv 解析、`git` 子命令只读限制、禁止 token、`extra_args` 校验、输出截断工具函数 | `src/security/exec_policy.py` |
 | 后端协议、本地 subprocess 实现、环境清洗、Docker backend 实现 | `src/security/backends.py` |
-| 按 `execute_backend` 派发、统一 `SandboxResult`（含 `stdout_truncated` / `stderr_truncated` 等） | `src/security/sandbox.py` |
+| 按 `execute_backend` 派发、集中解析 `workspace_root` / `cwd`、统一 `SandboxResult`（含 `backend` / `workspace_root` / `container_cwd` / 截断字段等） | `src/security/sandbox.py` |
 | 命令不允许异常类型 | `src/tools/exceptions.py` → `CommandNotAllowedError` |
 | `run_command` / `run_tests` 实现 | `src/tools/run_command_tool.py`、`src/tools/run_tests_tool.py` |
 | 默认注册表是否包含 execute | `src/tools/__init__.py` → `create_default_registry(include_execute=...)` |
@@ -127,8 +131,10 @@ flowchart TD
 
 ### 6.5 工作目录
 
-- 命令工作目录应限制在 **workspace 根目录内**（与既有 `ensure_path_allowed` 等路径策略一致），避免任意路径执行。
-- Docker backend 会将当前 workspace root bind-mount 到 `EXECUTE_DOCKER_WORKDIR`，并把 host `cwd` 映射为容器内相对路径后执行。
+- 工具层继续使用 `ensure_path_allowed` 做前置路径约束；沙箱入口还会集中解析 `workspace_root` 与 `cwd`，作为 `subprocess` / `docker` 共享的最终执行边界。
+- `workspace_root` 优先来自编排层通过 `tool_workspace_root` 注入的请求仓库根；未注入时退回到解析后的 `cwd`。
+- `cwd` 必须存在、是目录、且位于 `workspace_root` 内；不满足时不进入后端，返回 `SandboxResult(exit_code=126)`，stderr 写明缺失目录、非目录或 workspace 逃逸原因。
+- Docker backend 始终将解析后的 workspace root bind-mount 到 `EXECUTE_DOCKER_WORKDIR`，并把 host `cwd` 映射为容器内相对路径后执行；不再在后端内部改写 workspace root 兜底。
 
 ### 6.6 环境变量清洗
 
@@ -143,8 +149,15 @@ flowchart TD
 ### 6.8 编排层门控与错误分类
 
 - 高危门控未通过时不得执行；策略拒绝使用 **`CommandNotAllowedError`**，并在错误流中 **`category="security"`**，便于监控与审计。
+- 沙箱运行时错误使用结构化 `SandboxResult` 表达：`126` 表示执行范围无效，`127` 表示本地可执行文件或 Docker 可执行文件不存在；命令自身的非 0 退出码保持原始 exit code。
 
-### 6.9 模式隔离
+### 6.9 可观测字段
+
+- `SandboxResult.backend`：实际执行后端（`subprocess` 或 `docker`）。
+- `SandboxResult.workspace_root`：本次沙箱执行使用的 host workspace 根。
+- `SandboxResult.container_cwd`：Docker 后端中的容器工作目录；本地后端为 `null`。
+
+### 6.10 模式隔离
 
 - **Review**：不向模型暴露 execute 工具名，减少误调用与攻击面。
 - **Debug**：在 `execute_enabled` 为 true 时注册 execute 工具。
@@ -160,8 +173,9 @@ flowchart TD
 
 1. 构建执行镜像：`docker build -f Dockerfile.execute -t mergewarden-execute:latest .`
 2. 设置环境变量：`EXECUTE_BACKEND=docker`
-3. 运行 execute 级 smoke test：`pytest -q tests/test_docker_backend_smoke.py -rs`
-4. 预期结果：命令在容器内执行，stdout/stderr 仍按 `SandboxResult` 结构返回，超时和缺失 Docker 可得到结构化错误。
+3. 启用真实 Docker smoke：`RUN_DOCKER_TESTS=1`
+4. 运行 execute 级 smoke test：`pytest -q tests/test_docker_backend_smoke.py -rs`
+5. 预期结果：命令在容器内执行，stdout/stderr 仍按 `SandboxResult` 结构返回，超时和缺失 Docker 可得到结构化错误。
 
 ---
 

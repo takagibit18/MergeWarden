@@ -32,4 +32,7 @@ def test_run_sandboxed_command_executes_inside_docker() -> None:
         )
 
     assert result.exit_code == 0, result.stderr
+    assert result.backend == "docker"
+    assert result.workspace_root == str(repo_root.resolve())
+    assert result.container_cwd == "/workspace"
     assert "2 passed" in result.stdout or "3 passed" in result.stdout

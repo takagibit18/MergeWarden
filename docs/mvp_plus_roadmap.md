@@ -1,257 +1,86 @@
-# MVP+ 完整落地路线图
+# MVP+ 路线图与相对当前 MVP 的优化项
 
-> 本文档定义：当前版本已经具备什么、完整 MVP+ 必须交付什么、哪些能力明确留到 Phase 2，以及每个 MVP+ 里程碑的验收方式。  
-> 与 [project_plan.md](project_plan.md) 互补：`project_plan` 记录总体方向，本文记录 **从当前版本走到完整 MVP+ 的可执行落盘规划**。
-
----
-
-## 1. 当前版本基线
-
-当前版本已经超过最小 MVP，具备以下可直接依赖的基础能力：
-
-- **CLI 产品入口**：`review` / `debug` 子命令，输出结构化 `ReviewResponse` / `DebugResponse`。
-- **五阶段 Agent 编排**：prepare -> analyze -> execute -> process -> continue/stop；支持多轮工具反馈、轮次上限、token 预算与 finalize-only 收口。
-- **上下文管理**：按优先级截断、diff hunk / 文件粒度装载、`project_structure`、按需 `file_contents`、溢出块 LLM 摘要与 `truncated.summarized` 可观测字段。
-- **工具与安全**：只读工具、Debug-only execute 工具、首词白名单、`shell=False`、环境清洗、输出截断、高危门控、CI 默认拒绝 execute。
-- **Docker execute 后端**：`DockerBackend` 已通过本地 `docker run` 执行预构建镜像，复用 workspace/cwd 校验、容器内 cwd 映射、`SandboxResult` 观测字段。
-- **契约与输出**：canonical `location` 解析、`ReviewReport` / `DebugResponse` Pydantic 模型、CLI 可消费的稳定 JSON 结构。
-- **评测与回归**：`eval/` Golden fixtures、manifest、runner、report、gate、CI artifact 上传已经存在。
-- **CI 基础流水线**：ruff、mypy、pytest、golden eval、eval gate 已接入 GitHub Actions。
-
-仍需注意的基线风险：
-
-- 部分规划文档仍滞后于代码现状，例如 Docker 后端状态、容器内执行口径、未来 API 入口。
-- CI gate 当前对 `hit_rate` 的阈值仍偏宽松，尚未形成真正质量门禁。
-- Docker 能执行命令，但还缺面向用户的一键 CLI demo 闭环。
+> 本文档记录：**当前 MVP 已覆盖什么**、**MVP+ 阶段希望加强什么**（相对现状的增量），便于排期与对齐口径。  
+> 与 `[project_plan.md](project_plan.md)` 中的路线互补：前者偏整体规划，本文偏 **MVP 之后的具体优化清单**。
 
 ---
 
-## 2. 完整 MVP+ 完成定义
+## 1. 当前 MVP（基线）
 
-完整 MVP+ 的目标不是增加大量新产品线，而是在当前 MVP 基础上补齐 **可交付、可验证、可运维、可展示** 的闭环。
+与仓库现状一致，大致包括：
 
-达到完整 MVP+ 时，必须同时满足：
-
-1. **CLI 稳定路径**：`review` / `debug` 有清晰 demo、错误处理和结构化输出，能作为主产品入口展示。
-2. **同步 FastAPI 薄层**：提供 `GET /health`、`POST /review`、`POST /debug`，复用现有 orchestrator 与 Pydantic 请求/响应模型，不引入 job queue 或持久状态。
-3. **Docker CLI demo 闭环**：以 `docker compose run --rm agent python cli.py ...` 作为主 demo 路径，文档中给出可复制命令和预期结果。
-4. **观测与降级收口**：run_id、phase 事件、工具失败、submit 校验失败、终止原因可排查；用户看到的 stop reason 不误导。
-5. **温和 eval gate**：CI gate 至少约束 `schema_validity_rate >= 1.0`、`hit_rate >= 0.6`、`false_positive_rate <= 0.5`。
-6. **文档一致性**：README、architecture、project plan、shared contracts、execute design、env example 与代码现状一致。
-
-MVP+ 不要求：
-
-- 自动修复代码并提交补丁。
-- 支持完整多用户平台、数据库、任务队列或长期作业状态。
-- 在 CI 中默认真实运行 Docker execute smoke；该测试保持手动启用。
+- CLI + 五阶段编排；Review / Debug 结构化输出（`severity`、`location`、`evidence`、`suggestion` 等）。
+- 只读工具与工作区约束；可复现的最小运行路径与基础工程骨架。
+- **Execute 类工具（Debug 可见）**：`run_command` / `run_tests`；首词白名单、`shlex` argv 化、`shell=False`、环境清洗、输出截断；可插拔后端默认 `subprocess`，`docker` 已作为本地 `docker run` 后端落地；编排层高危门控与 `EXECUTE_*` 配置见 [execute_tools_design.md](execute_tools_design.md)、[shared_contracts.md](shared_contracts.md) §2 / §6。
+- 评测与 Golden 管线（`eval/`）作为 **质量与回归的配套能力**，而非产品本体。
+- 成功标准侧重：**可跑通、可复现、行为与契约一致**（见 `project_plan.md` §1.4）；评测集用于约束迭代，不单独定义「产品完成度」。
 
 ---
 
-## 3. MVP+ 非目标与 Phase 2 边界
+## 2. MVP+ 指什么
 
-以下能力不纳入完整 MVP+ 完成标准，只作为 Phase 2 或更后续阶段：
-
-| 能力 | 阶段 | 边界说明 |
-|------|------|----------|
-| GitHub Action / Bot PR 自动评论 | Phase 2 | MVP+ 只准备稳定 CLI/API/评测/文档，PR 评论、review thread、check conclusion 策略后移。 |
-| PR webhook / GitHub App | Phase 2 | 当前不引入 webhook server、installation token、权限矩阵或 GitHub App 配置。 |
-| PR 评论去重与更新 | Phase 2 | 不在 MVP+ 内设计 inline comment lifecycle。 |
-| IDE 插件 | Later | `project_plan.md` 已定义为有余力再做，MVP+ 不规划实现。 |
-| 异步任务 API / job queue | Later | FastAPI 只做同步薄层；长任务、状态存储和后台 worker 后移。 |
-
-Phase 2 启动前置条件：
-
-- MVP+ 的 CLI 与 FastAPI 输出契约稳定。
-- eval gate 能可靠阻止明显退化。
-- README 能让新用户本地或 Docker 跑通 demo。
-- 事件日志足以复盘一次失败 review/debug。
+**MVP+**：在 MVP 可演示、可交付的基础上，系统性提升 **可靠性、工程化、可运维性、体验与安全边界**；评测与指标是其中 **支撑迭代与门禁** 的一环，与编排、工具、契约、部署等 **并列**，不作为 MVP+ 的唯一叙事主线。
 
 ---
 
-## 4. MVP+ 里程碑
+## 3. 相对当前 MVP 的优化项（待办/方向）
 
-### M+0 文档与基线校准
+下列为增量清单，**不承诺一次性做完**，实施时拆 Issue。条目按 **能力域** 归纳，力求各模块篇幅与深度大致相当；**与其他文档的对照**见 §3.2，**上下文实现摘要**见 §3.3。
 
-**目标**：消除规划文档与当前代码的明显冲突，建立可信基线。
+### 3.1 各能力域总览
 
-**任务**
 
-- 将 Docker 后端状态统一为“已落地为本地 `docker run` 后端”，不再写 stub。
-- 在路线图中明确 FastAPI、Docker demo、eval gate、观测收口是 MVP+ 剩余主线。
-- 标出 `architecture.md`、`project_plan.md`、`shared_contracts.md` 中需要后续同步的过期口径。
+| 能力域                | MVP+ 增量方向（摘要）                                                                                                                                                               |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **编排与资源**          | Token 预算与迭代轮次；`stop:*` 与 `errors` 的展示优先级（例如与 `budget_exhausted` 同时成立时）可优化，避免误导；**输入侧**长上下文已由 Analyzer 侧预算 + 混合摘要承接（见 §3.3），编排层仍可关注展示与终止语义一致性。                                                                        |
+| **Analyzer / 上下文** | **已落地**：优先级截断 + **溢出块** LLM 摘要（`ContextCompressor`、`truncate_with_summary`）；环境变量 `CONTEXT_SUMMARY_ENABLED`、`SUMMARY_MAX_TOKENS_PER_PART`；用户 JSON 中 `truncated.summarized` 与摘要内容 `[SUMMARIZED]` 前缀。**仍待办**：`ContextBuilder.load_diff` 与「工作区全量 diff」语义对齐；连续工具失败 / 空结果的降级路径与 `analyzer_dev_plan` 一致细化。              |
+| **生产路径与提示**        | 非稀疏场景下：`AgentOrchestrator.analyze` 接入 `**project_structure`、按需 `file_contents`**；工具目标不存在时的回退提示；`SYSTEM_PROMPT_REVIEW` 与沙箱 `repo_path`、工具路径语义一致；生产侧「先探明目录」等约束与评测侧已部分缓解的策略对齐。 |
+| **路径与沙箱**          | 相对路径相对 workspace 解析、上下文写明工作区根（已部分实现）；稀疏沙箱与完整仓库行为对齐，避免「评测能过、生产行为漂移」。                                                                                                         |
+| **工具与安全**          | **已落地**：execute 管道（`exec_policy` + `backends` + `sandbox`）、`run_command` / `run_tests`、Review 不暴露 execute、Debug 注册、`EXECUTE_*` 与输出截断；Docker 后端真实执行、workspace/cwd 一致校验、`SandboxResult` 可观测字段；高危门控与 CI 拒绝与 [cli_tools_orchestrator_contract.md](cli_tools_orchestrator_contract.md) §11 一致。**仍待办**：与 `project_plan` §6「容器内跑测」的一键 demo / 交付路径最终对齐、可选命令/策略的更细粒度审计。 |
+| **契约与输出**          | Review 的 `location` 语义清晰化；`submit_review` / `ReviewReport` 校验失败可观测（日志与降级）；协议演进时同步 CLI 与配套文档。                                                                                |
+| **观测与调试**          | 结构化日志、失败原因（如 `submit_review` 校验失败）更易排查；事件日志 phase 粒度可按需补全。                                                                                                                  |
+| **交付与 CI**         | Docker 一键 demo；CI 与本地流水线一致（与 `project_plan` 中 W2/W3 等里程碑对齐）。                                                                                                                |
+| **可选服务层**          | FastAPI 薄层（`project_plan` §2 方案 B），与现有 CLI 能力等价、可观测性不降级。                                                                                                                    |
+| **评测与回归**          | 维持可复现的主指标与报告形态；Golden/爬虫侧标注质量与「可证伪缺陷」约束；**指标扩展、辅助维度与人工复核流程** 见 `eval/README.md`，本路线图不展开细则。                                                                                  |
 
-**验收**
 
-- `docs/mvp_plus_roadmap.md` 能独立说明当前版本与完整 MVP+ 的差距。
-- 文档中没有将已实现 Docker 后端描述为 stub。
+### 3.2 与其他文档的对照（简要）
 
-**验证**
+以下从各专项文档梳理，**与 §3.1 可能重叠**，仅作索引；具体条款以各文档为准。
 
-- 人工检查路线图与 `src/security/backends.py`、`src/config.py`、`.github/workflows/ci.yml` 口径一致。
 
-### M+1 Docker CLI demo 闭环
+| 文档                                             | 与 MVP+ 相关的典型章节 / 备注                      |
+| ---------------------------------------------- | ---------------------------------------- |
+| `[project_plan.md](project_plan.md)`           | §2 路线（FastAPI、Docker）、§3.4 评测策略、§4.2 里程碑 |
+| `[analyzer_dev_plan.md](analyzer_dev_plan.md)` | §1.2 差距项、§2.3 上下文截断与摘要、§2.4 终止与降级        |
+| `[error_log.md](error_log.md)`                 | 稀疏沙箱、review pipeline、生产路径待办              |
+| `[architecture.md](architecture.md)`           | 分层、工具安全、可观测性、上下文预算                       |
+| `[eval/README.md](../eval/README.md)`          | 指标定义、黄金集策略、人工可接受度                        |
+| `[shared_contracts.md](shared_contracts.md)`   | Review/Debug 字段与配置；`EXECUTE_*`；协议变更时联动实现与文档          |
+| `[execute_tools_design.md](execute_tools_design.md)` | execute 类工具设计思路、安全规范与实现锚点（与 §2.1、§3.1「工具与安全」对照） |
+| `[cli_tools_orchestrator_contract.md](cli_tools_orchestrator_contract.md)` | §11 高危工具矩阵；execute 工具 argv/白名单/截断等补充条款 |
 
-**目标**：让新用户用 Docker 跑通一个可展示的 CLI 路径。
+### 3.3 上下文窗口管理（当前实现摘要）
 
-**任务**
+相对纯优先级截断，上下文已升级为 **两层混合策略**（详见 `[analyzer_dev_plan.md](analyzer_dev_plan.md)` §2.3）：
 
-- 明确主 demo 命令：`docker compose run --rm agent python cli.py review --help` 与至少一个 review/debug 示例。
-- 更新 README Docker 章节，说明 `.env`、API key、挂载目录、预期输出。
-- 保留真实 execute Docker smoke 为手动测试：`RUN_DOCKER_TESTS=1 pytest -q tests/test_docker_backend_smoke.py -rs`。
+| 层级 | 行为 | 说明 |
+|------|------|------|
+| 第一层 | `ContextBuilder.truncate_context` | 按 `context_priority` 全序贪心装入，预算由 `PROMPT_INPUT_TOKEN_BUDGET`（`Settings.prompt_input_token_budget`）约束可截断块。 |
+| 第二层 | `truncate_with_summary` + `ContextCompressor` | 仅当第一层溢出、存在被丢弃块时，对丢弃块调用与主分析 **同一模型** 生成摘要，再二次装入预算；可通过 `CONTEXT_SUMMARY_ENABLED=false` 关闭，仅保留截断。 |
+| 可观测性 | 用户 JSON `truncated` | 除 `any` / `diff_hunks` / `files` / `error_log` / `structure` 外，增加 **`summarized`**（被摘要的原始块标识）；摘要正文带 **`[SUMMARIZED]`** 前缀。 |
 
-**验收**
-
-- 用户只看 README 即可知道如何用 Docker 跑 CLI demo。
-- Docker demo 不要求真实 PR bot，也不要求 FastAPI。
-
-**验证**
-
-```bash
-docker compose run --rm agent python cli.py review --help
-docker compose run --rm agent python cli.py debug --help
-```
-
-### M+2 FastAPI 同步薄层
-
-**目标**：提供与 CLI 能力等价的最小 HTTP 入口，便于后续 Phase 2 集成。
-
-**任务**
-
-- 新增同步 FastAPI app，最小接口：
-  - `GET /health`：返回服务状态、版本、默认模型名。
-  - `POST /review`：接收 `ReviewRequest` JSON，返回 `ReviewResponse` JSON。
-  - `POST /debug`：接收 `DebugRequest` JSON，返回 `DebugResponse` JSON。
-- HTTP 层只做参数校验、异常转译和 JSON 返回，不改 Agent 核心编排。
-- API 默认不做交互式高危确认；execute 工具仍遵循现有高危门控与 CI/plan-mode 策略。
-- 补充依赖、测试和启动文档，例如 `uvicorn src.api.app:app --reload`。
-
-**验收**
-
-- CLI 与 API 共用同一套请求/响应模型，不维护两份协议。
-- API 错误以稳定 JSON 返回，包含可读 `message`，模型/工具失败不泄露敏感环境变量。
-
-**验证**
-
-- 使用 `TestClient` 覆盖 `/health`、`/review`、`/debug`。
-- 至少覆盖模型客户端不可用时的降级响应。
-
-### M+3 观测与降级收口
-
-**目标**：让失败路径可以复盘，让用户看到的终止原因准确。
-
-**任务**
-
-- 补齐关键 phase 的 `phase_start` / `phase_end` 事件，至少覆盖 analyze、execute_tools、format_result、continue。
-- 将 `submit_review` / `submit_debug` schema 校验失败记录为结构化事件，包含 run_id、phase、错误类别和降级路径。
-- 收口终止原因优先级：hard budget > blocking schema/runtime error > max iterations > model completed > no tools needed。
-- 将连续工具失败 / 空结果的降级策略写入 `analyzer_dev_plan.md` 和实际实现任务。
-
-**验收**
-
-- 一次失败运行能通过 event log 还原：输入上下文摘要、模型调用、工具调用、失败原因、最终 stop reason。
-- CLI verbose 输出或 JSON context 中的 errors 与 stop reason 不互相矛盾。
-
-**验证**
-
-- 单测覆盖 schema 校验失败、工具连续失败、budget hard cap、max iteration stop。
-- 手动检查 `.mergewarden/logs/<run_id>.jsonl` 的事件顺序。
-
-### M+4 Eval gate 温和门禁
-
-**目标**：让 CI 中的 Golden eval 真正阻止明显质量退化。
-
-**任务**
-
-- 将 GitHub Actions 中 eval gate 调整为：
-  - `--schema-validity-min 1.0`
-  - `--hit-rate-min 0.6`
-  - `--false-positive-rate-max 0.5`
-- 在 `eval/README.md` 中说明该阈值是 MVP+ 温和门禁，不是最终质量目标。
-- 保持 eval artifact 上传，失败时可查看 machine report、human review 模板和 event logs。
-
-**验收**
-
-- CI 不再接受 schema 无效输出。
-- hit rate 明显退化时 CI 会失败。
-- false positive rate 超过阈值时 CI 会失败。
-
-**验证**
-
-```bash
-python -m eval.run eval --suite golden --output-json eval/outputs/ci_report.json
-python -m eval.gate --report eval/outputs/ci_report.json --schema-validity-min 1.0 --hit-rate-min 0.6 --false-positive-rate-max 0.5
-```
-
-### M+5 契约与文档一致性
-
-**目标**：让对外文档、架构文档、契约文档和代码行为一致。
-
-**任务**
-
-- 更新 `architecture.md`：Docker 后端不再是 stub；FastAPI 从 optional routes 变为 MVP+ 薄层目标。
-- 更新 `project_plan.md`：MVP+ 包含 FastAPI 薄层、Docker CLI demo、温和 eval gate；Phase 2 才包含 GitHub Bot。
-- 更新 `shared_contracts.md`：`EXECUTE_BACKEND=docker` 描述为可用后端，并补齐 Docker 配置项与 `SandboxResult` 观测字段。
-- 更新 `.env.example` 与 README：补 FastAPI、Docker demo、eval gate、Docker smoke 说明。
-
-**验收**
-
-- 搜索 `docker stub`、`当前 stub`、`hit-rate-min 0.0` 等过期口径，不应再出现在当前文档中。
-- README 能作为新用户入口，docs 能作为开发者入口。
-
-**验证**
-
-```bash
-Select-String -Path docs\*.md,README.md,.env.example -Pattern 'docker stub','当前 stub','hit-rate-min 0.0'
-```
-
-### M+6 MVP+ Release 验收
-
-**目标**：形成可展示、可复现、可评测的 MVP+ 版本。
-
-**任务**
-
-- 跑通本地验证、Docker CLI demo、FastAPI smoke、Golden eval。
-- 生成一份端到端演示记录：输入仓库或 fixture、命令、run_id、输出摘要、eval report 链接。
-- 将剩余未完成事项移动到 Phase 2 backlog，不混入 MVP+ 完成标准。
-
-**验收**
-
-- 新用户可以在 README 指引下跑通本地或 Docker demo。
-- 开发者可以根据 docs 了解架构、契约、安全边界和评测门禁。
-- CI 能阻止格式和基础质量退化。
-
-**验证**
-
-```bash
-ruff check --no-cache .
-mypy src/
-pytest -q
-python -m eval.run eval --suite golden --output-json eval/outputs/ci_report.json
-python -m eval.gate --report eval/outputs/ci_report.json --schema-validity-min 1.0 --hit-rate-min 0.6 --false-positive-rate-max 0.5
-docker compose run --rm agent python cli.py review --help
-```
+**未纳入本阶段**（仍属 MVP+ 可选增量）：多轮 `tool` 反馈链路的「微压缩」式占位替换、413 应急压缩等；与对话型产品不同，当前以单次 prepare 侧预算为主。
 
 ---
 
-## 5. 最终验收清单
+## 4. 评测说明
 
-完整 MVP+ 发布前逐项确认：
-
-- [ ] CLI `review` / `debug` 本地可运行，并有 README 示例。
-- [ ] Docker CLI demo 可运行，并有明确预期输出。
-- [ ] FastAPI `GET /health`、`POST /review`、`POST /debug` 有测试与文档。
-- [ ] `SandboxResult`、execute 后端、Docker 配置在契约文档中描述一致。
-- [ ] 事件日志能复盘失败原因和终止原因。
-- [ ] CI gate 使用温和门禁：schema 1.0、hit rate 0.6、false positive 0.5。
-- [ ] Golden eval report 与 human review artifact 可查看。
-- [ ] README、architecture、project plan、shared contracts、execute design 口径一致。
-- [ ] Phase 2 backlog 清晰列出 GitHub Action/Bot、PR 评论、IDE 插件等后续事项。
+评测用于 **回归与门禁**：主指标（如基于 `location_pattern` 与 severity 的 `hit_rate`）保持简单、可自动化；若需更细粒度语义一致性，可采用辅助指标或人工抽样，**口径与候选方案以 `[eval/README.md](../eval/README.md)` 为准**。本路线图将评测视为质量配套，不在此重复指标表与实现细节。
 
 ---
 
-## 6. 维护规则
+## 5. 维护
 
-- 涉及工具安全、Docker 后端、execute 策略时，必须同步 `execute_tools_design.md`、`shared_contracts.md` 和本路线图。
-- 涉及 API 请求/响应字段时，必须同步 Pydantic 模型、FastAPI 测试、CLI/API 文档和 eval fixture。
-- 涉及 eval gate 阈值时，必须同步 `.github/workflows/ci.yml`、`eval/README.md` 和 release 验收清单。
-- 涉及 Phase 2 能力时，只能写入 Phase 2 backlog；不得改变 MVP+ 完成标准，除非重新修订本文档的完成定义。
+- 本文档随 MVP+ 讨论更新；重大口径变更时同步更新 `eval/README.md` 与 `shared_contracts.md`（若涉及）。涉及 execute 工具策略或安全边界时，同步更新 [execute_tools_design.md](execute_tools_design.md) 与 [cli_tools_orchestrator_contract.md](cli_tools_orchestrator_contract.md) §11。**文档交叉索引**见 §3.2；**上下文实现细节**见 §3.3 与 `analyzer_dev_plan.md` §2.3。
+
