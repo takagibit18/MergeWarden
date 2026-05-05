@@ -12,6 +12,7 @@ from src.tools.base import ToolSafety
 from src.tools.exceptions import (
     CommandExecutionToolError,
     CommandNotAllowedError,
+    PathNotAllowedError,
 )
 from src.tools.run_tests_tool import RunTestsTool
 
@@ -24,6 +25,8 @@ def _stub_sandbox(monkeypatch, *, exit_code: int = 0, stdout: str = ""):
         return SandboxResult(
             command=" ".join(kwargs["argv"]),
             cwd=str(kwargs["cwd"]),
+            backend=kwargs.get("backend", ""),
+            workspace_root=str(kwargs["cwd"]),
             exit_code=exit_code,
             stdout=stdout,
             stderr="",
@@ -84,6 +87,37 @@ def test_run_tests_tool_uses_configured_docker_backend(monkeypatch) -> None:
     asyncio.run(tool.execute(framework="pytest", cwd=str(repo_root)))
 
     assert captured["backend"] == "docker"
+
+
+def test_run_tests_tool_returns_observable_sandbox_fields(monkeypatch) -> None:
+    tool = RunTestsTool()
+    repo_root = Path(__file__).resolve().parent.parent
+    captured = _stub_sandbox(monkeypatch)
+
+    result = asyncio.run(tool.execute(framework="pytest", cwd=str(repo_root)))
+
+    assert captured["backend"] == "subprocess"
+    assert result["backend"] == "subprocess"
+    assert result["workspace_root"] == str(repo_root.resolve())
+    assert result["container_cwd"] is None
+
+
+def test_run_tests_tool_blocks_path_outside_workspace_before_sandbox(monkeypatch) -> None:
+    tool = RunTestsTool()
+    allowed_root = Path(__file__).resolve().parent
+    outside_dir = Path(__file__).resolve().parent.parent / "src"
+
+    def _unexpected_sandbox(**kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("sandbox should not be called for workspace escape")
+
+    monkeypatch.setattr(Path, "cwd", lambda: allowed_root)
+    monkeypatch.setattr(
+        "src.tools.run_tests_tool.run_sandboxed_command",
+        _unexpected_sandbox,
+    )
+
+    with pytest.raises(PathNotAllowedError):
+        asyncio.run(tool.execute(framework="pytest", cwd=str(outside_dir)))
 
 
 def test_extra_args_rejects_network_flag() -> None:

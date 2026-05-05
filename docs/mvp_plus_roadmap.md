@@ -11,7 +11,7 @@
 
 - CLI + 五阶段编排；Review / Debug 结构化输出（`severity`、`location`、`evidence`、`suggestion` 等）。
 - 只读工具与工作区约束；可复现的最小运行路径与基础工程骨架。
-- **Execute 类工具（Debug 可见）**：`run_command` / `run_tests`；首词白名单、`shlex` argv 化、`shell=False`、环境清洗、输出截断；可插拔后端默认 `subprocess`，`docker` 为 stub；编排层高危门控与 `EXECUTE_*` 配置见 [execute_tools_design.md](execute_tools_design.md)、[shared_contracts.md](shared_contracts.md) §2 / §6。
+- **Execute 类工具（Debug 可见）**：`run_command` / `run_tests`；首词白名单、`shlex` argv 化、`shell=False`、环境清洗、输出截断；可插拔后端默认 `subprocess`，`docker` 已作为本地 `docker run` 后端落地；编排层高危门控与 `EXECUTE_*` 配置见 [execute_tools_design.md](execute_tools_design.md)、[shared_contracts.md](shared_contracts.md) §2 / §6。
 - 评测与 Golden 管线（`eval/`）作为 **质量与回归的配套能力**，而非产品本体。
 - 成功标准侧重：**可跑通、可复现、行为与契约一致**（见 `project_plan.md` §1.4）；评测集用于约束迭代，不单独定义「产品完成度」。
 
@@ -36,7 +36,7 @@
 | **Analyzer / 上下文** | **已落地**：优先级截断 + **溢出块** LLM 摘要（`ContextCompressor`、`truncate_with_summary`）；环境变量 `CONTEXT_SUMMARY_ENABLED`、`SUMMARY_MAX_TOKENS_PER_PART`；用户 JSON 中 `truncated.summarized` 与摘要内容 `[SUMMARIZED]` 前缀。**仍待办**：`ContextBuilder.load_diff` 与「工作区全量 diff」语义对齐；连续工具失败 / 空结果的降级路径与 `analyzer_dev_plan` 一致细化。              |
 | **生产路径与提示**        | 非稀疏场景下：`AgentOrchestrator.analyze` 接入 `**project_structure`、按需 `file_contents`**；工具目标不存在时的回退提示；`SYSTEM_PROMPT_REVIEW` 与沙箱 `repo_path`、工具路径语义一致；生产侧「先探明目录」等约束与评测侧已部分缓解的策略对齐。 |
 | **路径与沙箱**          | 相对路径相对 workspace 解析、上下文写明工作区根（已部分实现）；稀疏沙箱与完整仓库行为对齐，避免「评测能过、生产行为漂移」。                                                                                                         |
-| **工具与安全**          | **已落地**：execute 管道（`exec_policy` + `backends` + `sandbox`）、`run_command` / `run_tests`、Review 不暴露 execute、Debug 注册、`EXECUTE_*` 与输出截断；高危门控与 CI 拒绝与 [cli_tools_orchestrator_contract.md](cli_tools_orchestrator_contract.md) §11 一致。**仍待办**：Docker 后端真实实现（当前 stub）、与 `project_plan` §6「容器内跑测」的最终对齐、可选命令/策略的更细粒度审计与可观测性字段。 |
+| **工具与安全**          | **已落地**：execute 管道（`exec_policy` + `backends` + `sandbox`）、`run_command` / `run_tests`、Review 不暴露 execute、Debug 注册、`EXECUTE_*` 与输出截断；Docker 后端真实执行、workspace/cwd 一致校验、`SandboxResult` 可观测字段；高危门控与 CI 拒绝与 [cli_tools_orchestrator_contract.md](cli_tools_orchestrator_contract.md) §11 一致。**仍待办**：与 `project_plan` §6「容器内跑测」的一键 demo / 交付路径最终对齐、可选命令/策略的更细粒度审计。 |
 | **契约与输出**          | Review 的 `location` 语义清晰化；`submit_review` / `ReviewReport` 校验失败可观测（日志与降级）；协议演进时同步 CLI 与配套文档。                                                                                |
 | **观测与调试**          | 结构化日志、失败原因（如 `submit_review` 校验失败）更易排查；事件日志 phase 粒度可按需补全。                                                                                                                  |
 | **交付与 CI**         | Docker 一键 demo；CI 与本地流水线一致（与 `project_plan` 中 W2/W3 等里程碑对齐）。                                                                                                                |
