@@ -80,15 +80,22 @@ python -m eval.run report --input eval/outputs/<timestamp>_report.json
 
 ### MVP+ 温和门禁
 
-CI 使用温和 gate 阻止明显退化，而不是作为最终质量目标：
+CI 使用温和 gate 阻止明显退化，而不是作为最终质量目标。当前 `suite=golden`
+暂为纯负样本，过渡阶段只约束 schema 与 false positive：
+
+```bash
+python -m eval.gate --report eval/outputs/ci_report.json --schema-validity-min 1.0 --hit-rate-min 0.0 --false-positive-rate-max 0.5
+```
+
+- `schema_validity_rate >= 1.0`：结构化输出必须全部合法。
+- `hit_rate >= 0.0`：纯负样本阶段不强制命中率。
+- `false_positive_rate <= 0.5`：误报率超过 50% 时阻断。
+
+补齐人工审核过的 `suite=golden` 正样本后，应恢复：
 
 ```bash
 python -m eval.gate --report eval/outputs/ci_report.json --schema-validity-min 1.0 --hit-rate-min 0.6 --false-positive-rate-max 0.5
 ```
-
-- `schema_validity_rate >= 1.0`：结构化输出必须全部合法。
-- `hit_rate >= 0.6`：关键问题命中率低于 60% 时阻断。
-- `false_positive_rate <= 0.5`：误报率超过 50% 时阻断。
 
 ## 产物说明
 
