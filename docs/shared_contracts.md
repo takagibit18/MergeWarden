@@ -158,10 +158,15 @@ CLI、未来 API 与 CI 校验应只依赖上述稳定字段；**增删字段** 
 | `PERMISSION_MODE` | 权限模式（`default` \| `plan`） | 默认 `default`；`plan` 模式禁止执行工具，仅生成计划与结构化输出 |
 | `CI` | 常见 CI 环境变量 | 设为 `true`/`1`/`yes` 时，编排层对 `write`/`execute` 工具默认拒绝（与 [cli_tools_orchestrator_contract.md](./cli_tools_orchestrator_contract.md) §11 一致） |
 | `EXECUTE_ENABLED` | execute 类工具全局开关 | 默认 `true`；置 `false` 时即便 Debug 模式也不注册 `run_command` / `run_tests` |
-| `EXECUTE_BACKEND` | execute 工具后端实现 | `subprocess`（默认）/ `docker`（当前仅接口 stub，调用抛 `NotImplementedError`） |
+| `EXECUTE_BACKEND` | execute 工具后端实现 | `subprocess`（默认）/ `docker`（本地 `docker run` 后端，挂载统一 workspace root） |
 | `EXECUTE_ALLOWED_COMMANDS` | `run_command` 首词白名单 | 逗号分隔；默认 `python,pytest,pip,node,npm,ruff,mypy,git`；`git` 子命令再限于 `status/diff/log/show/rev-parse` |
 | `EXECUTE_DEFAULT_TIMEOUT_MS` | execute 工具默认超时 | 默认 `30000`，可由工具入参覆盖 |
 | `EXECUTE_MAX_OUTPUT_BYTES` | stdout/stderr 各自字节上限 | 默认 `65536`；超限时截断并置 `SandboxResult.*_truncated=True` |
+| `EXECUTE_DOCKER_IMAGE` | Docker execute 后端镜像 | 默认 `mergewarden-execute:latest`；需先构建 `Dockerfile.execute` |
+| `EXECUTE_DOCKER_WORKDIR` | 容器内 workspace 挂载目录 | 默认 `/workspace`；容器 cwd 按宿主 cwd 相对 workspace 映射 |
+| `EXECUTE_DOCKER_NETWORK` | Docker execute 网络模式 | 默认 `none` |
+| `EXECUTE_DOCKER_MEMORY_MB` | Docker execute 内存限制 | 默认 `0`，表示不设置限制 |
+| `EXECUTE_DOCKER_CPUS` | Docker execute CPU 限制 | 默认 `0`，表示不设置限制 |
 
 新增全局配置项时，应更新 `Settings`、`.env.example`（如有）及本文档或 README。
 
@@ -215,4 +220,5 @@ CLI、未来 API 与 CI 校验应只依赖上述稳定字段；**增删字段** 
 |------|------|
 | 2026-04-09 | 初稿：工具、状态、Review 输出、配置、观测与协作流程 |
 | 2026-04-12 | Debug 输出协议定稿落地；补充编排相关环境变量（轮次、token、事件日志、CI 与高危工具） |
-| 2026-04-17 | execute 工具硬化：argv + 首词白名单、pluggable backend（subprocess/docker stub）、输出截断、Review 模式不暴露 execute 工具；新增 `EXECUTE_*` 环境变量 |
+| 2026-04-17 | execute 工具硬化：argv + 首词白名单、pluggable backend（subprocess/docker）、输出截断、Review 模式不暴露 execute 工具；新增 `EXECUTE_*` 环境变量 |
+| 2026-05-06 | MVP+ 最小闭环：FastAPI 同步薄层、Docker CLI demo、eval gate `hit_rate >= 0.6`；Docker execute 后端口径更新为已落地 |

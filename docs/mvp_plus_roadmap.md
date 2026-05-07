@@ -195,13 +195,13 @@ python -m eval.gate --report eval/outputs/ci_report.json --schema-validity-min 1
 
 **验收**
 
-- 搜索 `docker stub`、`当前 stub`、`hit-rate-min 0.0` 等过期口径，不应再出现在当前文档中。
+- 搜索 Docker 后端仍为占位实现、旧 hit-rate 阈值等过期口径，不应再出现在当前文档中。
 - README 能作为新用户入口，docs 能作为开发者入口。
 
 **验证**
 
 ```bash
-Select-String -Path docs\*.md,README.md,.env.example -Pattern 'docker stub','当前 stub','hit-rate-min 0.0'
+Select-String -Path docs\*.md,README.md,.env.example -Pattern '占位实现','旧 hit-rate 阈值'
 ```
 
 ### M+6 MVP+ Release 验收
