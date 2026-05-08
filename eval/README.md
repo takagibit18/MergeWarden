@@ -61,12 +61,12 @@ general audit of the pre-diff repository.
 When `diff_mode=True`, the eval measures review quality for the submitted diff.
 File reads are contextual evidence only.
 
-The planned robust fixture shape is `PR diff + repo snapshot`: the runner should
-restore a full temporary repository at the relevant commit, pass the PR diff as
-the review target, and let read-only tools inspect unchanged context only when
-needed. Expected review comments must still map back to changed lines or changed
-hunks. This keeps eval aligned with PR review rather than turning it into a
-general repository audit.
+The robust fixture shape is `PR diff + repo snapshot`: when `input.workspace`
+is present with `kind="git"`, the runner restores a full temporary repository
+at `checkout_sha`, passes the PR diff as the review target, and lets read-only
+tools inspect unchanged context only when needed. Expected review comments must
+still map back to changed lines or changed hunks. Legacy `input.files` remains
+supported as a sparse offline fallback.
 
 ### 补充维度：公开 benchmark
 

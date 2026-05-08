@@ -27,7 +27,9 @@ class ExpectedIssue(BaseModel):
     """Expected issue annotation for one fixture."""
 
     severity: Severity = Field(default=Severity.WARNING)
-    location_pattern: str = Field(default="", description="Loose pattern matched in issue location.")
+    location_pattern: str = Field(
+        default="", description="Loose pattern matched in issue location."
+    )
     path: str = Field(
         default="",
         description="Canonical repo-relative path for semantic location matching.",
@@ -47,12 +49,24 @@ class ExpectedResult(BaseModel):
     is_empty_annotation: bool = Field(default=False)
 
 
+class FixtureWorkspace(BaseModel):
+    """Workspace restoration metadata for a review fixture."""
+
+    kind: Literal["git"] = Field(default="git")
+    repo_url: str = Field(..., min_length=1)
+    base_sha: str = Field(default="")
+    head_sha: str = Field(default="")
+    checkout_sha: str = Field(..., min_length=1)
+    diff_base_sha: str = Field(default="")
+
+
 class FixtureInput(BaseModel):
     """Input payload used by runner."""
 
     diff_text: str = Field(default="")
     files: dict[str, str] = Field(default_factory=dict)
     error_log: str | None = Field(default=None)
+    workspace: FixtureWorkspace | None = Field(default=None)
 
 
 class FixtureMeta(BaseModel):
@@ -183,7 +197,9 @@ class MetricSummary(BaseModel):
         return cls(
             schema_validity_rate=valid_count / len(results),
             hit_rate=(matched_total / expected_total) if expected_total else 0.0,
-            pass_at_k_hit_rate=(matched_total / expected_total) if expected_total else 0.0,
+            pass_at_k_hit_rate=(matched_total / expected_total)
+            if expected_total
+            else 0.0,
             mean_hit_rate=(matched_total / expected_total) if expected_total else 0.0,
             hit_rate_stddev=0.0,
             false_positive_rate=(
@@ -202,7 +218,9 @@ class MetricSummary(BaseModel):
         )
 
     @classmethod
-    def from_sampled_results(cls, sampled_results: list[SampledFixtureResult]) -> "MetricSummary":
+    def from_sampled_results(
+        cls, sampled_results: list[SampledFixtureResult]
+    ) -> "MetricSummary":
         if not sampled_results:
             return cls()
 
@@ -221,9 +239,13 @@ class MetricSummary(BaseModel):
         return cls(
             schema_validity_rate=float(mean(schema_valid_values)),
             hit_rate=float(mean(mean_hit_values)) if mean_hit_values else 0.0,
-            pass_at_k_hit_rate=float(mean(pass_at_k_values)) if pass_at_k_values else 0.0,
+            pass_at_k_hit_rate=float(mean(pass_at_k_values))
+            if pass_at_k_values
+            else 0.0,
             mean_hit_rate=float(mean(mean_hit_values)) if mean_hit_values else 0.0,
-            hit_rate_stddev=float(pstdev(mean_hit_values)) if len(mean_hit_values) > 1 else 0.0,
+            hit_rate_stddev=float(pstdev(mean_hit_values))
+            if len(mean_hit_values) > 1
+            else 0.0,
             false_positive_rate=float(mean(mean_fp_values)),
             mean_false_positive_rate=float(mean(mean_fp_values)),
             sampling_k=max(item.samples for item in sampled_results),
@@ -270,4 +292,3 @@ class FixtureManifest(BaseModel):
 
     generated_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
     entries: list[FixtureManifestEntry] = Field(default_factory=list)
-

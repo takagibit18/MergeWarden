@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from eval.schemas import FixtureInput, FixtureSource
+from eval.schemas import FixtureInput, FixtureSource, FixtureWorkspace
 
 DIFF_FILE_HEADER = re.compile(r"^diff --git a/(.+?) b/(.+)$")
 HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
@@ -88,12 +88,17 @@ def parse_unified_diff(diff_text: str) -> list[DiffFileChange]:
     return items
 
 
-def build_fixture_input(diff_text: str, file_contents: dict[str, str]) -> FixtureInput:
+def build_fixture_input(
+    diff_text: str,
+    file_contents: dict[str, str],
+    *,
+    workspace: FixtureWorkspace | None = None,
+) -> FixtureInput:
     """Create `FixtureInput` from diff and fetched file snapshots."""
     parsed = parse_unified_diff(diff_text)
     relevant_paths = {item.effective_path for item in parsed if item.effective_path}
     files = {path: file_contents.get(path, "") for path in sorted(relevant_paths)}
-    return FixtureInput(diff_text=diff_text, files=files)
+    return FixtureInput(diff_text=diff_text, files=files, workspace=workspace)
 
 
 def build_fixture_source(
@@ -112,4 +117,3 @@ def build_fixture_source(
         merge_commit_sha=merge_commit_sha,
         title=title,
     )
-

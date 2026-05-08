@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 from eval.runner import (
     _aggregate_sampled_result,
+    _prepare_fixture_workspace,
     _is_empty_business_output,
     _match_issues,
     _persist_event_log_to_outputs,
     _semantic_location_matches,
+    _validate_expected_locations_against_diff,
     _resolve_event_log_path,
     _resolve_fixture_paths,
     _sanitize_fixture_id_for_filename,
@@ -21,7 +24,54 @@ from src.analyzer.output_formatter import ReviewIssue, ReviewReport, Severity
 from src.analyzer.schemas import ReviewResponse
 
 
-def test_resolve_event_log_path_returns_existing_file(monkeypatch, tmp_path: Path) -> None:
+def _git(cwd: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def _build_source_repo(tmp_path: Path) -> tuple[Path, str, str, str]:
+    source = tmp_path / "source"
+    source.mkdir()
+    _git(source, "init")
+    _git(source, "config", "user.email", "eval@example.com")
+    _git(source, "config", "user.name", "Eval Test")
+    package_dir = source / "pkg"
+    package_dir.mkdir()
+    (package_dir / "module.py").write_text(
+        "from .helper import normalize\n\ndef parse(value):\n    return value\n",
+        encoding="utf-8",
+    )
+    (package_dir / "helper.py").write_text(
+        "def normalize(value):\n    return value.strip()\n",
+        encoding="utf-8",
+    )
+    _git(source, "add", ".")
+    _git(source, "commit", "-m", "base")
+    base_sha = _git(source, "rev-parse", "HEAD")
+
+    (package_dir / "module.py").write_text(
+        "from .helper import normalize\n\n"
+        "def parse(value):\n"
+        "    return normalize(value)\n",
+        encoding="utf-8",
+    )
+    _git(source, "add", ".")
+    _git(source, "commit", "-m", "head")
+    head_sha = _git(source, "rev-parse", "HEAD")
+    diff_text = _git(source, "diff", f"{base_sha}..{head_sha}")
+    return source, base_sha, head_sha, diff_text
+
+
+def test_resolve_event_log_path_returns_existing_file(
+    monkeypatch, tmp_path: Path
+) -> None:
     monkeypatch.setenv("EVENT_LOG_DIR", ".mergewarden/logs")
     repo_root = tmp_path / "repo"
     repo_root.mkdir(parents=True)
@@ -34,7 +84,9 @@ def test_resolve_event_log_path_returns_existing_file(monkeypatch, tmp_path: Pat
     assert resolved == str(log_path)
 
 
-def test_resolve_event_log_path_returns_none_when_missing(monkeypatch, tmp_path: Path) -> None:
+def test_resolve_event_log_path_returns_none_when_missing(
+    monkeypatch, tmp_path: Path
+) -> None:
     monkeypatch.setenv("EVENT_LOG_DIR", ".mergewarden/logs")
     repo_root = tmp_path / "repo"
     repo_root.mkdir(parents=True)
@@ -92,6 +144,119 @@ def test_resolve_fixture_paths_prefers_manifest(tmp_path: Path) -> None:
     assert len(fixtures) == 1
 
 
+def test_fixture_input_accepts_git_workspace_metadata() -> None:
+    fixture = Fixture.model_validate(
+        {
+            "id": "workspace-fixture",
+            "type": "review",
+            "source": {"repo_full_name": "example/repo", "pr_number": 1},
+            "input": {
+                "diff_text": "",
+                "files": {},
+                "workspace": {
+                    "kind": "git",
+                    "repo_url": "https://github.com/example/repo.git",
+                    "base_sha": "base",
+                    "head_sha": "head",
+                    "checkout_sha": "head",
+                    "diff_base_sha": "base",
+                },
+            },
+            "expected": {"issues": []},
+        }
+    )
+
+    assert fixture.input.workspace is not None
+    assert fixture.input.workspace.kind == "git"
+    assert fixture.input.workspace.checkout_sha == "head"
+
+
+def test_prepare_fixture_workspace_restores_git_snapshot(tmp_path: Path) -> None:
+    source, base_sha, head_sha, diff_text = _build_source_repo(tmp_path)
+    fixture = Fixture.model_validate(
+        {
+            "id": "workspace-fixture",
+            "type": "review",
+            "source": {"repo_full_name": "example/repo", "pr_number": 1},
+            "input": {
+                "diff_text": diff_text,
+                "files": {},
+                "workspace": {
+                    "kind": "git",
+                    "repo_url": str(source),
+                    "base_sha": base_sha,
+                    "head_sha": head_sha,
+                    "checkout_sha": head_sha,
+                    "diff_base_sha": base_sha,
+                },
+            },
+            "expected": {"issues": []},
+        }
+    )
+
+    workspace = _prepare_fixture_workspace(fixture, tmp_path / "workspace")
+
+    assert _git(workspace, "rev-parse", "HEAD") == head_sha
+    assert "return normalize(value)" in (workspace / "pkg" / "module.py").read_text(
+        encoding="utf-8"
+    )
+    assert (workspace / "pkg" / "helper.py").exists()
+
+
+def test_validate_expected_locations_against_diff_requires_changed_workspace_line(
+    tmp_path: Path,
+) -> None:
+    source, base_sha, head_sha, diff_text = _build_source_repo(tmp_path)
+    fixture = Fixture.model_validate(
+        {
+            "id": "workspace-fixture",
+            "type": "review",
+            "source": {"repo_full_name": "example/repo", "pr_number": 1},
+            "input": {
+                "diff_text": diff_text,
+                "files": {},
+                "workspace": {
+                    "kind": "git",
+                    "repo_url": str(source),
+                    "base_sha": base_sha,
+                    "head_sha": head_sha,
+                    "checkout_sha": head_sha,
+                    "diff_base_sha": base_sha,
+                },
+            },
+            "expected": {
+                "issues": [
+                    {
+                        "path": "pkg/module.py",
+                        "line": 4,
+                        "end_line": 4,
+                        "description": "normalize hides invalid whitespace.",
+                    }
+                ]
+            },
+        }
+    )
+    workspace = _prepare_fixture_workspace(fixture, tmp_path / "workspace")
+
+    assert _validate_expected_locations_against_diff(fixture, workspace) == []
+
+    bad_fixture = fixture.model_copy(
+        update={
+            "expected": fixture.expected.model_copy(
+                update={
+                    "issues": [
+                        fixture.expected.issues[0].model_copy(update={"line": 99})
+                    ]
+                }
+            )
+        }
+    )
+    errors = _validate_expected_locations_against_diff(bad_fixture, workspace)
+
+    assert errors
+    assert "pkg/module.py:99" in errors[0]
+
+
 def test_semantic_location_matches_with_overlap() -> None:
     class _Expected:
         path = "src/main.py"
@@ -107,7 +272,9 @@ def test_sampled_metrics_exclude_empty_fixtures_from_hit_rate() -> None:
         fixture_id="positive",
         fixture_type="review",
         expected_count=1,
-        runs=[EvalResult(fixture_id="positive", fixture_type="review", expected_count=1)],
+        runs=[
+            EvalResult(fixture_id="positive", fixture_type="review", expected_count=1)
+        ],
         pass_at_k_hit_rate=0.0,
         mean_hit_rate=0.0,
         schema_valid_rate=1.0,
@@ -238,7 +405,9 @@ def test_match_issues_ignores_low_confidence_warning_false_positive() -> None:
 
 def test_golden_fixture_distribution_has_required_buckets() -> None:
     real = load_fixtures(Path("eval") / "fixtures", suite="golden", reviewed_only=True)
-    synth = load_fixtures(Path("eval") / "fixtures", suite="golden_synth", reviewed_only=True)
+    synth = load_fixtures(
+        Path("eval") / "fixtures", suite="golden_synth", reviewed_only=True
+    )
 
     assert {fixture.id for fixture in real} == {
         "golden_astral-sh_ruff_pr24648",
