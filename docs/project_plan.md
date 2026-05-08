@@ -41,11 +41,11 @@
 | 方案 | 描述 | 适用阶段 |
 |------|------|----------|
 | A | CLI 核心（review/debug 子命令） | MVP 首选 |
-| B | FastAPI 薄服务层 | MVP+ |
+| B | FastAPI 同步薄服务层 | MVP+ |
 | C | GitHub Action/Bot（PR 自动评论） | Phase 2 |
 | D | IDE 插件 | 有余力再做 |
 
-推荐路径：A →（薄）B → C。
+推荐路径：A → B → C。MVP+ 完成前需要 CLI、FastAPI 薄层、Docker CLI demo 与温和 eval gate 均可验证；GitHub Action/Bot 留到 Phase 2。
 
 ---
 
@@ -53,7 +53,7 @@
 
 ### 3.1 分层
 
-- 入口层：CLI（可选 FastAPI）
+- 入口层：CLI + FastAPI 同步薄层
 - 编排层：5 阶段 Agent 循环
 - 工具层：Tool Calling（readonly/write/execute）
 - 服务层：状态管理、上下文压缩、可观测性
@@ -99,7 +99,7 @@
 | W1 | 仓库骨架、CLI 调模型、基础 review 路径 |
 | W2 | 读文件/diff 接入、debug 原型、Docker |
 | W3 | 工具执行策略、评测 v0、文档完善 |
-| W4+ | FastAPI 薄层或 GitHub 集成（二选一） |
+| W4+ | FastAPI 薄层、Docker CLI demo、温和 eval gate；GitHub 集成进入 Phase 2 |
 
 ---
 

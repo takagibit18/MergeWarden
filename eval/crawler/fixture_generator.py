@@ -10,7 +10,7 @@ from time import perf_counter
 from typing import Iterable, Literal
 
 from eval.crawler.annotator import LLMAnnotator
-from eval.crawler.github_client import GithubCrawlerClient, PullRequestCandidate
+from eval.crawler.github_client import CandidateMode, GithubCrawlerClient, PullRequestCandidate
 from eval.crawler.pr_parser import build_fixture_input, build_fixture_source, parse_unified_diff
 from eval.schemas import Fixture, FixtureManifest, FixtureManifestEntry, FixtureMeta
 
@@ -48,6 +48,7 @@ class FixtureGenerator:
         max_prs_per_repo: int = 5,
         curated_repos: list[str] | None = None,
         concurrency: int = 3,
+        candidate_mode: CandidateMode = "merged-bugfix",
     ) -> list[Path]:
         """Discover PRs and create fixture files."""
         existing_keys = self._load_existing_keys()
@@ -62,6 +63,7 @@ class FixtureGenerator:
             max_repos=max_repos,
             max_prs_per_repo=max_prs_per_repo,
             curated_repos=curated_repos,
+            candidate_mode=candidate_mode,
         )
 
         pending_candidates: list[PullRequestCandidate] = []
@@ -94,6 +96,8 @@ class FixtureGenerator:
                 "issues_draft": 0,
                 "issues_after_critique": 0,
                 "fixture_written": False,
+                "candidate_mode": candidate.candidate_mode,
+                "evidence_source_count": candidate.evidence_source_count,
                 "duration_ms": 0,
             }
             try:
@@ -142,8 +146,9 @@ class FixtureGenerator:
             entry["fixture_written"] = True
             crawl_entries.append(entry)
 
-        self._write_manifest(self._iter_fixture_files())
-        self._write_review_checklist(self._iter_fixture_files())
+        if written_paths:
+            self._write_manifest(self._iter_fixture_files())
+            self._write_review_checklist(self._iter_fixture_files())
         self._write_crawl_log(
             started_at=started_at,
             requested_repos=requested_repos,
@@ -170,7 +175,15 @@ class FixtureGenerator:
             candidate.repo_full_name, candidate.pr_number
         )
 
-        ref = candidate.merge_commit_sha or candidate.head_sha or candidate.base_sha
+        if candidate.candidate_mode == "rejected-pr":
+            if not candidate.head_sha:
+                raise RuntimeError(
+                    f"Rejected PR candidate {candidate.repo_full_name}#{candidate.pr_number} "
+                    "is missing head_sha."
+                )
+            ref = candidate.head_sha
+        else:
+            ref = candidate.merge_commit_sha or candidate.head_sha or candidate.base_sha
         file_contents: dict[str, str] = {}
         for file_item in files_payload:
             path = str(file_item.get("filename", "") or "")
@@ -187,6 +200,7 @@ class FixtureGenerator:
             pr_title=candidate.title,
             pr_body=str(pr_detail.get("body", "") or ""),
             diff_text=diff_text,
+            review_context="\n".join(candidate.rejection_evidence or []),
         )
         fixture_source = build_fixture_source(
             repo_full_name=candidate.repo_full_name,
@@ -198,6 +212,15 @@ class FixtureGenerator:
 
         parsed_files = parse_unified_diff(diff_text)
         fixture_id = f"{suite}_{candidate.repo_full_name.replace('/', '_')}_pr{candidate.pr_number}"
+        tags = ["github", "auto_discover", "llm_assisted"]
+        if candidate.candidate_mode == "rejected-pr":
+            tags = [
+                "github",
+                "rejected-pr",
+                "auto_discover",
+                "llm_assisted",
+                "should-detect",
+            ]
         fixture = Fixture(
             id=fixture_id.lower(),
             type="review",
@@ -206,7 +229,7 @@ class FixtureGenerator:
             expected=annotation,
             metadata=FixtureMeta(
                 suite=suite,
-                tags=["github", "auto_discover", "llm_assisted"],
+                tags=tags,
                 annotated_by="llm_draft",
                 reviewed=False,
                 difficulty=self._estimate_difficulty(parsed_files),

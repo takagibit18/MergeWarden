@@ -52,8 +52,38 @@ python cli.py debug --help
 ### Docker
 
 ```bash
-docker compose up --build
+# Build the CLI image.
+docker compose build agent
+
+# Run the same CLI entrypoints inside the container.
+docker compose run --rm agent python cli.py review --help
+docker compose run --rm agent python cli.py debug --help
 ```
+
+The compose service reads `.env` and mounts the current repository at `/app`.
+For a real review/debug run, copy `.env.example` to `.env`, set your OpenAI-compatible
+API credentials, then replace `--help` with the target path and options you want.
+The Docker execute backend smoke test is intentionally manual:
+
+```bash
+docker build -f Dockerfile.execute -t mergewarden-execute:latest .
+RUN_DOCKER_TESTS=1 pytest -q tests/test_docker_backend_smoke.py -rs
+```
+
+### FastAPI
+
+MVP+ includes a synchronous thin HTTP layer over the same orchestrator and
+Pydantic contracts used by the CLI.
+
+```bash
+uvicorn src.api.app:app --reload
+```
+
+Available endpoints:
+
+- `GET /health`
+- `POST /review`
+- `POST /debug`
 
 ## 项目结构
 
@@ -92,7 +122,7 @@ docker compose up --build
 ### 架构分层
 
 ```
-入口层    CLI (Click) · 可选 FastAPI 路由
+入口层    CLI (Click) · FastAPI 同步薄层
    ↓
 编排层    Agent 循环（5 阶段模式）
    ↓

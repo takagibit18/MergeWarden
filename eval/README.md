@@ -71,11 +71,33 @@ File reads are contextual evidence only.
 # 1) 自动抓取并生成 fixture（需要 GITHUB_TOKEN）
 python -m eval.run crawl --max-repos 5 --max-prs-per-repo 3
 
+# 1a) 生成 rejected PR 正样本候选（需要 GITHUB_TOKEN 与模型 API）
+python -m eval.run crawl --suite golden_candidates --candidate-mode rejected-pr --max-repos 5 --max-prs-per-repo 3 --min-expected-issues 1
+
 # 2) 跑评测（调用 AgentOrchestrator）
 python -m eval.run eval --suite golden
 
 # 3) 基于已有报告重新渲染终端输出
 python -m eval.run report --input eval/outputs/<timestamp>_report.json
+```
+
+### MVP+ 温和门禁
+
+CI 使用温和 gate 阻止明显退化，而不是作为最终质量目标。当前 `suite=golden`
+暂为纯负样本，过渡阶段只约束 schema 与 false positive：
+
+```bash
+python -m eval.gate --report eval/outputs/ci_report.json --schema-validity-min 1.0 --hit-rate-min 0.0 --false-positive-rate-max 0.5
+```
+
+- `schema_validity_rate >= 1.0`：结构化输出必须全部合法。
+- `hit_rate >= 0.0`：纯负样本阶段不强制命中率。
+- `false_positive_rate <= 0.5`：误报率超过 50% 时阻断。
+
+补齐人工审核过的 `suite=golden` 正样本后，应恢复：
+
+```bash
+python -m eval.gate --report eval/outputs/ci_report.json --schema-validity-min 1.0 --hit-rate-min 0.6 --false-positive-rate-max 0.5
 ```
 
 ## 产物说明

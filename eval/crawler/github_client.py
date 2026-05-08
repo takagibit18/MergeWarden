@@ -8,12 +8,17 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from dotenv import dotenv_values, load_dotenv
 
 BUG_HINT_PATTERN = re.compile(r"(fix|bug|vulnerability|security|regression)", re.IGNORECASE)
+REJECTION_HINT_PATTERN = re.compile(
+    r"(bug|incorrect|breaks?|fails?|failure|regression|security|race|leak|unsafe|"
+    r"missing\s+check|not\s+work|does\s+not\s+work)",
+    re.IGNORECASE,
+)
 # Extra hints when mining from a curated repo list (slightly broader than global search).
 CURATED_HINT_PATTERN = re.compile(
     r"(patch|hotfix|crash|hang|leak|exception|deadlock|race|overflow|segfault|timeout|"
@@ -29,6 +34,12 @@ DEP_BUMP_TITLE_PATTERN = re.compile(
     r"^\[security\]\s*bump|^update\s+\S+\s+from\s+\S+\s+to\s)",
     re.IGNORECASE,
 )
+FORMAT_ONLY_TITLE_PATTERN = re.compile(
+    r"(^style[:(]|^format[:(]|formatting only|prettier|black format|ruff format)",
+    re.IGNORECASE,
+)
+TRUSTED_AUTHOR_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR", "CONTRIBUTOR"}
+CandidateMode = Literal["merged-bugfix", "rejected-pr"]
 
 
 def _repo_root() -> Path:
@@ -74,6 +85,9 @@ class PullRequestCandidate:
     merge_commit_sha: str
     head_sha: str
     base_sha: str
+    candidate_mode: CandidateMode = "merged-bugfix"
+    rejection_evidence: list[str] | None = None
+    evidence_source_count: int = 0
 
 
 class GithubCrawlerClient:
@@ -289,6 +303,75 @@ class GithubCrawlerClient:
         payload = resp.json()
         return payload if isinstance(payload, list) else []
 
+    async def get_pull_request_issue_comments(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+        *,
+        per_page: int = 100,
+        page: int = 1,
+    ) -> list[dict[str, Any]]:
+        """List conversation comments attached to a PR issue thread."""
+        path = f"/repos/{repo_full_name}/issues/{pr_number}/comments"
+        resp = await self._get(
+            path,
+            params={
+                "per_page": max(1, min(100, per_page)),
+                "page": max(1, page),
+            },
+        )
+        if resp.status_code == 404:
+            return []
+        self._raise_api_error(resp, path)
+        payload = resp.json()
+        return payload if isinstance(payload, list) else []
+
+    async def get_pull_request_review_comments(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+        *,
+        per_page: int = 100,
+        page: int = 1,
+    ) -> list[dict[str, Any]]:
+        """List inline review comments for a PR."""
+        path = f"/repos/{repo_full_name}/pulls/{pr_number}/comments"
+        resp = await self._get(
+            path,
+            params={
+                "per_page": max(1, min(100, per_page)),
+                "page": max(1, page),
+            },
+        )
+        if resp.status_code == 404:
+            return []
+        self._raise_api_error(resp, path)
+        payload = resp.json()
+        return payload if isinstance(payload, list) else []
+
+    async def list_pull_request_reviews(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+        *,
+        per_page: int = 100,
+        page: int = 1,
+    ) -> list[dict[str, Any]]:
+        """List submitted reviews for a PR."""
+        path = f"/repos/{repo_full_name}/pulls/{pr_number}/reviews"
+        resp = await self._get(
+            path,
+            params={
+                "per_page": max(1, min(100, per_page)),
+                "page": max(1, min(100, page)),
+            },
+        )
+        if resp.status_code == 404:
+            return []
+        self._raise_api_error(resp, path)
+        payload = resp.json()
+        return payload if isinstance(payload, list) else []
+
     async def get_file_content(self, repo_full_name: str, path: str, ref: str) -> str:
         """Fetch raw file content from repository ref."""
         api_path = f"/repos/{repo_full_name}/contents/{path}"
@@ -310,8 +393,9 @@ class GithubCrawlerClient:
         min_changed_lines: int = 10,
         max_changed_lines: int = 500,
         curated_repos: list[str] | None = None,
+        candidate_mode: CandidateMode = "merged-bugfix",
     ) -> list[PullRequestCandidate]:
-        """Automatically discover merged bug-fix PR candidates."""
+        """Automatically discover PR candidates for fixture mining."""
         curated_mode = bool(curated_repos)
         if curated_repos:
             repos = [{"full_name": name} for name in curated_repos if name.strip()]
@@ -335,7 +419,10 @@ class GithubCrawlerClient:
             for pr in prs:
                 if picked >= max_prs_per_repo:
                     break
-                if not self._is_candidate(pr, curated=curated_mode):
+                if candidate_mode == "rejected-pr":
+                    if not self._is_rejected_pr_candidate(pr):
+                        continue
+                elif not self._is_candidate(pr, curated=curated_mode):
                     continue
                 # List pulls response often omits additions/deletions; only enforce size when present.
                 if "additions" in pr or "deletions" in pr:
@@ -351,6 +438,13 @@ class GithubCrawlerClient:
                 title = str(pr.get("title", "") or "")
                 if self._is_dependency_only_change(title, files):
                     continue
+                rejection_evidence: list[str] = []
+                if candidate_mode == "rejected-pr":
+                    rejection_evidence = await self._collect_rejection_evidence(
+                        full_name, pr_number
+                    )
+                    if not rejection_evidence:
+                        continue
                 candidates.append(
                     PullRequestCandidate(
                         repo_full_name=full_name,
@@ -361,6 +455,9 @@ class GithubCrawlerClient:
                         merge_commit_sha=str(pr.get("merge_commit_sha", "") or ""),
                         head_sha=str((pr.get("head") or {}).get("sha", "") or ""),
                         base_sha=str((pr.get("base") or {}).get("sha", "") or ""),
+                        candidate_mode=candidate_mode,
+                        rejection_evidence=rejection_evidence,
+                        evidence_source_count=len(rejection_evidence),
                     )
                 )
                 picked += 1
@@ -396,9 +493,65 @@ class GithubCrawlerClient:
         return False
 
     @staticmethod
+    def _is_rejected_pr_candidate(pr_payload: dict[str, Any]) -> bool:
+        merged_at = str(pr_payload.get("merged_at", "") or "").strip()
+        if merged_at:
+            return False
+        title = str(pr_payload.get("title", "") or "")
+        if DEP_BUMP_TITLE_PATTERN.search(title) or FORMAT_ONLY_TITLE_PATTERN.search(title):
+            return False
+        return True
+
+    async def _collect_rejection_evidence(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+    ) -> list[str]:
+        evidence: list[str] = []
+        evidence.extend(
+            self._trusted_problem_evidence(
+                source="issue_comment",
+                items=await self.get_pull_request_issue_comments(repo_full_name, pr_number),
+            )
+        )
+        evidence.extend(
+            self._trusted_problem_evidence(
+                source="review_comment",
+                items=await self.get_pull_request_review_comments(repo_full_name, pr_number),
+            )
+        )
+        evidence.extend(
+            self._trusted_problem_evidence(
+                source="review",
+                items=await self.list_pull_request_reviews(repo_full_name, pr_number),
+            )
+        )
+        return evidence
+
+    @staticmethod
+    def _trusted_problem_evidence(
+        *,
+        source: str,
+        items: list[dict[str, Any]],
+    ) -> list[str]:
+        evidence: list[str] = []
+        for item in items:
+            association = str(item.get("author_association", "") or "").upper()
+            if association not in TRUSTED_AUTHOR_ASSOCIATIONS:
+                continue
+            body = str(item.get("body", "") or "").strip()
+            if not body or not REJECTION_HINT_PATTERN.search(body):
+                continue
+            compact = " ".join(body.split())
+            evidence.append(f"{source} {association}: {compact[:500]}")
+        return evidence
+
+    @staticmethod
     def _is_dependency_only_change(title: str, files: list[dict[str, Any]]) -> bool:
         """Filter out dependency/CI-only PRs from the golden set."""
         if DEP_BUMP_TITLE_PATTERN.search(title or ""):
+            return True
+        if FORMAT_ONLY_TITLE_PATTERN.search(title or ""):
             return True
         if not files:
             return False
@@ -422,6 +575,8 @@ class GithubCrawlerClient:
         if path in {"package-lock.json", "yarn.lock", "pnpm-lock.yaml", "pipfile.lock"}:
             return True
         if path.startswith(".github/workflows/") and (path.endswith(".yml") or path.endswith(".yaml")):
+            return True
+        if path.startswith("docs/") or path.endswith((".md", ".rst", ".txt")):
             return True
         return False
 

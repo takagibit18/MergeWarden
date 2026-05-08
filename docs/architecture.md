@@ -4,7 +4,7 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│  Entry Layer:  CLI (Click)  ·  Optional FastAPI routes              │
+│  Entry Layer:  CLI (Click)  ·  FastAPI synchronous thin routes      │
 ├─────────────────────────────────────────────────────────────────────┤
 │  Orchestration Layer:  Agent loop (5-phase pattern)                 │
 │  · Phase 1: Context preparation (load relevant files / changes)     │
@@ -32,7 +32,7 @@
 
 | Layer | Package | Owner |
 |-------|---------|-------|
-| Entry | `cli.py` | Integration Agent |
+| Entry | `cli.py`, `src/api/` | Integration Agent |
 | Orchestration | `src/orchestrator/` | Shared |
 | Analyzer | `src/analyzer/` | Analyzer Agent |
 | Tools | `src/tools/` | Integration Agent |
@@ -57,7 +57,9 @@ Tools declare their safety level (`readonly` / `write` / `execute`).
 The executor uses this to decide concurrency and confirmation requirements.
 OpenAI-compatible **tool schemas** (registered tools plus `submit_*` pseudo-tools) are built in `src/orchestrator/tool_schemas.py` and passed into the inference layer by `AgentOrchestrator`.
 
-Execute-class tools (`run_command`, `run_tests`) use `src/security/exec_policy.py` for argv parsing and allowlists, `src/security/backends.py` for pluggable backends (default `subprocess`, `docker` stub), and `src/security/sandbox.py` as the dispatch entry. Debug-only registration and `EXECUTE_*` settings are documented in [execute_tools_design.md](./execute_tools_design.md) and [shared_contracts.md](./shared_contracts.md).
+FastAPI exposes a synchronous MVP+ API with `GET /health`, `POST /review`, and `POST /debug`. The HTTP layer reuses the same `ReviewRequest` / `DebugRequest` and `ReviewResponse` / `DebugResponse` Pydantic contracts as the CLI, and only handles request validation, stable JSON errors, and orchestrator dispatch.
+
+Execute-class tools (`run_command`, `run_tests`) use `src/security/exec_policy.py` for argv parsing and allowlists, `src/security/backends.py` for pluggable backends (default `subprocess`, optional `docker`), and `src/security/sandbox.py` as the dispatch entry. Debug-only registration and `EXECUTE_*` settings are documented in [execute_tools_design.md](./execute_tools_design.md) and [shared_contracts.md](./shared_contracts.md).
 
 ### Structured Output
 

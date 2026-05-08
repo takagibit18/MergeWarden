@@ -21,7 +21,7 @@
 仍需注意的基线风险：
 
 - 部分规划文档仍滞后于代码现状，例如 Docker 后端状态、容器内执行口径、未来 API 入口。
-- CI gate 当前对 `hit_rate` 的阈值仍偏宽松，尚未形成真正质量门禁。
+- CI 当前 `golden` suite 暂为纯负样本，因此本轮 gate 只约束 schema 与 false positive；`hit_rate >= 0.6` 等补充正样本后恢复。
 - Docker 能执行命令，但还缺面向用户的一键 CLI demo 闭环。
 
 ---
@@ -36,7 +36,7 @@
 2. **同步 FastAPI 薄层**：提供 `GET /health`、`POST /review`、`POST /debug`，复用现有 orchestrator 与 Pydantic 请求/响应模型，不引入 job queue 或持久状态。
 3. **Docker CLI demo 闭环**：以 `docker compose run --rm agent python cli.py ...` 作为主 demo 路径，文档中给出可复制命令和预期结果。
 4. **观测与降级收口**：run_id、phase 事件、工具失败、submit 校验失败、终止原因可排查；用户看到的 stop reason 不误导。
-5. **温和 eval gate**：CI gate 至少约束 `schema_validity_rate >= 1.0`、`hit_rate >= 0.6`、`false_positive_rate <= 0.5`。
+5. **温和 eval gate**：CI gate 至少约束 `schema_validity_rate >= 1.0` 与 `false_positive_rate <= 0.5`；当 `golden` suite 补齐正样本后，恢复 `hit_rate >= 0.6`。
 6. **文档一致性**：README、architecture、project plan、shared contracts、execute design、env example 与代码现状一致。
 
 MVP+ 不要求：
@@ -162,18 +162,42 @@ docker compose run --rm agent python cli.py debug --help
 
 **任务**
 
-- 将 GitHub Actions 中 eval gate 调整为：
+- 当前 `suite=golden` 只有负样本时，将 GitHub Actions 中 eval gate 设为：
   - `--schema-validity-min 1.0`
-  - `--hit-rate-min 0.6`
+  - `--hit-rate-min 0.0`
   - `--false-positive-rate-max 0.5`
-- 在 `eval/README.md` 中说明该阈值是 MVP+ 温和门禁，不是最终质量目标。
+- 在 `eval/README.md` 中说明当前阈值是过渡门禁；下一个最小闭环补充正样本后恢复 `--hit-rate-min 0.6`。
 - 保持 eval artifact 上传，失败时可查看 machine report、human review 模板和 event logs。
 
 **验收**
 
 - CI 不再接受 schema 无效输出。
-- hit rate 明显退化时 CI 会失败。
+- 纯负样本阶段不因缺少 expected issue 而错误阻塞 PR。
 - false positive rate 超过阈值时 CI 会失败。
+
+**验证**
+
+```bash
+python -m eval.run eval --suite golden --output-json eval/outputs/ci_report.json
+python -m eval.gate --report eval/outputs/ci_report.json --schema-validity-min 1.0 --hit-rate-min 0.0 --false-positive-rate-max 0.5
+```
+
+### M+4.1 Eval 正样本补齐与门禁恢复
+
+**目标**：让 `suite=golden` 同时包含人工审核过的正负样本，并恢复 `hit_rate >= 0.6` 门禁。
+
+**任务**
+
+- 至少补充 2-3 条人工审核过的真实 PR 正样本到 `suite=golden`，每条 expected issue 必须能从 diff 直接定位。
+- 更新 `manifest.json`，确保 CI 运行的 `suite=golden` 同时覆盖 `should-detect` 与 `zero-issue`。
+- 将 `.github/workflows/ci.yml` 的 eval gate 恢复为 `--hit-rate-min 0.6`。
+- 同步 `eval/README.md` 与本路线图中的门禁命令。
+
+**验收**
+
+- `suite=golden` 中至少有一条正样本和一条负样本。
+- `hit_rate >= 0.6` 在 CI 中重新生效。
+- 新增正样本的 `annotated_by` 为 `manual`，`reviewed` 为 `true`。
 
 **验证**
 
@@ -195,13 +219,13 @@ python -m eval.gate --report eval/outputs/ci_report.json --schema-validity-min 1
 
 **验收**
 
-- 搜索 `docker stub`、`当前 stub`、`hit-rate-min 0.0` 等过期口径，不应再出现在当前文档中。
+- 搜索 Docker 后端仍为占位实现、旧 hit-rate 阈值等过期口径，不应再出现在当前文档中。
 - README 能作为新用户入口，docs 能作为开发者入口。
 
 **验证**
 
 ```bash
-Select-String -Path docs\*.md,README.md,.env.example -Pattern 'docker stub','当前 stub','hit-rate-min 0.0'
+Select-String -Path docs\*.md,README.md,.env.example -Pattern '占位实现','旧 hit-rate 阈值'
 ```
 
 ### M+6 MVP+ Release 验收
@@ -227,7 +251,7 @@ ruff check --no-cache .
 mypy src/
 pytest -q
 python -m eval.run eval --suite golden --output-json eval/outputs/ci_report.json
-python -m eval.gate --report eval/outputs/ci_report.json --schema-validity-min 1.0 --hit-rate-min 0.6 --false-positive-rate-max 0.5
+python -m eval.gate --report eval/outputs/ci_report.json --schema-validity-min 1.0 --hit-rate-min 0.0 --false-positive-rate-max 0.5
 docker compose run --rm agent python cli.py review --help
 ```
 
@@ -242,7 +266,7 @@ docker compose run --rm agent python cli.py review --help
 - [ ] FastAPI `GET /health`、`POST /review`、`POST /debug` 有测试与文档。
 - [ ] `SandboxResult`、execute 后端、Docker 配置在契约文档中描述一致。
 - [ ] 事件日志能复盘失败原因和终止原因。
-- [ ] CI gate 使用温和门禁：schema 1.0、hit rate 0.6、false positive 0.5。
+- [ ] 当前 CI gate 使用过渡门禁：schema 1.0、hit rate 0.0、false positive 0.5；补齐 `golden` 正样本后恢复 hit rate 0.6。
 - [ ] Golden eval report 与 human review artifact 可查看。
 - [ ] README、architecture、project plan、shared contracts、execute design 口径一致。
 - [ ] Phase 2 backlog 清晰列出 GitHub Action/Bot、PR 评论、IDE 插件等后续事项。
