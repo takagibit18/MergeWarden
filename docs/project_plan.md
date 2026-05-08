@@ -11,7 +11,7 @@
 
 ### 1.1 项目目标
 
-- 构建可部署的 LLM Agent：对本地仓库或 PR 代码做结构化 Review，并辅助 Debug。
+- 构建可部署的 LLM Agent：对本地仓库或 PR 代码做结构化 Review，并辅助 Debug。PR Review 的产品定位是补充 CI 缺失的风险判断，而不是替代 CI 决定能否合并。
 - 在项目实践中覆盖：Tool Calling、多步推理、评测、Docker、CI、协作流程。
 - 通过可复现工程资产（文档、Issue、PR、评测）形成可展示的简历项目。
 
@@ -22,10 +22,12 @@
 - 输出：
   - Review：`severity/location/evidence/suggestion/confidence`
   - Debug：假设、验证步骤、最小修复建议
+- PR 集成形态：默认产出建议、soft check 或 review comment；硬性合并阻断仍由 GitHub CI / branch protection 承担。
 
 ### 1.3 非目标
 
 - 不承诺自动修复所有问题并直接通过 CI。
+- 不承诺作为用户仓库的 hard merge gate；Agent 可以提示风险，但不应抢 CI 的合并裁决权。
 - 首期不强制多智能体复杂编排，优先单 Agent + 清晰工具体系。
 
 ### 1.4 成功标准
@@ -71,15 +73,16 @@
 
 1. 工具 schema 化：所有工具输入输出可结构化验证。
 2. 5 阶段编排：prepare → analyze → execute → process → continue/stop。
-3. 按需上下文加载：默认 diff + 相关片段，必要时扩展。
+3. 按需上下文加载：默认 diff + changed files，必要时从完整 repo snapshot 工作区读取上下文。
 4. 结构化输出：统一报告模型，便于 CLI/API/CI 消费。
 5. 工具并发策略：只读可并发，写入串行，执行隔离。
 6. 失败可恢复：工具/模型异常时返回结构化降级结果。
 
 ### 3.4 评测策略（黄金集优先）
 
-- 主路径：自建 Golden Set（10-30 任务），固定 diff/日志/期望。
+- 主路径：自建 Golden Set（10-30 任务），review fixture 的长期目标形态为 PR diff + repo snapshot；运行时构建临时完整仓库，Agent 先看 diff 和 changed files，必要时查上下文文件。
 - 指标：格式合法率、命中率、误报率、人工可接受度、耗时与 token。
+- Review 命中目标：只考察本次 diff 引入、暴露或未修复的问题；inline 定位必须能回到 changed line / changed hunk。
 - 补充：公开 benchmark 仅做小样本外推，不与主评测口径混用。
 
 ---

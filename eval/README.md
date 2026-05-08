@@ -32,9 +32,9 @@ eval/
 
 ### 主路径：自建黄金集（Golden Set）
 
-- **素材来源**：自动发现小型活跃开源仓库，并筛选已合并 bugfix PR
-- **缺陷来源**：PR 语义（fix/bug/security 等）+ LLM 辅助标注 expected issues
-- **固定输入**：每条任务包含 diff / 相关文件片段 / 错误日志（可选），存入 `fixtures/`
+- **素材来源**：自动发现小型活跃开源仓库，并筛选已合并 bugfix PR 或被维护者指出问题的 closed/unmerged PR 候选
+- **缺陷来源**：PR diff、可信 review 证据与 LLM 辅助标注 expected issues；正式黄金集必须人工复核
+- **固定输入**：当前 fixture 包含 diff / 相关文件片段 / 错误日志（可选）；长期健壮形态见 [golden_fixture_snapshot_plan.md](../docs/golden_fixture_snapshot_plan.md)，目标是 PR diff + repo snapshot
 - **期望行为**：
   - 检出类：输出命中目标问题类别
   - 结构类：结构化输出通过 JSON Schema 校验
@@ -61,6 +61,13 @@ general audit of the pre-diff repository.
 When `diff_mode=True`, the eval measures review quality for the submitted diff.
 File reads are contextual evidence only.
 
+The planned robust fixture shape is `PR diff + repo snapshot`: the runner should
+restore a full temporary repository at the relevant commit, pass the PR diff as
+the review target, and let read-only tools inspect unchanged context only when
+needed. Expected review comments must still map back to changed lines or changed
+hunks. This keeps eval aligned with PR review rather than turning it into a
+general repository audit.
+
 ### 补充维度：公开 benchmark
 
 在黄金集跑通后，可从 SWE-bench 等公开数据中抽取少量实例做外推验证。子集规模、筛选规则需写入评测说明，与主评测通过/失败口径分开汇报。
@@ -83,7 +90,7 @@ python -m eval.run report --input eval/outputs/<timestamp>_report.json
 
 ### MVP+ 温和门禁
 
-CI 使用温和 gate 阻止明显退化，而不是作为最终质量目标。当前 `suite=golden`
+CI 使用温和 gate 阻止 MergeWarden 自身评测质量明显退化，而不是作为目标用户仓库的合并裁决。当前 `suite=golden`
 暂为纯负样本，过渡阶段只约束 schema 与 false positive：
 
 ```bash
