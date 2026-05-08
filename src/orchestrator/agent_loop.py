@@ -887,27 +887,7 @@ class AgentOrchestrator:
 
     @staticmethod
     def _fallback_plan(request: ReviewRequest | DebugRequest) -> AnalysisPlan:
-        if isinstance(request, ReviewRequest):
-            from src.analyzer.output_formatter import ReviewReport
-
-            return AnalysisPlan(
-                needs_tools=False,
-                tool_calls=[],
-                draft_review=ReviewReport(
-                    summary="Review pipeline initialized. Detailed analysis is not implemented yet."
-                ),
-            )
-        return AnalysisPlan(
-            needs_tools=False,
-            tool_calls=[],
-            draft_debug=DebugResponse(
-                run_id="",
-                summary="Debug pipeline initialized. Detailed analysis is not implemented yet.",
-                hypotheses=[],
-                steps=[],
-                context=ContextState(),
-            ),
-        )
+        return AnalysisPlan(needs_tools=False, tool_calls=[])
 
     def _record_event(self, event_type: EventType, phase: str, payload: dict[str, Any]) -> None:
         if self._event_log is None:

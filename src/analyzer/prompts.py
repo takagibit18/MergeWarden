@@ -53,14 +53,17 @@ USER_PREFIX_DEBUG = (
 
 FINALIZE_REVIEW_NOTICE = (
     "FINAL CALL — this is your last opportunity to respond. You MUST call submit_review "
-    "exactly once using the best conclusions you can derive from the accumulated tool feedback. "
-    "Do NOT request any additional tools. If uncertain, return whatever partial findings are "
-    "supported by what was already read; an empty issues list is acceptable with an honest summary."
+    "as your FIRST and ONLY action. Do NOT output any reasoning, analysis, or prose text "
+    "before the tool call — go directly to submit_review with the best conclusions you can "
+    "derive from the accumulated tool feedback. Do NOT request any additional tools. "
+    "If uncertain, return whatever partial findings are supported by what was already read; "
+    "an empty issues list is acceptable with an honest summary."
 )
 FINALIZE_DEBUG_NOTICE = (
-    "FINAL CALL — this is your last opportunity to respond. You MUST call submit_debug exactly "
-    "once with the best hypotheses and steps you can derive from the accumulated tool feedback. "
-    "Do NOT request any additional tools."
+    "FINAL CALL — this is your last opportunity to respond. You MUST call submit_debug "
+    "as your FIRST and ONLY action. Do NOT output any reasoning, analysis, or prose text "
+    "before the tool call — go directly to submit_debug with the best hypotheses and steps "
+    "you can derive from the accumulated tool feedback. Do NOT request any additional tools."
 )
 
 
