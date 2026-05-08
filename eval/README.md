@@ -71,6 +71,9 @@ File reads are contextual evidence only.
 # 1) 自动抓取并生成 fixture（需要 GITHUB_TOKEN）
 python -m eval.run crawl --max-repos 5 --max-prs-per-repo 3
 
+# 1a) 生成 rejected PR 正样本候选（需要 GITHUB_TOKEN 与模型 API）
+python -m eval.run crawl --suite golden_candidates --candidate-mode rejected-pr --max-repos 5 --max-prs-per-repo 3 --min-expected-issues 1
+
 # 2) 跑评测（调用 AgentOrchestrator）
 python -m eval.run eval --suite golden
 

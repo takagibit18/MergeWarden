@@ -48,6 +48,12 @@ def main() -> None:
     type=int,
     help="Minimum expected issue count required to keep a fixture.",
 )
+@click.option(
+    "--candidate-mode",
+    default="merged-bugfix",
+    type=click.Choice(["merged-bugfix", "rejected-pr"]),
+    help="PR discovery strategy: merged bug-fix PRs or rejected unmerged PRs with review evidence.",
+)
 def crawl_cmd(
     suite: str,
     max_repos: int,
@@ -56,6 +62,7 @@ def crawl_cmd(
     curated_file: str,
     concurrency: int,
     min_expected_issues: int,
+    candidate_mode: str,
 ) -> None:
     """Discover PRs and generate fixtures."""
     curated_repos = _load_curated_repos(Path(curated_file), enabled=curated)
@@ -67,6 +74,7 @@ def crawl_cmd(
             curated_repos=curated_repos,
             concurrency=concurrency,
             min_expected_issues=min_expected_issues,
+            candidate_mode=candidate_mode,
         )
     )
 
@@ -144,6 +152,7 @@ async def _crawl(
     curated_repos: list[str] | None,
     concurrency: int,
     min_expected_issues: int,
+    candidate_mode: str,
 ) -> None:
     generator = FixtureGenerator(min_expected_issues=min_expected_issues)
     try:
@@ -153,6 +162,7 @@ async def _crawl(
             max_prs_per_repo=max_prs_per_repo,
             curated_repos=curated_repos,
             concurrency=concurrency,
+            candidate_mode=candidate_mode,  # type: ignore[arg-type]
         )
     finally:
         await generator.close()

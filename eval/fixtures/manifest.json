@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-04-20T00:00:00+00:00",
+  "generated_at": "2026-05-07T15:36:10.480408+00:00",
   "entries": [
     {
       "fixture_id": "golden_astral-sh_ruff_pr24648",
@@ -20,75 +20,39 @@
       "reviewed": true
     },
     {
-      "fixture_id": "golden_manual_detect_unchecked_none",
-      "suite": "golden_synth",
+      "fixture_id": "golden_pytest-dev_pytest_pr8513",
+      "suite": "golden",
       "fixture_type": "review",
-      "repo_full_name": "example/app",
-      "pr_number": 101,
-      "path": "eval/fixtures/golden_manual_detect_unchecked_none.json",
+      "repo_full_name": "pytest-dev/pytest",
+      "pr_number": 8513,
+      "path": "eval/fixtures/golden_pytest-dev_pytest_pr8513.json",
       "reviewed": true
     },
     {
-      "fixture_id": "golden_manual_detect_sql_injection",
-      "suite": "golden_synth",
+      "fixture_id": "golden_NethermindEth_nethermind_pr5381",
+      "suite": "golden",
       "fixture_type": "review",
-      "repo_full_name": "example/api",
-      "pr_number": 102,
-      "path": "eval/fixtures/golden_manual_detect_sql_injection.json",
+      "repo_full_name": "NethermindEth/nethermind",
+      "pr_number": 5381,
+      "path": "eval/fixtures/golden_NethermindEth_nethermind_pr5381.json",
       "reviewed": true
     },
     {
-      "fixture_id": "golden_manual_detect_swallow_exception",
-      "suite": "golden_synth",
+      "fixture_id": "golden_pytest-dev_pytest_pr9350",
+      "suite": "golden",
       "fixture_type": "review",
-      "repo_full_name": "example/worker",
-      "pr_number": 103,
-      "path": "eval/fixtures/golden_manual_detect_swallow_exception.json",
+      "repo_full_name": "pytest-dev/pytest",
+      "pr_number": 9350,
+      "path": "eval/fixtures/golden_pytest-dev_pytest_pr9350.json",
       "reviewed": true
     },
     {
-      "fixture_id": "golden_manual_zero_refactor_rename",
-      "suite": "golden_synth",
+      "fixture_id": "golden_pytest-dev_pytest_pr7254",
+      "suite": "golden",
       "fixture_type": "review",
-      "repo_full_name": "example/lib",
-      "pr_number": 201,
-      "path": "eval/fixtures/golden_manual_zero_refactor_rename.json",
-      "reviewed": true
-    },
-    {
-      "fixture_id": "golden_manual_zero_add_test_only",
-      "suite": "golden_synth",
-      "fixture_type": "review",
-      "repo_full_name": "example/lib",
-      "pr_number": 202,
-      "path": "eval/fixtures/golden_manual_zero_add_test_only.json",
-      "reviewed": true
-    },
-    {
-      "fixture_id": "golden_manual_boundary_large_whitespace",
-      "suite": "golden_synth",
-      "fixture_type": "review",
-      "repo_full_name": "example/ui",
-      "pr_number": 301,
-      "path": "eval/fixtures/golden_manual_boundary_large_whitespace.json",
-      "reviewed": true
-    },
-    {
-      "fixture_id": "golden_manual_boundary_generated_file",
-      "suite": "golden_synth",
-      "fixture_type": "review",
-      "repo_full_name": "example/web",
-      "pr_number": 302,
-      "path": "eval/fixtures/golden_manual_boundary_generated_file.json",
-      "reviewed": true
-    },
-    {
-      "fixture_id": "golden_manual_boundary_mixed_rename",
-      "suite": "golden_synth",
-      "fixture_type": "review",
-      "repo_full_name": "example/core",
-      "pr_number": 303,
-      "path": "eval/fixtures/golden_manual_boundary_mixed_rename.json",
+      "repo_full_name": "pytest-dev/pytest",
+      "pr_number": 7254,
+      "path": "eval/fixtures/golden_pytest-dev_pytest_pr7254.json",
       "reviewed": true
     }
   ]

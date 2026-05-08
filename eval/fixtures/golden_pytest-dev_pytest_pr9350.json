@@ -1,0 +1,50 @@
+{
+  "id": "golden_pytest-dev_pytest_pr9350",
+  "type": "review",
+  "source": {
+    "repo_full_name": "pytest-dev/pytest",
+    "pr_number": 9350,
+    "url": "https://github.com/pytest-dev/pytest/pull/9350",
+    "merge_commit_sha": "",
+    "title": "Fix test reordering for indirect parameterization"
+  },
+  "input": {
+    "diff_text": "diff --git a/src/_pytest/fixtures.py b/src/_pytest/fixtures.py\n--- a/src/_pytest/fixtures.py\n+++ b/src/_pytest/fixtures.py\n@@ -238,6 +239,23 @@ def getfixturemarker(obj: object) -> Optional[\"FixtureFunctionMarker\"]:\n _Key = Tuple[object, ...]\n \n \n+@attr.s(auto_attribs=True, eq=False, slots=True)\n+class SafeHashWrapper:\n+    obj: Any\n+\n+    def __eq__(self, other: object) -> bool:\n+        try:\n+            res = self.obj == other\n+            return bool(res)\n+        except Exception:\n+            return id(self.obj) == id(other)\n+\n+    def __hash__(self) -> int:\n+        if isinstance(self.obj, Hashable):\n+            return hash(self.obj)\n+        return hash(id(self.obj))\n+\n+\n def get_parametrized_fixture_keys(item: nodes.Item, scope: Scope) -> Iterator[_Key]:\n@@ -254,15 +272,19 @@ def get_parametrized_fixture_keys(item: nodes.Item, scope: Scope) -> Iterator[_K\n+            param = SafeHashWrapper(cs.params[argname])\n             if scope is Scope.Session:\n-                key: _Key = (argname, param_index)\n+                key: _Key = (argname, param)\n             elif scope is Scope.Package:\n-                key = (argname, param_index, item.path.parent)\n+                key = (argname, param, item.path.parent)\n             elif scope is Scope.Module:\n-                key = (argname, param_index, item.path)\n+                key = (argname, param, item.path)\n             elif scope is Scope.Class:\n                 item_cls = item.cls  # type: ignore[attr-defined]\n-                key = (argname, param_index, item.path, item_cls)\n+                key = (argname, param, item.path, item_cls)\n",
+    "files": {
+      "src/_pytest/fixtures.py": "@attr.s(auto_attribs=True, eq=False, slots=True)\nclass SafeHashWrapper:\n    obj: Any\n\n    def __eq__(self, other: object) -> bool:\n        try:\n            res = self.obj == other\n            return bool(res)\n        except Exception:\n            return id(self.obj) == id(other)\n\n    def __hash__(self) -> int:\n        if isinstance(self.obj, Hashable):\n            return hash(self.obj)\n        return hash(id(self.obj))\n"
+    },
+    "error_log": null
+  },
+  "expected": {
+    "issues": [
+      {
+        "severity": "warning",
+        "location_pattern": "src/_pytest/fixtures.py",
+        "path": "src/_pytest/fixtures.py",
+        "line": 244,
+        "end_line": 250,
+        "category": "logic",
+        "description": "SafeHashWrapper compares self.obj directly to the other wrapper object instead of unwrapping other.obj. When fixture keys contain two SafeHashWrapper instances for equal parameter values, equality can fail even though their hashes match, so pytest may fail to group equivalent indirect parameters for fixture reuse."
+      }
+    ],
+    "min_issues": 1,
+    "max_issues": 1,
+    "is_empty_annotation": false
+  },
+  "metadata": {
+    "suite": "golden",
+    "tags": [
+      "github",
+      "rejected-pr",
+      "manual",
+      "positive-sample",
+      "should-detect",
+      "pytest",
+      "fixture-ordering"
+    ],
+    "difficulty": "hard",
+    "annotated_by": "manual",
+    "reviewed": true,
+    "created_at": "2026-05-08T00:00:00+00:00"
+  }
+}

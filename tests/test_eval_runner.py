@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import Counter
 from pathlib import Path
 
 from eval.runner import (
@@ -241,19 +240,12 @@ def test_golden_fixture_distribution_has_required_buckets() -> None:
     real = load_fixtures(Path("eval") / "fixtures", suite="golden", reviewed_only=True)
     synth = load_fixtures(Path("eval") / "fixtures", suite="golden_synth", reviewed_only=True)
 
-    assert len(real) >= 2
-    assert len(synth) >= 8
-
-    tags: Counter[str] = Counter()
-    for fixture in synth:
-        current = set(fixture.metadata.tags)
-        if "should-detect" in current:
-            tags["detect"] += 1
-        elif "zero-issue" in current:
-            tags["zero"] += 1
-        elif "boundary-noise" in current:
-            tags["boundary"] += 1
-
-    assert tags["detect"] >= 3
-    assert tags["zero"] >= 2
-    assert tags["boundary"] >= 3
+    assert {fixture.id for fixture in real} == {
+        "golden_astral-sh_ruff_pr24648",
+        "golden_real_requests_netrc_pr7205",
+        "golden_pytest-dev_pytest_pr8513",
+        "golden_NethermindEth_nethermind_pr5381",
+        "golden_pytest-dev_pytest_pr9350",
+        "golden_pytest-dev_pytest_pr7254",
+    }
+    assert synth == []

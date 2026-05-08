@@ -1,0 +1,51 @@
+{
+  "id": "golden_NethermindEth_nethermind_pr5381",
+  "type": "review",
+  "source": {
+    "repo_full_name": "NethermindEth/nethermind",
+    "pr_number": 5381,
+    "url": "https://github.com/NethermindEth/nethermind/pull/5381",
+    "merge_commit_sha": "",
+    "title": "Prevent GC during NewPayload"
+  },
+  "input": {
+    "diff_text": "diff --git a/src/Nethermind/Nethermind.Merge.Plugin/EngineRpcModule.Paris.cs b/src/Nethermind/Nethermind.Merge.Plugin/EngineRpcModule.Paris.cs\n--- a/src/Nethermind/Nethermind.Merge.Plugin/EngineRpcModule.Paris.cs\n+++ b/src/Nethermind/Nethermind.Merge.Plugin/EngineRpcModule.Paris.cs\n@@ -75,6 +77,7 @@ private async Task<ResultWrapper<PayloadStatusV1>> NewPayload(ExecutionPayload e\n             Stopwatch watch = Stopwatch.StartNew();\n             try\n             {\n+                using IDisposable region = _gcKeeper.TryStartNoGCRegion();\n                 return await _newPayloadV1Handler.HandleAsync(executionPayload);\n             }\n             catch (Exception exception)\n\ndiff --git a/src/Nethermind/Nethermind.Merge.Plugin/GC/GCKeeper.cs b/src/Nethermind/Nethermind.Merge.Plugin/GC/GCKeeper.cs\n--- /dev/null\n+++ b/src/Nethermind/Nethermind.Merge.Plugin/GC/GCKeeper.cs\n@@ -0,0 +1,148 @@\n+public IDisposable TryStartNoGCRegion(long? size = null)\n+{\n+    size ??= _defaultSize;\n+    if (_gcStrategy.CanStartNoGCRegion())\n+    {\n+        FailCause failCause = FailCause.None;\n+        try\n+        {\n+            if (!System.GC.TryStartNoGCRegion(size.Value, true))\n+            {\n+                failCause = FailCause.GCFailedToStartNoGCRegion;\n+            }\n+        }\n+        catch (ArgumentOutOfRangeException)\n+        {\n+            failCause = FailCause.TotalSizeExceededTheEphemeralSegmentSize;\n+        }\n+        catch (InvalidOperationException)\n+        {\n+            failCause = FailCause.AlreadyInNoGCRegion;\n+        }\n+        return new NoGCRegion(this, failCause, size, _logger);\n+    }\n+\n+    return new NoGCRegion(this, FailCause.StrategyDisallowed, size, _logger);\n+}\n+\n+private async Task ScheduleGCInternal()\n+{\n+    await Task.Delay(100);\n+    if (GCSettings.LatencyMode != GCLatencyMode.NoGCRegion)\n+    {\n+        System.GC.Collect(generation, GCCollectionMode.Forced, blocking: true, compacting: compacting > 0);\n+    }\n+}\n\ndiff --git a/src/Nethermind/Nethermind.Merge.Plugin/IMergeConfig.cs b/src/Nethermind/Nethermind.Merge.Plugin/IMergeConfig.cs\n--- a/src/Nethermind/Nethermind.Merge.Plugin/IMergeConfig.cs\n+++ b/src/Nethermind/Nethermind.Merge.Plugin/IMergeConfig.cs\n@@ -42,5 +42,14 @@ public interface IMergeConfig : IConfig\n+        [ConfigItem(Description = \"Reduces block EngineApi latency by disabling Garbage Collection during EngineApi calls.\", DefaultValue = \"true\")]\n+        public bool PrioritizeBlockLatency { get; set; }\n+\n+        [ConfigItem(Description = \"Reduces memory usage by forcing Garbage Collection between EngineApi calls. Accept values [-1,2]. -1 disables it.\", DefaultValue = \"1\")]\n+        public int GCGenerationToCollect { get; set; }\n+\n+        [ConfigItem(Description = \"Reduces process used memory. 0 is disabled, 1 compacts normal heaps, 2 compacts large object heap too (only when GCGenerationToCollect is set to 2).\", DefaultValue = \"1\")]\n+        public int AggressivelyCompactMemory { get; set; }\n",
+    "files": {
+      "src/Nethermind/Nethermind.Merge.Plugin/EngineRpcModule.Paris.cs": "            try\n            {\n                using IDisposable region = _gcKeeper.TryStartNoGCRegion();\n                return await _newPayloadV1Handler.HandleAsync(executionPayload);\n            }\n",
+      "src/Nethermind/Nethermind.Merge.Plugin/GC/GCKeeper.cs": "    public IDisposable TryStartNoGCRegion(long? size = null)\n    {\n        size ??= _defaultSize;\n        if (_gcStrategy.CanStartNoGCRegion())\n        {\n            FailCause failCause = FailCause.None;\n            try\n            {\n                if (!System.GC.TryStartNoGCRegion(size.Value, true))\n                {\n                    failCause = FailCause.GCFailedToStartNoGCRegion;\n                }\n            }\n            catch (InvalidOperationException)\n            {\n                failCause = FailCause.AlreadyInNoGCRegion;\n            }\n\n            return new NoGCRegion(this, failCause, size, _logger);\n        }\n\n        return new NoGCRegion(this, FailCause.StrategyDisallowed, size, _logger);\n    }\n"
+    },
+    "error_log": null
+  },
+  "expected": {
+    "issues": [
+      {
+        "severity": "critical",
+        "location_pattern": "src/Nethermind/Nethermind.Merge.Plugin/EngineRpcModule.Paris.cs",
+        "path": "src/Nethermind/Nethermind.Merge.Plugin/EngineRpcModule.Paris.cs",
+        "line": 77,
+        "end_line": 78,
+        "category": "runtime",
+        "description": "NewPayload now enters a NoGC region around the Engine API handler while the feature is enabled by default. This is a latency-sensitive production path, and forcing NoGC/GC behavior here risks runtime-wide stalls or hangs if the runtime cannot maintain the region or finalization/collection timing interacts badly with active node workloads."
+      }
+    ],
+    "min_issues": 1,
+    "max_issues": 1,
+    "is_empty_annotation": false
+  },
+  "metadata": {
+    "suite": "golden",
+    "tags": [
+      "github",
+      "rejected-pr",
+      "manual",
+      "positive-sample",
+      "should-detect",
+      "nethermind",
+      "runtime"
+    ],
+    "difficulty": "hard",
+    "annotated_by": "manual",
+    "reviewed": true,
+    "created_at": "2026-05-08T00:00:00+00:00"
+  }
+}
