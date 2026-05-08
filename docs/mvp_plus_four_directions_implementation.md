@@ -2,6 +2,8 @@
 
 > 日期：2026-04-20  
 > 目标：将“评测侧可行”升级为“生产侧一致可用”，并把质量门禁前置到 CI 主干流程。
+>
+> 口径更新（2026-05-08）：本文是历史实施记录，其中“CI 门禁”指 MergeWarden 项目自身的评测回归门禁，不表示产品侧要用 Agent 输出 hard block 用户 PR 合并。后续 PR 集成默认产出建议、soft check 或 review comment，硬性合并裁决仍交给 GitHub CI / branch protection。
 
 ---
 

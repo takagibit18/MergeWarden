@@ -73,6 +73,19 @@ Only the diff and immediately relevant file fragments are fed to the model
 by default.  The context window expands on demand (interface definitions,
 adjacent modules) to control token cost and reasoning noise.
 
+For PR review integrations, the durable product contract is diff-first:
+the submitted PR diff is the review target, while a full repository snapshot
+may be mounted as the tool workspace for contextual reads.  The model should
+not receive the full repository in the initial prompt; it should start from
+the diff and changed files, then use read-only tools to inspect unchanged
+context when needed.  Review findings intended for inline PR feedback must
+point back to changed lines or changed hunks; unchanged files may support
+the evidence but should not become the primary comment location.
+
+CI remains the hard authority for mergeability.  MergeWarden's PR-facing role
+is to produce review suggestions, soft checks, and evidence for risks that may
+pass automated tests but still deserve human attention.
+
 ### Observability
 
 Every run logs a `run_id`, tool-call sequence, key intermediate results,

@@ -2,13 +2,13 @@
 
 > AI PR Gatekeeper for Safer Merges
 
-面向开发团队的 PR 守门 Agent，会审查代码变更、诊断 CI 失败原因，并帮助团队更安全地合并代码。
+面向开发团队的 PR 守门 Agent，会审查代码变更、诊断 CI 失败原因，并补充 CI 难以覆盖的风险判断。它默认提供建议、soft check 与可复盘证据，不替代 GitHub CI 对“能否合并”的硬性裁决。
 
 ## 功能概述
 
 - **PR 自动审查**：按严重级别分类问题（安全 / 正确性 / 风格 / 可维护性），支持行号引用与 diff hunk 定位
 - **CI / Debug 辅助**：提取关键报错、推测失败原因、给出验证步骤与最小修复建议
-- **合并门禁提示**：结合代码上下文、测试结果和工程约束，提示合并前风险与测试缺口
+- **合并风险提示**：结合代码上下文、测试结果和工程约束，提示合并前风险与测试缺口；后续 PR 集成默认以建议或 soft check 形式呈现
 
 ### 输入
 
@@ -20,6 +20,8 @@
 
 - 结构化 Review 报告（`severity` / `location` / `evidence` / `suggestion` / `confidence`）
 - Debug 建议与最小修复 diff
+
+Review 输出面向 PR diff：问题定位应优先落在 changed line 或 changed hunk；未变更文件只作为上下文证据，不作为默认 inline comment 目标。
 
 ## 快速开始
 
@@ -110,6 +112,7 @@ Available endpoints:
 │   ├── shared_contracts.md
 │   ├── execute_tools_design.md  # execute 类工具设计与安全规范
 │   ├── cli_tools_orchestrator_contract.md
+│   ├── golden_fixture_snapshot_plan.md
 │   ├── mvp_plus_roadmap.md
 │   └── project_plan.md
 ├── cli.py                 # CLI 入口（Click）

@@ -110,10 +110,15 @@
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `severity` | `Severity` | 严重级别 |
-| `location` | `str` | 如 `file:line` 或 diff hunk 引用 |
+| `location` | `str` | Review 模式下应为 changed line / changed hunk 的 canonical `path[:line[-end_line]]`；未变更文件只能作为 evidence 上下文，不能作为默认 inline comment 目标 |
 | `evidence` | `str` | 代码片段或观察依据 |
 | `suggestion` | `str` | 修复或行动建议 |
 | `confidence` | `float` | `0.0`–`1.0`，模型置信度 |
+
+Review findings are advisory by contract. Downstream GitHub integrations may
+publish them as comments, summaries, or soft checks, but hard merge blocking
+remains the responsibility of GitHub CI / branch protection unless a future
+product decision explicitly changes that boundary.
 
 ### 4.3 `ReviewReport`（单次 review 汇总）
 
@@ -222,3 +227,4 @@ CLI、未来 API 与 CI 校验应只依赖上述稳定字段；**增删字段** 
 | 2026-04-12 | Debug 输出协议定稿落地；补充编排相关环境变量（轮次、token、事件日志、CI 与高危工具） |
 | 2026-04-17 | execute 工具硬化：argv + 首词白名单、pluggable backend（subprocess/docker）、输出截断、Review 模式不暴露 execute 工具；新增 `EXECUTE_*` 环境变量 |
 | 2026-05-06 | MVP+ 最小闭环：FastAPI 同步薄层、Docker CLI demo、eval gate `hit_rate >= 0.6`；Docker execute 后端口径更新为已落地 |
+| 2026-05-08 | PR review 产品边界对齐：Review 输出为建议/soft check，硬合并阻断交给 CI；inline finding 约束为 changed line / changed hunk |
