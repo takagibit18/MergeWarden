@@ -10,9 +10,23 @@ from time import perf_counter
 from typing import Iterable, Literal
 
 from eval.crawler.annotator import LLMAnnotator
-from eval.crawler.github_client import CandidateMode, GithubCrawlerClient, PullRequestCandidate
-from eval.crawler.pr_parser import build_fixture_input, build_fixture_source, parse_unified_diff
-from eval.schemas import Fixture, FixtureManifest, FixtureManifestEntry, FixtureMeta
+from eval.crawler.github_client import (
+    CandidateMode,
+    GithubCrawlerClient,
+    PullRequestCandidate,
+)
+from eval.crawler.pr_parser import (
+    build_fixture_input,
+    build_fixture_source,
+    parse_unified_diff,
+)
+from eval.schemas import (
+    Fixture,
+    FixtureManifest,
+    FixtureManifestEntry,
+    FixtureMeta,
+    FixtureWorkspace,
+)
 
 
 class FixtureGenerator:
@@ -85,7 +99,9 @@ class FixtureGenerator:
 
         semaphore = asyncio.Semaphore(max(1, concurrency))
 
-        async def process_candidate(candidate: PullRequestCandidate) -> dict[str, object]:
+        async def process_candidate(
+            candidate: PullRequestCandidate,
+        ) -> dict[str, object]:
             started = perf_counter()
             entry: dict[str, object] = {
                 "repo": candidate.repo_full_name,
@@ -102,14 +118,18 @@ class FixtureGenerator:
             }
             try:
                 async with semaphore:
-                    fixture, diagnostics = await self._create_fixture(candidate, suite=suite)
+                    fixture, diagnostics = await self._create_fixture(
+                        candidate, suite=suite
+                    )
             except Exception as exc:  # noqa: BLE001
                 entry["reason"] = str(exc)
                 entry["duration_ms"] = int((perf_counter() - started) * 1000)
                 return entry
 
             entry["issues_draft"] = int(diagnostics.get("issues_draft", 0))
-            entry["issues_after_critique"] = int(diagnostics.get("issues_after_critique", 0))
+            entry["issues_after_critique"] = int(
+                diagnostics.get("issues_after_critique", 0)
+            )
             expected_count = len(fixture.expected.issues)
             if fixture.expected.is_empty_annotation:
                 entry["outcome"] = "skipped"
@@ -140,9 +160,13 @@ class FixtureGenerator:
                 continue
             assert isinstance(fixture_obj, Fixture)
             fixture_path = self._fixtures_dir / f"{fixture_obj.id}.json"
-            fixture_path.write_text(fixture_obj.model_dump_json(indent=2), encoding="utf-8")
+            fixture_path.write_text(
+                fixture_obj.model_dump_json(indent=2), encoding="utf-8"
+            )
             written_paths.append(fixture_path)
-            existing_keys.add((fixture_obj.source.repo_full_name, fixture_obj.source.pr_number))
+            existing_keys.add(
+                (fixture_obj.source.repo_full_name, fixture_obj.source.pr_number)
+            )
             entry["fixture_written"] = True
             crawl_entries.append(entry)
 
@@ -193,8 +217,15 @@ class FixtureGenerator:
                 candidate.repo_full_name, path, ref
             )
 
-        fixture_input = build_fixture_input(diff_text, file_contents)
-        annotation, annotation_diagnostics = await self._annotator.annotate_with_diagnostics(
+        fixture_input = build_fixture_input(
+            diff_text,
+            file_contents,
+            workspace=self._build_workspace(candidate, checkout_sha=ref),
+        )
+        (
+            annotation,
+            annotation_diagnostics,
+        ) = await self._annotator.annotate_with_diagnostics(
             repo_full_name=candidate.repo_full_name,
             pr_number=candidate.pr_number,
             pr_title=candidate.title,
@@ -237,6 +268,24 @@ class FixtureGenerator:
         )
         return fixture, annotation_diagnostics
 
+    @staticmethod
+    def _build_workspace(
+        candidate: PullRequestCandidate,
+        *,
+        checkout_sha: str,
+    ) -> FixtureWorkspace | None:
+        if not checkout_sha:
+            return None
+        repo_url = f"https://github.com/{candidate.repo_full_name}.git"
+        return FixtureWorkspace(
+            kind="git",
+            repo_url=repo_url,
+            base_sha=candidate.base_sha,
+            head_sha=candidate.head_sha,
+            checkout_sha=checkout_sha,
+            diff_base_sha=candidate.base_sha,
+        )
+
     def _write_crawl_log(
         self,
         *,
@@ -259,7 +308,9 @@ class FixtureGenerator:
         }
         timestamp = finished_at.strftime("%Y%m%d_%H%M%S")
         output_path = self._outputs_dir / f"{timestamp}_crawl_log.json"
-        output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        output_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
     @staticmethod
     def _estimate_difficulty(diff_files: list) -> Literal["easy", "medium", "hard"]:
@@ -322,7 +373,8 @@ class FixtureGenerator:
             except Exception:  # noqa: BLE001
                 continue
             source = f"{fixture.source.repo_full_name}#{fixture.source.pr_number}"
-            lines.append(f"| {fixture.id} | {source} | {fixture.metadata.reviewed} |  |")
+            lines.append(
+                f"| {fixture.id} | {source} | {fixture.metadata.reviewed} |  |"
+            )
         checklist_path = self._fixtures_dir / "review_checklist.md"
         checklist_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-

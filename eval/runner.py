@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 from statistics import mean, pstdev
@@ -17,11 +18,17 @@ from eval.schemas import (
     EvalResult,
     Fixture,
     FixtureManifest,
+    FixtureWorkspace,
     SampledFixtureResult,
 )
 from src.analyzer.location import normalize_location
 from src.analyzer.output_formatter import Severity, has_specific_diff_evidence
-from src.analyzer.schemas import DebugRequest, DebugResponse, ReviewRequest, ReviewResponse
+from src.analyzer.schemas import (
+    DebugRequest,
+    DebugResponse,
+    ReviewRequest,
+    ReviewResponse,
+)
 from src.config import get_settings
 from src.orchestrator.agent_loop import AgentOrchestrator
 
@@ -50,6 +57,45 @@ def load_fixtures(
     return fixtures
 
 
+def _run_git(args: list[str], *, cwd: Path | None = None) -> str:
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def _prepare_fixture_workspace(fixture: Fixture, target_root: Path) -> Path:
+    """Restore the workspace for one fixture and return the repo root."""
+    workspace = fixture.input.workspace
+    if workspace is None:
+        target_root.mkdir(parents=True, exist_ok=True)
+        _write_fixture_files(target_root, fixture.input.files)
+        return target_root
+    if workspace.kind == "git":
+        return _checkout_git_workspace(workspace, target_root)
+    raise ValueError(f"Unsupported fixture workspace kind: {workspace.kind}")
+
+
+def _checkout_git_workspace(workspace: FixtureWorkspace, target_root: Path) -> Path:
+    target_root.parent.mkdir(parents=True, exist_ok=True)
+    if target_root.exists():
+        shutil.rmtree(target_root)
+    _run_git(["clone", "--quiet", workspace.repo_url, str(target_root)])
+    _run_git(["checkout", "--quiet", workspace.checkout_sha], cwd=target_root)
+    checked_out = _run_git(["rev-parse", "HEAD"], cwd=target_root)
+    if checked_out != workspace.checkout_sha:
+        raise ValueError(
+            "Workspace checkout mismatch: "
+            f"expected {workspace.checkout_sha}, got {checked_out}"
+        )
+    return target_root
+
+
 def _resolve_fixture_paths(root: Path) -> list[Path]:
     manifest_path = root / "manifest.json"
     if manifest_path.exists():
@@ -76,10 +122,22 @@ async def run_single(fixture: Fixture, *, temperature: float = 0.0) -> EvalResul
     expected_count = len(fixture.expected.issues)
     try:
         with tempfile.TemporaryDirectory(prefix="eval-fixture-") as tmp_dir:
-            repo_root = Path(tmp_dir)
-            _write_fixture_files(repo_root, fixture.input.files)
-            orchestrator = AgentOrchestrator(permission_mode="default", temperature=temperature)
-            sandbox_context = _build_sandbox_context(fixture.input.files, repo_root)
+            repo_root = _prepare_fixture_workspace(fixture, Path(tmp_dir) / "repo")
+            validation_errors = _validate_expected_locations_against_diff(
+                fixture, repo_root
+            )
+            if validation_errors:
+                return EvalResult(
+                    fixture_id=fixture.id,
+                    fixture_type=fixture.type,
+                    schema_valid=False,
+                    expected_count=expected_count,
+                    error="; ".join(validation_errors),
+                )
+            orchestrator = AgentOrchestrator(
+                permission_mode="default", temperature=temperature
+            )
+            sandbox_context = _build_fixture_context(fixture, repo_root)
 
             start = perf_counter()
             parsed_response: ReviewResponse | DebugResponse
@@ -93,17 +151,23 @@ async def run_single(fixture: Fixture, *, temperature: float = 0.0) -> EvalResul
                     verbose=False,
                 )
                 review_response = await orchestrator.run_review(review_request)
-                parsed_response = ReviewResponse.model_validate(review_response.model_dump())
+                parsed_response = ReviewResponse.model_validate(
+                    review_response.model_dump()
+                )
                 actual_count = len(parsed_response.report.issues)
             else:
                 original_error_log = fixture.input.error_log or ""
                 debug_request = DebugRequest(
                     repo_path=str(repo_root),
-                    error_log_text=_prepend_context(original_error_log, sandbox_context),
+                    error_log_text=_prepend_context(
+                        original_error_log, sandbox_context
+                    ),
                     verbose=False,
                 )
                 debug_response = await orchestrator.run_debug(debug_request)
-                parsed_response = DebugResponse.model_validate(debug_response.model_dump())
+                parsed_response = DebugResponse.model_validate(
+                    debug_response.model_dump()
+                )
                 actual_count = len(parsed_response.steps)
             latency = perf_counter() - start
 
@@ -115,7 +179,9 @@ async def run_single(fixture: Fixture, *, temperature: float = 0.0) -> EvalResul
                 fixture.id,
                 parsed_response.run_id,
             )
-            matches, matched_count, false_positive_count = _match_issues(fixture, parsed_response)
+            matches, matched_count, false_positive_count = _match_issues(
+                fixture, parsed_response
+            )
             raw_output = parsed_response.model_dump(mode="json")
 
             placeholder = _is_placeholder_response(parsed_response)
@@ -203,9 +269,13 @@ def _aggregate_sampled_result(
 ) -> SampledFixtureResult:
     expected_count = len(fixture.expected.issues)
     hit_rates = [
-        _compute_hit_rate(run.matched_count, run.expected_count or expected_count) for run in runs
+        _compute_hit_rate(run.matched_count, run.expected_count or expected_count)
+        for run in runs
     ]
-    fp_rates = [_compute_false_positive_rate(run.false_positive_count, run.actual_count) for run in runs]
+    fp_rates = [
+        _compute_false_positive_rate(run.false_positive_count, run.actual_count)
+        for run in runs
+    ]
     pass_at_k = 1.0 if expected_count == 0 else max(hit_rates, default=0.0)
     schema_valid_rate = (
         sum(1 for run in runs if run.schema_valid and not run.placeholder_summary)
@@ -249,6 +319,12 @@ def _write_fixture_files(repo_root: Path, files: dict[str, str]) -> None:
         target.write_text(content, encoding="utf-8")
 
 
+def _build_fixture_context(fixture: Fixture, repo_root: Path) -> str:
+    if fixture.input.workspace is None:
+        return _build_sandbox_context(fixture.input.files, repo_root)
+    return _build_workspace_context(fixture.input.workspace, repo_root)
+
+
 def _build_sandbox_context(files: dict[str, str], repo_root: Path) -> str:
     lines = [
         "[SANDBOX CONTEXT]",
@@ -268,6 +344,86 @@ def _build_sandbox_context(files: dict[str, str], repo_root: Path) -> str:
     return "\n".join(lines)
 
 
+def _build_workspace_context(workspace: FixtureWorkspace, repo_root: Path) -> str:
+    lines = [
+        "[WORKSPACE CONTEXT]",
+        "This run restored a full git workspace for the fixture.",
+        f"Workspace root (use as base for all file paths): {repo_root}",
+        f"Repository: {workspace.repo_url}",
+        f"Checkout SHA: {workspace.checkout_sha}",
+        "The review target remains the PR diff below; use read-only tools only for context.",
+        "[END WORKSPACE CONTEXT]",
+    ]
+    return "\n".join(lines)
+
+
+def _validate_expected_locations_against_diff(
+    fixture: Fixture,
+    repo_root: Path,
+) -> list[str]:
+    if (
+        fixture.type != "review"
+        or fixture.input.workspace is None
+        or not fixture.input.diff_text.strip()
+    ):
+        return []
+    changed_lines = _changed_new_lines_by_file(fixture.input.diff_text)
+    errors: list[str] = []
+    for issue in fixture.expected.issues:
+        path = issue.path.strip().replace("\\", "/")
+        if not path or issue.line is None:
+            continue
+        expected_start = issue.line
+        expected_end = issue.end_line or expected_start
+        changed_for_path = changed_lines.get(path, set())
+        if not any(
+            line in changed_for_path for line in range(expected_start, expected_end + 1)
+        ):
+            errors.append(
+                f"Expected issue location is outside changed hunk: {path}:{expected_start}"
+            )
+            continue
+        workspace_file = repo_root / path
+        if not workspace_file.is_file():
+            errors.append(f"Expected issue file is missing from workspace: {path}")
+            continue
+        line_count = len(workspace_file.read_text(encoding="utf-8").splitlines())
+        if expected_start > line_count:
+            errors.append(
+                f"Expected issue line is outside workspace file: {path}:{expected_start}"
+            )
+    return errors
+
+
+def _changed_new_lines_by_file(diff_text: str) -> dict[str, set[int]]:
+    changed: dict[str, set[int]] = {}
+    current_path = ""
+    new_line: int | None = None
+    for raw_line in diff_text.splitlines():
+        if raw_line.startswith("+++ "):
+            marker = raw_line[4:].strip()
+            current_path = ""
+            if marker != "/dev/null":
+                current_path = marker[2:] if marker.startswith("b/") else marker
+                changed.setdefault(current_path, set())
+            new_line = None
+            continue
+        if raw_line.startswith("@@"):
+            match = re.search(r"\+(\d+)(?:,(\d+))?", raw_line)
+            new_line = int(match.group(1)) if match else None
+            continue
+        if not current_path or new_line is None:
+            continue
+        if raw_line.startswith("+") and not raw_line.startswith("+++"):
+            changed[current_path].add(new_line)
+            new_line += 1
+        elif raw_line.startswith("-") and not raw_line.startswith("---"):
+            continue
+        else:
+            new_line += 1
+    return changed
+
+
 def _prepend_context(original_text: str, sandbox_context: str) -> str:
     body = original_text.strip()
     if body:
@@ -285,9 +441,7 @@ def _is_placeholder_response(parsed: ReviewResponse | DebugResponse) -> bool:
             parsed.report.summary.strip() == _PLACEHOLDER_REVIEW_SUMMARY
             and not parsed.report.issues
         )
-    return (
-        parsed.summary.strip() == _PLACEHOLDER_DEBUG_SUMMARY and not parsed.steps
-    )
+    return parsed.summary.strip() == _PLACEHOLDER_DEBUG_SUMMARY and not parsed.steps
 
 
 def _is_empty_business_output(parsed: ReviewResponse | DebugResponse) -> bool:
@@ -473,11 +627,15 @@ def _location_matches(pattern: str, location: str) -> bool:
 
 
 def _semantic_location_matches(expected_issue: Any, location: str) -> bool:
-    expected_path = str(getattr(expected_issue, "path", "") or "").strip().replace("\\", "/")
+    expected_path = (
+        str(getattr(expected_issue, "path", "") or "").strip().replace("\\", "/")
+    )
     raw_expected_line = getattr(expected_issue, "line", None)
     raw_expected_end_line = getattr(expected_issue, "end_line", None)
     expected_line = raw_expected_line if isinstance(raw_expected_line, int) else None
-    expected_end_line = raw_expected_end_line if isinstance(raw_expected_end_line, int) else None
+    expected_end_line = (
+        raw_expected_end_line if isinstance(raw_expected_end_line, int) else None
+    )
     if not expected_path and expected_line is None and expected_end_line is None:
         return False
     parsed = normalize_location(location)
@@ -494,7 +652,9 @@ def _semantic_location_matches(expected_issue: Any, location: str) -> bool:
 
 
 def _is_eval_effective_issue(issue: Any) -> bool:
-    severity = str(getattr(getattr(issue, "severity", ""), "value", getattr(issue, "severity", "")))
+    severity = str(
+        getattr(getattr(issue, "severity", ""), "value", getattr(issue, "severity", ""))
+    )
     confidence_raw = getattr(issue, "confidence", 0.0)
     try:
         confidence = float(confidence_raw)
@@ -503,10 +663,11 @@ def _is_eval_effective_issue(issue: Any) -> bool:
     evidence = str(getattr(issue, "evidence", "") or "")
 
     if severity == Severity.CRITICAL.value:
-        return confidence >= _MIN_CRITICAL_CONFIDENCE and has_specific_diff_evidence(evidence)
+        return confidence >= _MIN_CRITICAL_CONFIDENCE and has_specific_diff_evidence(
+            evidence
+        )
     if severity == Severity.WARNING.value:
-        return confidence >= _MIN_WARNING_CONFIDENCE and has_specific_diff_evidence(evidence)
+        return confidence >= _MIN_WARNING_CONFIDENCE and has_specific_diff_evidence(
+            evidence
+        )
     return True
-
-
-

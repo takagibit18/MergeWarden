@@ -16,7 +16,9 @@ class NoopAnnotator:
     async def close(self) -> None:
         return None
 
-    async def annotate_with_diagnostics(self, **kwargs: Any) -> tuple[ExpectedResult, dict[str, int]]:
+    async def annotate_with_diagnostics(
+        self, **kwargs: Any
+    ) -> tuple[ExpectedResult, dict[str, int]]:
         return ExpectedResult(issues=[], is_empty_annotation=True), {
             "issues_draft": 0,
             "issues_after_critique": 0,
@@ -27,7 +29,9 @@ class EmptyCandidateClient:
     async def close(self) -> None:
         return None
 
-    async def discover_pull_request_candidates(self, **kwargs: Any) -> list[PullRequestCandidate]:
+    async def discover_pull_request_candidates(
+        self, **kwargs: Any
+    ) -> list[PullRequestCandidate]:
         return []
 
 
@@ -39,10 +43,14 @@ class RecordingGithubClient:
     async def close(self) -> None:
         return None
 
-    async def discover_pull_request_candidates(self, **kwargs: Any) -> list[PullRequestCandidate]:
+    async def discover_pull_request_candidates(
+        self, **kwargs: Any
+    ) -> list[PullRequestCandidate]:
         return [self.candidate]
 
-    async def get_pull_request(self, repo_full_name: str, pr_number: int) -> dict[str, Any]:
+    async def get_pull_request(
+        self, repo_full_name: str, pr_number: int
+    ) -> dict[str, Any]:
         return {"body": "Please see the review thread."}
 
     async def get_pull_request_diff(self, repo_full_name: str, pr_number: int) -> str:
@@ -170,3 +178,9 @@ def test_rejected_pr_fixture_uses_head_sha_and_review_context_without_leaking_to
     assert "This breaks empty input handling" not in fixture_payload
     assert '"rejected-pr"' in fixture_payload
     assert '"should-detect"' in fixture_payload
+    assert '"workspace"' in fixture_payload
+    assert '"repo_url": "https://github.com/example/repo.git"' in fixture_payload
+    assert '"base_sha": "base-sha"' in fixture_payload
+    assert '"head_sha": "head-sha"' in fixture_payload
+    assert '"checkout_sha": "head-sha"' in fixture_payload
+    assert '"diff_base_sha": "base-sha"' in fixture_payload
