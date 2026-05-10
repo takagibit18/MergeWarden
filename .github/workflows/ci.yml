@@ -37,6 +37,9 @@ jobs:
 
       - name: Run golden eval
         env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL || 'https://api.openai.com/v1' }}
+          MODEL_NAME: ${{ vars.MODEL_NAME || 'gpt-4o' }}
           EVAL_SAMPLES: "1"
           EVAL_CONCURRENCY: "1"
           EVAL_TEMPERATURE: "0.0"
@@ -44,6 +47,10 @@ jobs:
           TOKEN_BUDGET: "88000"
           PROMPT_INPUT_TOKEN_BUDGET: "88000"
         run: |
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "::error::OPENAI_API_KEY is not configured; golden eval cannot produce model-backed schema-valid output."
+            exit 1
+          fi
           python -m eval.run eval --suite golden --output-json eval/outputs/ci_report.json
 
       - name: Enforce eval gate
