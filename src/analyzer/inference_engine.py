@@ -6,6 +6,7 @@ import json
 import logging
 import re
 from typing import Any, Callable
+from uuid import uuid4
 
 from pydantic import ValidationError
 
@@ -26,10 +27,11 @@ from src.analyzer.schemas import AnalysisPlan, DebugRequest, DebugResponse, Revi
 from src.analyzer.trace import TraceRecorder
 from src.config import get_settings
 from src.models.client import ModelClient
-from src.models.schemas import Message, ModelResponse
+from src.models.schemas import Message, ModelConfig, ModelResponse
 from src.tools.base import ToolResult, ToolSpec
 
 logger = logging.getLogger(__name__)
+_SUBMIT_MAX_TOKENS = 2048
 
 
 class InferenceEngine:
@@ -61,7 +63,7 @@ class InferenceEngine:
         iteration: int = 0,
         force_submit: bool = False,
         near_last_iteration: bool = False,
-    ) -> tuple[AnalysisPlan, int]:
+    ) -> tuple[AnalysisPlan, int, str]:
         file_contents = file_contents or {}
         budget = (
             prompt_input_token_budget
@@ -128,12 +130,13 @@ class InferenceEngine:
         )
         if folded is not None:
             messages.append(folded)
-        if tool_feedback:
+        if tool_feedback and not force_submit:
             messages.extend(self._build_tool_feedback_messages(tool_feedback))
             failure_guidance = self._build_failure_guidance_message(tool_feedback)
             if failure_guidance is not None:
                 messages.append(failure_guidance)
-        if force_submit:
+        submit_only = force_submit or near_last_iteration
+        if submit_only:
             notice = (
                 FINALIZE_REVIEW_NOTICE
                 if isinstance(request, ReviewRequest)
@@ -152,14 +155,32 @@ class InferenceEngine:
                 )
             )
 
-        tools = tool_schemas or []
+        tools = (
+            self._submit_only_tools(tool_schemas or [], request)
+            if submit_only
+            else tool_schemas or []
+        )
         config = None
+        if submit_only:
+            config = self._build_submit_config(request)
         if request.model_name:
-            config = self._model_client.default_config.model_copy(
-                update={"model": request.model_name}
-            )
+            if config is None:
+                config = self._model_client.default_config.model_copy(
+                    update={"model": request.model_name}
+                )
+            else:
+                config.model = request.model_name
+        if submit_only and config is not None and self._is_deepseek_request(config):
+            config.extra_body = {
+                **(config.extra_body or {}),
+                "thinking": {"type": "disabled"},
+            }
         response = await self._model_client.chat(messages=messages, config=config, tools=tools)
-        plan, parse_meta = self._parse_tool_calls(response.tool_calls, request)
+        plan, parse_meta = self._parse_tool_calls(
+            response.tool_calls, request, force_submit=submit_only
+        )
+        parse_meta["tool_choice"] = self._trace_tool_choice(config)
+        parse_meta["thinking_disabled"] = self._is_thinking_disabled(config)
         fallback_json_found = False
         fallback_parse_valid = False
         if not plan.draft_review and not plan.draft_debug:
@@ -171,10 +192,61 @@ class InferenceEngine:
                     fallback_parse_valid = True
                     plan = parsed
         self._record_trace(response, plan, parse_meta, iteration, fallback_json_found, fallback_parse_valid)
-        return plan, response.usage.total_tokens
+        return plan, response.usage.total_tokens, response.reasoning_content
+
+    def _build_submit_config(self, request: ReviewRequest | DebugRequest) -> ModelConfig:
+        return self._model_client.default_config.model_copy(
+            update={
+                "max_tokens": _SUBMIT_MAX_TOKENS,
+                "tool_choice": self._forced_submit_tool_choice(request),
+            }
+        )
+
+    @staticmethod
+    def _forced_submit_tool_choice(
+        request: ReviewRequest | DebugRequest,
+    ) -> dict[str, dict[str, str] | str]:
+        name = "submit_review" if isinstance(request, ReviewRequest) else "submit_debug"
+        return {"type": "function", "function": {"name": name}}
+
+    @staticmethod
+    def _submit_only_tools(
+        tool_schemas: list[dict[str, Any]],
+        request: ReviewRequest | DebugRequest,
+    ) -> list[dict[str, Any]]:
+        expected = "submit_review" if isinstance(request, ReviewRequest) else "submit_debug"
+        return [
+            tool
+            for tool in tool_schemas
+            if isinstance(tool.get("function"), dict)
+            and tool["function"].get("name") == expected
+        ]
+
+    @staticmethod
+    def _is_deepseek_request(config: ModelConfig) -> bool:
+        model = config.model.strip().lower()
+        base_url = str(get_settings().openai_base_url).strip().lower()
+        return model.startswith("deepseek") or "deepseek" in base_url
+
+    @staticmethod
+    def _is_thinking_disabled(config: ModelConfig | None) -> bool:
+        if config is None or not isinstance(config.extra_body, dict):
+            return False
+        thinking = config.extra_body.get("thinking")
+        return isinstance(thinking, dict) and thinking.get("type") == "disabled"
+
+    @staticmethod
+    def _trace_tool_choice(config: ModelConfig | None) -> Any:
+        if config is None:
+            return None
+        return config.tool_choice
 
     def _parse_tool_calls(
-        self, raw_calls: list[dict[str, Any]], request: ReviewRequest | DebugRequest
+        self,
+        raw_calls: list[dict[str, Any]],
+        request: ReviewRequest | DebugRequest,
+        *,
+        force_submit: bool = False,
     ) -> tuple[AnalysisPlan, dict[str, Any]]:
         tool_calls: list[dict[str, Any]] = []
         draft_review: ReviewReport | None = None
@@ -185,6 +257,7 @@ class InferenceEngine:
             "submit_review_validation_error": "",
             "submit_debug_validation_error": "",
             "location_warnings": [],
+            "force_submit_discarded_count": 0,
         }
 
         for raw in raw_calls:
@@ -193,13 +266,23 @@ class InferenceEngine:
                 continue
             name = str(function_block.get("name", "")).strip()
             arguments = function_block.get("arguments", "{}")
+            argument_error = ""
             try:
                 payload = json.loads(arguments) if isinstance(arguments, str) else arguments
-            except Exception:  # noqa: BLE001
+            except json.JSONDecodeError as exc:
                 payload = {}
+                argument_error = f"Invalid JSON arguments for {name}: {exc}"
+            except Exception as exc:  # noqa: BLE001
+                payload = {}
+                argument_error = f"Invalid arguments for {name}: {exc}"
 
             if name == "submit_review":
                 parse_meta["submit_review_seen"] = True
+                if argument_error or not isinstance(payload, dict):
+                    error = argument_error or f"Invalid submit_review arguments type: {type(payload).__name__}"
+                    logger.warning("Invalid submit_review arguments ignored: %s", error)
+                    parse_meta["submit_review_validation_error"] = error
+                    continue
                 normalized_payload, warnings = self._normalize_review_payload(payload)
                 parse_meta["location_warnings"] = warnings
                 try:
@@ -211,6 +294,11 @@ class InferenceEngine:
                 continue
             if name == "submit_debug":
                 parse_meta["submit_debug_seen"] = True
+                if argument_error or not isinstance(payload, dict):
+                    error = argument_error or f"Invalid submit_debug arguments type: {type(payload).__name__}"
+                    logger.warning("Invalid submit_debug arguments ignored: %s", error)
+                    parse_meta["submit_debug_validation_error"] = error
+                    continue
                 try:
                     draft_debug = DebugResponse.model_validate(
                         {
@@ -222,6 +310,13 @@ class InferenceEngine:
                 except ValidationError as exc:
                     parse_meta["submit_debug_validation_error"] = str(exc)
                     continue
+                continue
+            if force_submit:
+                parse_meta["force_submit_discarded_count"] += 1
+                logger.warning(
+                    "Force-submit mode: discarding non-submit tool_call '%s' to force fallback JSON extraction",
+                    name,
+                )
                 continue
             tool_calls.append(raw)
 
@@ -270,14 +365,25 @@ class InferenceEngine:
 
     @staticmethod
     def _fallback_extract_json(content: str) -> dict[str, Any] | None:
-        match = re.search(r"\{[\s\S]*\}", content or "")
+        if not content:
+            return None
+        # Scan { positions from end to start — the last JSON block is most likely the target
+        decoder = json.JSONDecoder()
+        positions = [i for i, c in enumerate(content) if c == "{"]  # noqa: RUF015
+        for pos in reversed(positions):
+            try:
+                obj, _ = decoder.raw_decode(content, pos)
+                if isinstance(obj, dict):
+                    return obj
+            except json.JSONDecodeError:
+                continue
+        # Fallback: original greedy regex
+        match = re.search(r"\{[\s\S]*\}", content)
         if not match:
             return None
         try:
             candidate = json.loads(match.group(0))
-            if isinstance(candidate, dict):
-                return candidate
-            return None
+            return candidate if isinstance(candidate, dict) else None
         except Exception:  # noqa: BLE001
             return None
 
@@ -356,18 +462,25 @@ class InferenceEngine:
             iteration = item.get("iteration")
             iter_tag = f"[iter={iteration}] " if iteration is not None else ""
 
+            call_id = str(raw_tool_call.get("id", "")).strip()
+            if not call_id:
+                call_id = "fallback-" + uuid4().hex[:12]
+                raw_tool_call = {**raw_tool_call, "id": call_id}
+
+            reasoning = item.get("reasoning_content") or None
             messages.append(
                 Message(
                     role="assistant",
                     content="",
                     tool_calls=[raw_tool_call],
+                    reasoning_content=reasoning,
                 )
             )
             messages.append(
                 Message(
                     role="tool",
                     content=iter_tag + json.dumps(result_payload, ensure_ascii=True),
-                    tool_call_id=str(raw_tool_call.get("id", "")).strip(),
+                    tool_call_id=call_id,
                 )
             )
         return messages
@@ -468,6 +581,10 @@ class InferenceEngine:
                 "assistant_content_preview": self._trace_recorder.build_text_preview(
                     response.content
                 ),
+                "content_length": len(response.content),
+                "reasoning_content_length": len(response.reasoning_content),
+                "tool_choice": parse_meta.get("tool_choice"),
+                "thinking_disabled": bool(parse_meta.get("thinking_disabled")),
                 "tool_call_summaries": self._trace_recorder.build_tool_call_summaries(
                     response.tool_calls
                 ),
@@ -494,5 +611,6 @@ class InferenceEngine:
                 "location_warnings": parse_meta.get("location_warnings", []),
                 "fallback_json_found": fallback_json_found,
                 "fallback_parse_valid": fallback_parse_valid,
+                "force_submit_discarded_count": parse_meta.get("force_submit_discarded_count", 0),
             },
         )

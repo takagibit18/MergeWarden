@@ -58,6 +58,7 @@ class AgentOrchestrator:
         self._submit_review_seen_any = False
         self._submit_debug_seen_any = False
         self._latest_tokens = 0
+        self._last_reasoning_content: str = ""
         self._total_tokens = 0
         self._iteration = 0
         self._max_iterations = 1
@@ -258,7 +259,7 @@ class AgentOrchestrator:
                     serialized_tools = build_submit_tool_schemas()
                 else:
                     serialized_tools = build_tool_schemas(tool_specs) + build_submit_tool_schemas()
-                result, total_tokens = await engine.analyze(
+                result, total_tokens, reasoning_content = await engine.analyze(
                     state=state,
                     request=request,
                     tool_specs=tool_specs,
@@ -275,6 +276,7 @@ class AgentOrchestrator:
                     near_last_iteration=(self._iteration + 1) >= self._max_iterations,
                 )
                 self._latest_tokens = total_tokens
+                self._last_reasoning_content = reasoning_content
                 if result.draft_review is not None:
                     self._submit_review_seen_any = True
                 if result.draft_debug is not None:
@@ -351,7 +353,7 @@ class AgentOrchestrator:
                     ErrorDetail(file="", message=err, category="runtime")
                 )
                 results.append(ToolResult(ok=False, error=err, data=structured))
-                executed_feedback.append({"tool_call": raw_call, "result": results[-1]})
+                executed_feedback.append({"tool_call": raw_call, "result": results[-1], "reasoning_content": self._last_reasoning_content})
                 index += 1
                 continue
 
@@ -374,7 +376,7 @@ class AgentOrchestrator:
                         },
                     )
                     executed_feedback.append(
-                        {"tool_call": raw_call, "result": results[-1]}
+                        {"tool_call": raw_call, "result": results[-1], "reasoning_content": self._last_reasoning_content}
                     )
                     index += 1
                     continue
@@ -407,7 +409,7 @@ class AgentOrchestrator:
                         "result_preview": self._trace_recorder.build_tool_result_preview(result),
                     },
                 )
-                executed_feedback.append({"tool_call": raw_call, "result": result})
+                executed_feedback.append({"tool_call": raw_call, "result": result, "reasoning_content": self._last_reasoning_content})
                 index += 1
                 continue
 
@@ -440,7 +442,7 @@ class AgentOrchestrator:
                         "result_preview": self._trace_recorder.build_tool_result_preview(result),
                     },
                 )
-                executed_feedback.append({"tool_call": raw_call, "result": result})
+                executed_feedback.append({"tool_call": raw_call, "result": result, "reasoning_content": self._last_reasoning_content})
                 index += 1
                 continue
 
@@ -507,7 +509,7 @@ class AgentOrchestrator:
                         ),
                     },
                 )
-                executed_feedback.append({"tool_call": batch_raw, "result": batch_result})
+                executed_feedback.append({"tool_call": batch_raw, "result": batch_result, "reasoning_content": self._last_reasoning_content})
             index += len(batch_calls)
 
         self._append_tool_feedback(executed_feedback)
@@ -647,6 +649,7 @@ class AgentOrchestrator:
         self._submit_review_seen_any = False
         self._submit_debug_seen_any = False
         self._latest_tokens = 0
+        self._last_reasoning_content = ""
         self._total_tokens = 0
         self._iteration = 0
         self._max_iterations = max_iterations
@@ -750,6 +753,7 @@ class AgentOrchestrator:
                 "iteration": self._iteration,
                 "tool_call": tool_call,
                 "result": result,
+                "reasoning_content": entry.get("reasoning_content"),
             }
             self._tool_feedback.append(enriched)
             digest = self._compute_feedback_digest(tool_call)

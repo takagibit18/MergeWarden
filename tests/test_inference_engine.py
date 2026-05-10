@@ -28,9 +28,16 @@ class RecordingFakeModelClient:
 
     def __init__(self) -> None:
         self.calls: list[list[Any]] = []
+        from src.models.schemas import ModelConfig
+
+        self.default_config = ModelConfig(model="fake-model")
+        self.configs: list[Any] = []
+        self.tools: list[Any] = []
 
     async def chat(self, messages, config=None, tools=None):  # type: ignore[no-untyped-def,unused-argument]
         self.calls.append(messages)
+        self.configs.append(config)
+        self.tools.append(tools)
         first_content = str(messages[0].content)
         if self.SUMMARY_SYSTEM_MARKER in first_content:
             return ModelResponse(
@@ -199,6 +206,10 @@ def test_analyze_emits_model_detail_and_plan_parsed_events(monkeypatch) -> None:
         payload for event_type, _, payload in events if event_type == EventType.MODEL_RESPONSE_DETAIL
     )
     assert model_event["iteration"] == 1
+    assert "content_length" in model_event
+    assert "reasoning_content_length" in model_event
+    assert "tool_choice" in model_event
+    assert "thinking_disabled" in model_event
     plan_event = next(
         payload for event_type, _, payload in events if event_type == EventType.PLAN_PARSED
     )
@@ -222,3 +233,109 @@ def test_normalize_review_payload_canonicalizes_location() -> None:
     issues = normalized["issues"]
     assert issues[0]["location"] == "src/api/handler.py:33"
     assert warnings
+
+
+def test_force_submit_review_forces_submit_tool_and_disables_deepseek_thinking(monkeypatch) -> None:
+    monkeypatch.setenv("CONTEXT_SUMMARY_ENABLED", "false")
+    client = RecordingFakeModelClient()
+    client.default_config = client.default_config.model_copy(update={"model": "deepseek-v4-pro"})
+    engine = InferenceEngine(model_client=client)  # type: ignore[arg-type]
+    state = ContextState(goal="Run structured code review")
+    request = ReviewRequest(repo_path=".")
+
+    asyncio.run(
+        engine.analyze(
+            state=state,
+            request=request,
+            tool_specs=[],
+            tool_schemas=[{"type": "function", "function": {"name": "submit_review"}}],
+            force_submit=True,
+        )
+    )
+
+    config = client.configs[-1]
+    assert config.max_tokens == 2048
+    assert config.tool_choice == {
+        "type": "function",
+        "function": {"name": "submit_review"},
+    }
+    assert config.extra_body == {"thinking": {"type": "disabled"}}
+    assert [tool["function"]["name"] for tool in client.tools[-1]] == ["submit_review"]
+
+
+def test_force_submit_debug_forces_debug_tool_without_non_deepseek_thinking_override(monkeypatch) -> None:
+    monkeypatch.setenv("CONTEXT_SUMMARY_ENABLED", "false")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    client = RecordingFakeModelClient()
+    client.default_config = client.default_config.model_copy(update={"model": "gpt-4o"})
+    engine = InferenceEngine(model_client=client)  # type: ignore[arg-type]
+    state = ContextState(goal="Run structured debug analysis")
+    request = DebugRequest(repo_path=".")
+
+    asyncio.run(
+        engine.analyze(
+            state=state,
+            request=request,
+            tool_specs=[],
+            tool_schemas=[{"type": "function", "function": {"name": "submit_debug"}}],
+            force_submit=True,
+        )
+    )
+
+    config = client.configs[-1]
+    assert config.tool_choice == {
+        "type": "function",
+        "function": {"name": "submit_debug"},
+    }
+    assert config.extra_body is None
+
+
+def test_near_last_review_iteration_switches_to_submit_only_forced_mode(monkeypatch) -> None:
+    monkeypatch.setenv("CONTEXT_SUMMARY_ENABLED", "false")
+    client = RecordingFakeModelClient()
+    engine = InferenceEngine(model_client=client)  # type: ignore[arg-type]
+    state = ContextState(goal="Run structured code review")
+    request = ReviewRequest(repo_path=".")
+
+    asyncio.run(
+        engine.analyze(
+            state=state,
+            request=request,
+            tool_specs=[],
+            tool_schemas=[
+                {"type": "function", "function": {"name": "read_file"}},
+                {"type": "function", "function": {"name": "submit_review"}},
+                {"type": "function", "function": {"name": "submit_debug"}},
+            ],
+            near_last_iteration=True,
+        )
+    )
+
+    config = client.configs[-1]
+    assert config.max_tokens == 2048
+    assert config.tool_choice == {
+        "type": "function",
+        "function": {"name": "submit_review"},
+    }
+    assert [tool["function"]["name"] for tool in client.tools[-1]] == ["submit_review"]
+
+
+def test_invalid_submit_review_arguments_do_not_create_empty_draft() -> None:
+    client = RecordingFakeModelClient()
+    engine = InferenceEngine(model_client=client)  # type: ignore[arg-type]
+
+    plan, parse_meta = engine._parse_tool_calls(  # noqa: SLF001
+        [
+            {
+                "function": {
+                    "name": "submit_review",
+                    "arguments": '{"summary": "truncated", "issues": [',
+                }
+            }
+        ],
+        ReviewRequest(repo_path="."),
+        force_submit=True,
+    )
+
+    assert plan.draft_review is None
+    assert "Invalid JSON" in parse_meta["submit_review_validation_error"]
