@@ -31,7 +31,7 @@
 
 | 项 | 说明 |
 |------|------|
-| `ContextBuilder` 与截断 | `truncate_context` 已通过 `prompts.build_*_messages` 与 [context_priority.py](../src/analyzer/context_priority.py) 接入推理消息拼装；`load_diff` 当前为 `git diff --cached`（暂存区），与「工作区全量 diff」语义可能不同。 |
+| `ContextBuilder` 与截断 | `truncate_context` 已通过 `prompts.build_*_messages` 与 [context_priority.py](../src/analyzer/context_priority.py) 接入推理消息拼装；`load_diff` 当前为 `git diff HEAD`（工作区全量 diff，含 staged + unstaged）。 |
 | 事件日志粒度 | 计划中的「每 phase 成对 phase_start/end」与部分观测点仍可按需补全。 |
 | 异常兜底 | 计划中的「连续 2 次工具失败降级」等策略可按需细化。 |
 

@@ -20,9 +20,9 @@
 
 仍需注意的基线风险：
 
-- 部分规划文档仍滞后于代码现状，例如 Docker 后端状态、容器内执行口径、未来 API 入口。
-- CI 当前 `golden` suite 暂为纯负样本，因此本轮 gate 只约束 schema 与 false positive；`hit_rate >= 0.6` 等补充正样本后恢复。
-- Docker 能执行命令，但还缺面向用户的一键 CLI demo 闭环。
+- 部分规划文档仍滞后于代码现状（如 golden 样本分布、FastAPI 实现状态等），本轮 docs-audit 已逐份对齐。
+- CI 当前 `golden` suite 已有 4 正 + 2 负样本（全部 `annotated_by=manual`、`reviewed=true`）；gate 暂用过渡阈值 `hit_rate >= 0.0`，待 DeepSeek 命中率稳定后恢复 `hit_rate >= 0.6`。
+- Docker CLI demo 命令已在 README 和 docker-compose.yml 中就绪。
 
 ---
 
@@ -185,28 +185,16 @@ python -m eval.gate --report eval/outputs/ci_report.json --schema-validity-min 1
 
 ### M+4.1 Eval 正样本补齐与门禁恢复
 
-**目标**：让 `suite=golden` 同时包含人工审核过的正负样本，并恢复 `hit_rate >= 0.6` 门禁。
+**状态**：✅ 正样本已补齐（4 正 + 2 负，全部 `annotated_by=manual`、`reviewed=true`）。剩余：恢复 CI `hit_rate >= 0.6` 门禁（待 DeepSeek 命中率稳定后执行）。
 
-**任务**
+**已完成**
+- 已补充 4 条人工审核过的正样本（`pytest_pr8513`, `pytest_pr9350`, `pytest_pr7254`, `nethermind_pr5381`），2 条负样本（`ruff_pr24648`, `requests_pr7205`），每条 expected issue 可从 diff 直接定位。
+- `manifest.json` 已统一索引，覆盖 `should-detect` 与 `zero-issue`。
+- 正样本均满足 `annotated_by=manual`、`reviewed=true`、`tags` 含 `positive-sample` 与 `should-detect`。
 
-- 至少补充 2-3 条人工审核过的真实 PR 正样本到 `suite=golden`，每条 expected issue 必须能从 diff 直接定位。
-- 下一阶段开始向 `PR diff + repo snapshot` 的健壮 fixture 形态迁移，详见 [golden_fixture_snapshot_plan.md](golden_fixture_snapshot_plan.md)。
-- 更新 `manifest.json`，确保 CI 运行的 `suite=golden` 同时覆盖 `should-detect` 与 `zero-issue`。
-- 将 `.github/workflows/ci.yml` 的 eval gate 恢复为 `--hit-rate-min 0.6`。
-- 同步 `eval/README.md` 与本路线图中的门禁命令。
-
-**验收**
-
-- `suite=golden` 中至少有一条正样本和一条负样本。
-- `hit_rate >= 0.6` 在 CI 中重新生效。
-- 新增正样本的 `annotated_by` 为 `manual`，`reviewed` 为 `true`。
-
-**验证**
-
-```bash
-python -m eval.run eval --suite golden --output-json eval/outputs/ci_report.json
-python -m eval.gate --report eval/outputs/ci_report.json --schema-validity-min 1.0 --hit-rate-min 0.6 --false-positive-rate-max 0.5
-```
+**待恢复**
+- 将 `.github/workflows/ci.yml` 的 eval gate 从 `--hit-rate-min 0.0` 恢复为 `--hit-rate-min 0.6`。
+- 同步 `eval/README.md` 中的门禁命令与样本分布描述。
 
 ### M+5 契约与文档一致性
 
@@ -214,8 +202,8 @@ python -m eval.gate --report eval/outputs/ci_report.json --schema-validity-min 1
 
 **任务**
 
-- 更新 `architecture.md`：Docker 后端不再是 stub；FastAPI 从 optional routes 变为 MVP+ 薄层目标。
-- 更新 `project_plan.md`：MVP+ 包含 FastAPI 薄层、Docker CLI demo、温和 eval gate；Phase 2 才包含 GitHub Bot。
+- 更新 `architecture.md`：Docker 后端和 FastAPI 薄层均已落地，文档需反映实际状态。
+- 更新 `project_plan.md`：MVP+ 已包含 FastAPI 薄层、Docker CLI demo、温和 eval gate；Phase 2 才包含 GitHub Bot。
 - 更新 `shared_contracts.md`：`EXECUTE_BACKEND=docker` 描述为可用后端，并补齐 Docker 配置项与 `SandboxResult` 观测字段。
 - 更新 `.env.example` 与 README：补 FastAPI、Docker demo、eval gate、Docker smoke 说明。
 
