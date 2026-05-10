@@ -78,6 +78,10 @@ class ModelClient:
         }
         if tools:
             payload["tools"] = tools
+        if runtime_config.tool_choice is not None:
+            payload["tool_choice"] = runtime_config.tool_choice
+        if runtime_config.extra_body is not None:
+            payload["extra_body"] = runtime_config.extra_body
 
         last_error: ModelClientError | None = None
         for attempt in range(self._max_retries):
@@ -124,8 +128,15 @@ class ModelClient:
                         code="provider_unavailable",
                     )
                 else:
+                    body_preview = ""
+                    try:
+                        body = exc.response.content if exc.response else b""
+                        body_preview = body.decode("utf-8", errors="replace")[:500]
+                    except Exception:  # noqa: BLE001
+                        pass
                     raise ModelClientError(
-                        "Model provider returned a non-retriable status",
+                        f"Model provider returned status {exc.status_code}"
+                        + (f": {body_preview}" if body_preview else ""),
                         status_code=exc.status_code,
                         code="api_status_error",
                     ) from exc
@@ -161,10 +172,12 @@ class ModelClient:
                 "role": message.role,
                 "content": message.content,
             }
-            if message.tool_call_id:
+            if message.tool_call_id is not None:
                 item["tool_call_id"] = message.tool_call_id
             if message.tool_calls:
                 item["tool_calls"] = message.tool_calls
+            if message.reasoning_content is not None:
+                item["reasoning_content"] = message.reasoning_content
             serialized.append(item)
         return serialized
 
@@ -176,6 +189,12 @@ class ModelClient:
         content = response_message.content if response_message else ""
         if content is None:
             content = ""
+
+        reasoning = ""
+        if response_message:
+            raw_reasoning = getattr(response_message, "reasoning_content", None)
+            if isinstance(raw_reasoning, str):
+                reasoning = raw_reasoning
 
         tool_calls: list[dict[str, Any]] = []
         if response_message and response_message.tool_calls:
@@ -202,4 +221,5 @@ class ModelClient:
             usage=token_usage,
             model=str(getattr(completion, "model", "") or ""),
             finish_reason=finish_reason,
+            reasoning_content=reasoning,
         )

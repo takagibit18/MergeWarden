@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest tests/test_eval_runner.py -x -v)",
+      "Bash(python -c ' *)"
+    ]
+  }
+}

@@ -19,6 +19,14 @@ class ModelClientError(Exception):
         self.status_code = status_code
         self.code = code
 
+    def __str__(self) -> str:
+        parts = [super().__str__()]
+        if self.status_code is not None:
+            parts.append(f"(status={self.status_code})")
+        if self.code:
+            parts.append(f"[code={self.code}]")
+        return " ".join(parts)
+
 
 class AuthenticationError(ModelClientError):
     """API key missing or rejected by the provider."""

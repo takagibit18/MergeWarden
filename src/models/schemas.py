@@ -21,6 +21,14 @@ class ModelConfig(BaseModel):
     timeout: float = Field(
         default=60.0, gt=0.0, le=600.0, description="Request timeout in seconds"
     )
+    tool_choice: str | dict[str, Any] | None = Field(
+        default=None,
+        description="Optional provider tool-choice control for chat completions",
+    )
+    extra_body: dict[str, Any] | None = Field(
+        default=None,
+        description="Optional provider-specific request body extension",
+    )
 
 
 class Message(BaseModel):
@@ -33,6 +41,10 @@ class Message(BaseModel):
     )
     tool_call_id: str | None = Field(
         default=None, description="Tool call id for tool role messages"
+    )
+    reasoning_content: str | None = Field(
+        default=None,
+        description="Reasoning/thinking content (DeepSeek thinking mode)",
     )
 
 
@@ -54,3 +66,7 @@ class ModelResponse(BaseModel):
     usage: TokenUsage = Field(default_factory=TokenUsage)
     model: str = Field(default="", description="Provider model id in response")
     finish_reason: str = Field(default="", description="Provider finish reason")
+    reasoning_content: str = Field(
+        default="",
+        description="Raw reasoning/thinking content (e.g. DeepSeek thinking mode)",
+    )
