@@ -256,10 +256,10 @@ docker compose run --rm agent python cli.py review --help
 - [ ] FastAPI `GET /health`、`POST /review`、`POST /debug` 有测试与文档。
 - [ ] `SandboxResult`、execute 后端、Docker 配置在契约文档中描述一致。
 - [ ] 事件日志能复盘失败原因和终止原因。
-- [ ] 当前 CI gate 使用过渡门禁：schema 1.0、hit rate 0.0、false positive 0.5；补齐 `golden` 正样本后恢复 hit rate 0.6。
+- [ ] 当前 CI gate 使用过渡门禁：schema 1.0、hit rate 0.0、false positive 0.5；`hit_rate >= 0.6` 仅在模型命中率稳定后另行恢复，不作为本次 MVP+ 收尾必需项。
 - [ ] Golden eval report 与 human review artifact 可查看。
 - [ ] README、architecture、project plan、shared contracts、execute design、golden fixture snapshot plan 口径一致。
-- [ ] Phase 2 backlog 清晰列出 GitHub Action/Bot、PR 评论、IDE 插件等后续事项。
+- [ ] Phase 2 backlog 仅列 GitHub Action/Bot、PR 评论、IDE 插件等后续事项，不混入 MVP+ 完成标准。
 
 ---
 

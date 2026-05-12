@@ -96,3 +96,21 @@ def test_review_endpoint_returns_stable_error_without_raw_exception(monkeypatch)
     assert response.status_code == 500
     assert response.json() == {"message": "review failed", "run_id": ""}
     assert "secret-token-leaked" not in response.text
+
+
+def test_debug_endpoint_returns_stable_error_without_raw_exception(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from src.api import app as api_app
+
+    async def _broken_run_debug(self, request):  # type: ignore[no-untyped-def]
+        raise RuntimeError("debug-secret-token-leaked")
+
+    monkeypatch.setattr(api_app.AgentOrchestrator, "run_debug", _broken_run_debug)
+
+    response = TestClient(api_app.app).post(
+        "/debug",
+        json={"repo_path": "."},
+    )
+
+    assert response.status_code == 500
+    assert response.json() == {"message": "debug failed", "run_id": ""}
+    assert "debug-secret-token-leaked" not in response.text

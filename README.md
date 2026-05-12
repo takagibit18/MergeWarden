@@ -51,6 +51,13 @@ python cli.py review --help
 python cli.py debug --help
 ```
 
+Minimal local demo:
+
+```bash
+python cli.py review .
+python cli.py debug .
+```
+
 ### Docker
 
 ```bash
@@ -86,6 +93,14 @@ Available endpoints:
 - `GET /health`
 - `POST /review`
 - `POST /debug`
+
+Smoke check:
+
+```bash
+curl http://127.0.0.1:8000/health
+curl -X POST http://127.0.0.1:8000/review -H "Content-Type: application/json" -d '{"repo_path":".","diff_mode":true}'
+curl -X POST http://127.0.0.1:8000/debug -H "Content-Type: application/json" -d '{"repo_path":".","error_log_text":"pytest failed"}'
+```
 
 ## 项目结构
 

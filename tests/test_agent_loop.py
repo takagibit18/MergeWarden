@@ -7,7 +7,8 @@ import json
 from pathlib import Path, PurePath
 
 from src.analyzer.event_log import EventType
-from src.analyzer.schemas import AnalysisPlan, DebugRequest, ReviewRequest
+from src.analyzer.output_formatter import ReviewReport
+from src.analyzer.schemas import AnalysisPlan, DebugRequest, ReviewRequest, ReviewResponse
 from src.orchestrator.agent_loop import AgentOrchestrator
 from src.tools.base import BaseTool, ToolRegistry, ToolSafety, ToolSpec
 from src.tools.file_read import FileReadTool
@@ -176,6 +177,92 @@ def test_event_log_directory_is_relative_to_repo_path(tmp_path, monkeypatch) -> 
     response = asyncio.run(orchestrator.run_review(ReviewRequest(repo_path=str(repo))))
     log_path = repo / ".mergewarden" / "logs" / f"{response.run_id}.jsonl"
     assert log_path.exists()
+
+
+def _continue_decision_for(
+    tmp_path: Path,
+    *,
+    max_iterations: int,
+    iteration: int,
+    budget_state: str = "none",
+    blocking_error: bool = False,
+    needs_tools: bool = False,
+) -> tuple[str, dict[str, object]]:
+    orchestrator = AgentOrchestrator()
+    orchestrator._reset_run(max_iterations=max_iterations, repo_path=str(tmp_path))  # noqa: SLF001
+    state = orchestrator.prepare_context(ReviewRequest(repo_path=str(tmp_path)))
+    response = ReviewResponse(
+        run_id=orchestrator._run_id,  # noqa: SLF001
+        report=ReviewReport(summary="test"),
+        context=state,
+    )
+    orchestrator._iteration = iteration  # noqa: SLF001
+    orchestrator._budget_state = budget_state  # noqa: SLF001
+    orchestrator._budget_exhausted = budget_state != "none"  # noqa: SLF001
+    orchestrator._blocking_error = blocking_error  # noqa: SLF001
+    orchestrator._last_plan = AnalysisPlan(needs_tools=needs_tools)  # noqa: SLF001
+
+    should_continue = orchestrator.should_continue(state, response)
+    decision = [step for step in state.decisions if step.phase == "continue"][-1]
+    log_path = tmp_path / ".mergewarden" / "logs" / f"{response.run_id}.jsonl"
+    events = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    event = [
+        item
+        for item in events
+        if item["event_type"] == EventType.DECISION.value and item["phase"] == "continue"
+    ][-1]
+
+    assert should_continue is (decision.result == "continue")
+    return decision.result, event["payload"]
+
+
+def test_continue_reason_prefers_hard_budget_over_model_completed(tmp_path) -> None:
+    result, payload = _continue_decision_for(
+        tmp_path,
+        max_iterations=3,
+        iteration=0,
+        budget_state="hard_capped",
+    )
+
+    assert result == "stop:budget_hard_capped"
+    assert payload["reason"] == "budget_hard_capped"
+    assert payload["blocking_error"] is False
+
+
+def test_continue_reason_prefers_blocking_error_over_model_completed(tmp_path) -> None:
+    result, payload = _continue_decision_for(
+        tmp_path,
+        max_iterations=3,
+        iteration=0,
+        blocking_error=True,
+    )
+
+    assert result == "stop:blocking_error"
+    assert payload["reason"] == "blocking_error"
+    assert payload["blocking_error"] is True
+
+
+def test_continue_reason_reports_max_iterations(tmp_path) -> None:
+    result, payload = _continue_decision_for(
+        tmp_path,
+        max_iterations=1,
+        iteration=0,
+        needs_tools=True,
+    )
+
+    assert result == "stop:max_iterations"
+    assert payload["reason"] == "max_iterations"
+
+
+def test_continue_reason_reports_model_completed(tmp_path) -> None:
+    result, payload = _continue_decision_for(
+        tmp_path,
+        max_iterations=3,
+        iteration=0,
+    )
+
+    assert result == "stop:model_completed"
+    assert payload["reason"] == "model_completed"
 
 
 def test_execute_tools_uses_registry(tmp_path, monkeypatch) -> None:

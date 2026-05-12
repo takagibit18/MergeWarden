@@ -585,7 +585,7 @@ class AgentOrchestrator:
         self._model_completed = not has_pending_tools and not self._blocking_error
         reached_limit = (self._iteration + 1) >= self._max_iterations
 
-        stop = self._model_completed or reached_limit or self._budget_exhausted
+        stop = self._model_completed or reached_limit or self._budget_exhausted or self._blocking_error
         if self._budget_exhausted:
             state.errors.append(
                 ErrorDetail(
@@ -595,14 +595,16 @@ class AgentOrchestrator:
                 )
             )
 
-        if self._model_completed:
-            reason = "model_completed"
+        if self._budget_state == "hard_capped":
+            reason = "budget_hard_capped"
+        elif self._blocking_error:
+            reason = "blocking_error"
         elif reached_limit:
             reason = "max_iterations"
-        elif self._budget_state == "hard_capped":
-            reason = "budget_hard_capped"
         elif self._budget_state == "soft_capped":
             reason = "budget_soft_capped"
+        elif self._model_completed:
+            reason = "model_completed"
         else:
             reason = "continue"
         self._last_decision_reason = reason
@@ -624,6 +626,7 @@ class AgentOrchestrator:
                 "reached_limit": reached_limit,
                 "budget_exhausted": self._budget_exhausted,
                 "budget_state": self._budget_state,
+                "blocking_error": self._blocking_error,
                 "reason": reason,
                 "submit_review_seen_any": self._submit_review_seen_any,
                 "submit_debug_seen_any": self._submit_debug_seen_any,
