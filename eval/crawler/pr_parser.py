@@ -97,7 +97,10 @@ def build_fixture_input(
     """Create `FixtureInput` from diff and fetched file snapshots."""
     parsed = parse_unified_diff(diff_text)
     relevant_paths = {item.effective_path for item in parsed if item.effective_path}
-    files = {path: file_contents.get(path, "") for path in sorted(relevant_paths)}
+    if workspace is not None:
+        files = {}
+    else:
+        files = {path: file_contents.get(path, "") for path in sorted(relevant_paths)}
     return FixtureInput(diff_text=diff_text, files=files, workspace=workspace)
 
 

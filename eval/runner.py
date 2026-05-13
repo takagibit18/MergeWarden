@@ -77,16 +77,34 @@ def _prepare_fixture_workspace(fixture: Fixture, target_root: Path) -> Path:
         _write_fixture_files(target_root, fixture.input.files)
         return target_root
     if workspace.kind == "git":
-        return _checkout_git_workspace(workspace, target_root)
+        return _checkout_git_workspace(
+            workspace,
+            target_root,
+            pr_number=fixture.source.pr_number,
+        )
     raise ValueError(f"Unsupported fixture workspace kind: {workspace.kind}")
 
 
-def _checkout_git_workspace(workspace: FixtureWorkspace, target_root: Path) -> Path:
+def _checkout_git_workspace(
+    workspace: FixtureWorkspace,
+    target_root: Path,
+    *,
+    pr_number: int | None = None,
+) -> Path:
     target_root.parent.mkdir(parents=True, exist_ok=True)
     if target_root.exists():
         shutil.rmtree(target_root)
     _run_git(["clone", "--quiet", workspace.repo_url, str(target_root)])
-    _run_git(["checkout", "--quiet", workspace.checkout_sha], cwd=target_root)
+    try:
+        _run_git(["checkout", "--quiet", workspace.checkout_sha], cwd=target_root)
+    except subprocess.CalledProcessError:
+        if pr_number is None:
+            raise
+        _run_git(
+            ["fetch", "--quiet", "origin", f"refs/pull/{pr_number}/head"],
+            cwd=target_root,
+        )
+        _run_git(["checkout", "--quiet", workspace.checkout_sha], cwd=target_root)
     checked_out = _run_git(["rev-parse", "HEAD"], cwd=target_root)
     if checked_out != workspace.checkout_sha:
         raise ValueError(

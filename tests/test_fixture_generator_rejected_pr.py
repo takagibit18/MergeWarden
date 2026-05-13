@@ -172,13 +172,14 @@ def test_rejected_pr_fixture_uses_head_sha_and_review_context_without_leaking_to
         )
     )
 
-    assert github_client.content_refs == ["head-sha"]
+    assert github_client.content_refs == []
     assert annotator.review_context == "MEMBER: This breaks empty input handling."
     fixture_payload = written[0].read_text(encoding="utf-8")
     assert "This breaks empty input handling" not in fixture_payload
     assert '"rejected-pr"' in fixture_payload
     assert '"should-detect"' in fixture_payload
     assert '"workspace"' in fixture_payload
+    assert '"files": {}' in fixture_payload
     assert '"repo_url": "https://github.com/example/repo.git"' in fixture_payload
     assert '"base_sha": "base-sha"' in fixture_payload
     assert '"head_sha": "head-sha"' in fixture_payload
