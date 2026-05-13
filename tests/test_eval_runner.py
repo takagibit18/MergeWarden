@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import eval.runner as runner_module
 from eval.runner import (
     _aggregate_sampled_result,
     _prepare_fixture_workspace,
@@ -67,6 +68,18 @@ def _build_source_repo(tmp_path: Path) -> tuple[Path, str, str, str]:
     head_sha = _git(source, "rev-parse", "HEAD")
     diff_text = _git(source, "diff", f"{base_sha}..{head_sha}")
     return source, base_sha, head_sha, diff_text
+
+
+def _build_source_repo_with_hidden_pr_ref(
+    tmp_path: Path,
+) -> tuple[Path, str, str, str]:
+    source, base_sha, head_sha, diff_text = _build_source_repo(tmp_path)
+    remote = tmp_path / "remote.git"
+    _git(tmp_path, "clone", "--bare", str(source), str(remote))
+    _git(remote, "update-ref", "refs/heads/main", base_sha)
+    _git(remote, "update-ref", "refs/pull/12/head", head_sha)
+    _git(remote, "update-ref", "-d", "refs/heads/master")
+    return remote, base_sha, head_sha, diff_text
 
 
 def test_resolve_event_log_path_returns_existing_file(
@@ -201,6 +214,90 @@ def test_prepare_fixture_workspace_restores_git_snapshot(tmp_path: Path) -> None
         encoding="utf-8"
     )
     assert (workspace / "pkg" / "helper.py").exists()
+
+
+def test_prepare_fixture_workspace_fetches_pr_ref_when_checkout_is_not_cloned(
+    tmp_path: Path,
+) -> None:
+    remote, base_sha, head_sha, diff_text = _build_source_repo_with_hidden_pr_ref(
+        tmp_path
+    )
+    fixture = Fixture.model_validate(
+        {
+            "id": "workspace-fixture",
+            "type": "review",
+            "source": {"repo_full_name": "example/repo", "pr_number": 12},
+            "input": {
+                "diff_text": diff_text,
+                "files": {},
+                "workspace": {
+                    "kind": "git",
+                    "repo_url": str(remote),
+                    "base_sha": base_sha,
+                    "head_sha": head_sha,
+                    "checkout_sha": head_sha,
+                    "diff_base_sha": base_sha,
+                },
+            },
+            "expected": {"issues": []},
+        }
+    )
+
+    workspace = _prepare_fixture_workspace(fixture, tmp_path / "workspace")
+
+    assert _git(workspace, "rev-parse", "HEAD") == head_sha
+
+
+def test_prepare_fixture_workspace_fetches_pr_ref_after_checkout_failure(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    fixture = Fixture.model_validate(
+        {
+            "id": "workspace-fixture",
+            "type": "review",
+            "source": {"repo_full_name": "example/repo", "pr_number": 12},
+            "input": {
+                "diff_text": "",
+                "files": {},
+                "workspace": {
+                    "kind": "git",
+                    "repo_url": "https://github.com/example/repo.git",
+                    "base_sha": "base",
+                    "head_sha": "head",
+                    "checkout_sha": "head",
+                    "diff_base_sha": "base",
+                },
+            },
+            "expected": {"issues": []},
+        }
+    )
+    calls: list[list[str]] = []
+    checkout_attempts = 0
+
+    def fake_run_git(args: list[str], *, cwd: Path | None = None) -> str:
+        nonlocal checkout_attempts
+        calls.append(args)
+        if args[0] == "clone":
+            Path(args[-1]).mkdir(parents=True)
+            return ""
+        if args[:2] == ["checkout", "--quiet"]:
+            checkout_attempts += 1
+            if checkout_attempts == 1:
+                raise subprocess.CalledProcessError(1, ["git", *args])
+            return ""
+        if args[0] == "fetch":
+            return ""
+        if args == ["rev-parse", "HEAD"]:
+            return "head"
+        raise AssertionError(f"Unexpected git args: {args}")
+
+    monkeypatch.setattr(runner_module, "_run_git", fake_run_git)
+
+    _prepare_fixture_workspace(fixture, tmp_path / "workspace")
+
+    assert ["fetch", "--quiet", "origin", "refs/pull/12/head"] in calls
+    assert checkout_attempts == 2
 
 
 def test_validate_expected_locations_against_diff_requires_changed_workspace_line(
@@ -418,3 +515,30 @@ def test_golden_fixture_distribution_has_required_buckets() -> None:
         "golden_pytest-dev_pytest_pr7254",
     }
     assert synth == []
+
+
+def test_reviewed_golden_fixtures_use_git_workspaces_without_sparse_files(
+    tmp_path: Path,
+) -> None:
+    fixtures = load_fixtures(Path("eval") / "fixtures", suite="golden", reviewed_only=True)
+
+    assert fixtures
+    for fixture in fixtures:
+        assert fixture.input.files == {}
+        assert fixture.input.workspace is not None
+        assert fixture.input.workspace.kind == "git"
+        assert fixture.input.workspace.repo_url.startswith("https://github.com/")
+        assert fixture.input.workspace.checkout_sha
+        assert fixture.input.workspace.diff_base_sha
+        for issue in fixture.expected.issues:
+            assert issue.path
+            assert issue.line is not None
+            target = tmp_path / fixture.id / issue.path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                "\n".join("line" for _ in range(issue.end_line or issue.line)),
+                encoding="utf-8",
+            )
+        assert _validate_expected_locations_against_diff(
+            fixture, tmp_path / fixture.id
+        ) == []

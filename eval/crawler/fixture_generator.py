@@ -208,19 +208,21 @@ class FixtureGenerator:
             ref = candidate.head_sha
         else:
             ref = candidate.merge_commit_sha or candidate.head_sha or candidate.base_sha
+        workspace = self._build_workspace(candidate, checkout_sha=ref)
         file_contents: dict[str, str] = {}
-        for file_item in files_payload:
-            path = str(file_item.get("filename", "") or "")
-            if not path:
-                continue
-            file_contents[path] = await self._github_client.get_file_content(
-                candidate.repo_full_name, path, ref
-            )
+        if workspace is None:
+            for file_item in files_payload:
+                path = str(file_item.get("filename", "") or "")
+                if not path:
+                    continue
+                file_contents[path] = await self._github_client.get_file_content(
+                    candidate.repo_full_name, path, ref
+                )
 
         fixture_input = build_fixture_input(
             diff_text,
             file_contents,
-            workspace=self._build_workspace(candidate, checkout_sha=ref),
+            workspace=workspace,
         )
         (
             annotation,
