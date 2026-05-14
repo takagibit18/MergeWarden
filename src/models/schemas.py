@@ -15,7 +15,7 @@ class ModelConfig(BaseModel):
         default=0.0, ge=0.0, le=2.0, description="Sampling temperature"
     )
     max_tokens: int = Field(
-        default=4096, ge=1, le=128000, description="Maximum response tokens"
+        default=2048, ge=1, le=128000, description="Maximum response tokens"
     )
     top_p: float = Field(default=1.0, ge=0.0, le=1.0, description="Nucleus sampling")
     timeout: float = Field(

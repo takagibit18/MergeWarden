@@ -16,6 +16,7 @@ from pydantic import (
     Field,
     TypeAdapter,
     field_validator,
+    model_validator,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -125,7 +126,11 @@ class Settings(BaseModel):
         ge=1,
     )
     token_budget: int = Field(
-        default_factory=lambda: int(os.getenv("TOKEN_BUDGET", "24000")),
+        default_factory=lambda: int(os.getenv("TOKEN_BUDGET", "30000")),
+        ge=1,
+    )
+    token_hard_budget: int = Field(
+        default_factory=lambda: int(os.getenv("TOKEN_HARD_BUDGET", "36000")),
         ge=1,
     )
     feedback_window_iterations: int = Field(
@@ -175,6 +180,30 @@ class Settings(BaseModel):
         default_factory=lambda: int(os.getenv("SUMMARY_MAX_TOKENS_PER_PART", "1000")),
         ge=100,
         description="Maximum completion tokens for one summarized context part",
+    )
+    model_max_tokens: int = Field(
+        default_factory=lambda: int(os.getenv("MODEL_MAX_TOKENS", "2048")),
+        ge=1,
+        le=128000,
+        description="Maximum completion tokens for a non-finalize model call.",
+    )
+    model_request_timeout_seconds: float = Field(
+        default_factory=lambda: float(os.getenv("MODEL_REQUEST_TIMEOUT_SECONDS", "60")),
+        gt=0.0,
+        le=600.0,
+        description="Hard wall-clock timeout for one model provider request.",
+    )
+    model_max_retries: int = Field(
+        default_factory=lambda: int(os.getenv("MODEL_MAX_RETRIES", "1")),
+        ge=1,
+        le=3,
+        description="Maximum provider attempts for one logical model call.",
+    )
+    agent_run_timeout_seconds: float = Field(
+        default_factory=lambda: float(os.getenv("AGENT_RUN_TIMEOUT_SECONDS", "170")),
+        gt=0.0,
+        le=3600.0,
+        description="Soft wall-clock deadline for one orchestrator run.",
     )
     event_log_dir: str = Field(
         default_factory=lambda: os.getenv("EVENT_LOG_DIR", ".mergewarden/logs"),
@@ -267,6 +296,12 @@ class Settings(BaseModel):
         if isinstance(value, str):
             return value.strip()
         return str(value).strip()
+
+    @model_validator(mode="after")
+    def _normalize_budget_relationships(self) -> "Settings":
+        if self.token_hard_budget < self.token_budget:
+            self.token_hard_budget = self.token_budget
+        return self
 
     @field_validator("openai_base_url", mode="before")
     @classmethod

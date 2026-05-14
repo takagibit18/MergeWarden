@@ -500,6 +500,103 @@ def test_match_issues_ignores_low_confidence_warning_false_positive() -> None:
     assert false_positive_count == 0
 
 
+def test_match_issues_ignores_info_and_style_for_golden_false_positives() -> None:
+    fixture = Fixture.model_validate(
+        {
+            "id": "zero-fixture",
+            "type": "review",
+            "source": {"repo_full_name": "a/b", "pr_number": 1},
+            "input": {"diff_text": "", "files": {}},
+            "expected": {"issues": []},
+            "metadata": {"suite": "golden", "reviewed": True},
+        }
+    )
+    response = ReviewResponse(
+        run_id="run-1",
+        report=ReviewReport(
+            summary="optional suggestions",
+            issues=[
+                ReviewIssue(
+                    severity=Severity.INFO,
+                    location="src/x.py:1",
+                    evidence="+ optional_context()",
+                    suggestion="Consider documenting this behavior.",
+                    confidence=0.7,
+                ),
+                ReviewIssue(
+                    severity=Severity.STYLE,
+                    location="src/y.py:1",
+                    evidence="+ import sys",
+                    suggestion="Consider import grouping.",
+                    confidence=0.3,
+                ),
+            ],
+        ),
+        context=ContextState(),
+    )
+
+    _, matched_count, false_positive_count = _match_issues(fixture, response)
+    assert matched_count == 0
+    assert false_positive_count == 0
+
+
+def test_match_issues_counts_high_confidence_warning_on_changed_line() -> None:
+    fixture = Fixture.model_validate(
+        {
+            "id": "positive-fixture",
+            "type": "review",
+            "source": {"repo_full_name": "a/b", "pr_number": 1},
+            "input": {
+                "diff_text": (
+                    "diff --git a/src/main.py b/src/main.py\n"
+                    "--- a/src/main.py\n"
+                    "+++ b/src/main.py\n"
+                    "@@ -8,4 +8,5 @@ def parse(value):\n"
+                    "     old_call()\n"
+                    "+    risky_change()\n"
+                ),
+                "files": {},
+                "workspace": {
+                    "kind": "git",
+                    "repo_url": "https://github.com/a/b.git",
+                    "checkout_sha": "head",
+                },
+            },
+            "expected": {
+                "issues": [
+                    {
+                        "severity": "warning",
+                        "path": "src/main.py",
+                        "line": 9,
+                        "end_line": 9,
+                    }
+                ]
+            },
+            "metadata": {"suite": "golden", "reviewed": True},
+        }
+    )
+    response = ReviewResponse(
+        run_id="run-1",
+        report=ReviewReport(
+            summary="found regression",
+            issues=[
+                    ReviewIssue(
+                        severity=Severity.WARNING,
+                    location="src/main.py:9",
+                    evidence="risky_change() now runs inside parse",
+                    suggestion="Restore the original guard.",
+                    confidence=0.9,
+                )
+            ],
+        ),
+        context=ContextState(),
+    )
+
+    _, matched_count, false_positive_count = _match_issues(fixture, response)
+    assert matched_count == 1
+    assert false_positive_count == 0
+
+
 def test_golden_fixture_distribution_has_required_buckets() -> None:
     real = load_fixtures(Path("eval") / "fixtures", suite="golden", reviewed_only=True)
     synth = load_fixtures(

@@ -35,7 +35,7 @@
 - **P0.2 Force-submit 兜底**  
   loop break 后如果 `draft is None` 且非 hard_capped，追加一次 `analyze(force_submit=True)`：只暴露 submit 工具 schema，prompt 追加"FINAL CALL"提示，强制模型给出最终 JSON。
 - **P0.3 Token budget 加大 + 软硬双阈值**  
-  默认 `TOKEN_BUDGET` 12000 → 24000；soft_capped=1x（允许走 finalize），hard_capped=2x（才真正硬停）。
+  当时默认 `TOKEN_BUDGET` 12000 → 24000；后续 workspace fixture 引入后重新校准为 soft cap `TOKEN_BUDGET=30000`、hard cap `TOKEN_HARD_BUDGET=36000`，soft cap 后不再追加 finalize-only 调用。
 
 ### P1（流水线健壮性）
 
@@ -51,7 +51,7 @@
 
 ### 4.1 运行参数
 
-- `REVIEW_MAX_ITERATIONS=4`，`TOKEN_BUDGET=24000`（新默认），`FEEDBACK_WINDOW_ITERATIONS=3`。
+- `REVIEW_MAX_ITERATIONS=4`，`TOKEN_BUDGET=30000`（当前默认），`TOKEN_HARD_BUDGET=36000`，`FEEDBACK_WINDOW_ITERATIONS=3`。
 - 同一 fixture `golden_astral-sh_ruff_pr24648`，run_id `bc615b04-081a-4770-a70a-bded11a6c795`。
 
 ### 4.2 逐轮行为（修复后）
@@ -93,7 +93,7 @@
 
 ## 5. 相关改动文件
 
-- `src/config.py`：`token_budget` 默认 24000、新增 `feedback_window_iterations`
+- `src/config.py`：`token_budget` 当前默认 30000、`token_hard_budget` 默认 36000，保留 `feedback_window_iterations`
 - `src/analyzer/result_processor.py`：新增 `budget_state()`
 - `src/analyzer/prompts.py`：新增 `FINALIZE_REVIEW_NOTICE / FINALIZE_DEBUG_NOTICE`
 - `src/analyzer/inference_engine.py`：窗口注入 + digest 折叠 + finalize/near-last 提示

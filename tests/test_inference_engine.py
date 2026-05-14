@@ -216,6 +216,52 @@ def test_analyze_emits_model_detail_and_plan_parsed_events(monkeypatch) -> None:
     assert plan_event["iteration"] == 1
 
 
+def test_analyze_logs_length_finish_reason_even_without_trace_detail(monkeypatch) -> None:
+    monkeypatch.setenv("CONTEXT_SUMMARY_ENABLED", "false")
+    client = RecordingFakeModelClient()
+
+    async def _length_response(messages, config=None, tools=None):  # type: ignore[no-untyped-def]
+        client.calls.append(messages)
+        client.configs.append(config)
+        client.tools.append(tools)
+        return ModelResponse(
+            content="",
+            tool_calls=[],
+            usage=TokenUsage(prompt_tokens=100, completion_tokens=2048, total_tokens=2148),
+            model="fake-model",
+            finish_reason="length",
+            reasoning_content="x" * 1000,
+        )
+
+    client.chat = _length_response  # type: ignore[method-assign]
+    events: list[tuple[EventType, str, dict[str, Any]]] = []
+    engine = InferenceEngine(
+        model_client=client,  # type: ignore[arg-type]
+        trace_recorder=TraceRecorder(detail_mode="off", max_chars=500, log_tool_body=False),
+        trace_event_writer=lambda event_type, phase, payload: events.append(
+            (event_type, phase, payload)
+        ),
+    )
+
+    asyncio.run(
+        engine.analyze(
+            state=ContextState(goal="Run structured code review"),
+            request=ReviewRequest(repo_path="."),
+            tool_specs=[],
+            iteration=2,
+        )
+    )
+
+    length_events = [
+        payload
+        for event_type, phase, payload in events
+        if event_type == EventType.ERROR and phase == "analyze"
+    ]
+    assert length_events
+    assert length_events[-1]["reason"] == "model_finish_reason_length"
+    assert length_events[-1]["iteration"] == 2
+
+
 def test_normalize_review_payload_canonicalizes_location() -> None:
     payload = {
         "summary": "ok",

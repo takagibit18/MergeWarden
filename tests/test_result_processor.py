@@ -39,7 +39,7 @@ def test_merge_review_reports_sorts_by_severity_priority() -> None:
     assert order == [Severity.CRITICAL, Severity.WARNING, Severity.INFO, Severity.STYLE]
 
 
-def test_merge_review_reports_filters_bug_findings_without_diff_evidence() -> None:
+def test_merge_review_reports_keeps_high_confidence_warning_without_diff_evidence() -> None:
     report = ReviewReport(
         summary="summary",
         issues=[
@@ -77,6 +77,7 @@ def test_merge_review_reports_filters_bug_findings_without_diff_evidence() -> No
     merged = ResultProcessor.merge_review_reports([report])
 
     assert [(issue.severity, issue.location) for issue in merged.issues] == [
+        (Severity.WARNING, "src/cache.py:8"),
         (Severity.INFO, "src/logging.py:3"),
         (Severity.STYLE, "src/style.py:1"),
     ]
@@ -157,6 +158,15 @@ def test_result_processor_budget_from_constructor() -> None:
     assert processor.is_budget_exhausted(9) is False
     assert processor.is_budget_exhausted(10) is True
     assert ContextState() is not None
+
+
+def test_result_processor_uses_explicit_hard_budget() -> None:
+    processor = ResultProcessor(token_budget=10, token_hard_budget=15)
+
+    assert processor.budget_state(9) == "none"
+    assert processor.budget_state(10) == "soft_capped"
+    assert processor.budget_state(14) == "soft_capped"
+    assert processor.budget_state(15) == "hard_capped"
 
 
 def test_triage_review_report_separates_must_fix_bugs_and_optimizations() -> None:

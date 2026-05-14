@@ -176,6 +176,7 @@ class InferenceEngine:
                 "thinking": {"type": "disabled"},
             }
         response = await self._model_client.chat(messages=messages, config=config, tools=tools)
+        self._record_length_finish(response, iteration, config)
         plan, parse_meta = self._parse_tool_calls(
             response.tool_calls, request, force_submit=submit_only
         )
@@ -612,5 +613,27 @@ class InferenceEngine:
                 "fallback_json_found": fallback_json_found,
                 "fallback_parse_valid": fallback_parse_valid,
                 "force_submit_discarded_count": parse_meta.get("force_submit_discarded_count", 0),
+            },
+        )
+
+    def _record_length_finish(
+        self,
+        response: ModelResponse,
+        iteration: int,
+        config: ModelConfig | None,
+    ) -> None:
+        if response.finish_reason != "length" or self._trace_event_writer is None:
+            return
+        self._trace_event_writer(
+            EventType.ERROR,
+            "analyze",
+            {
+                "iteration": iteration,
+                "reason": "model_finish_reason_length",
+                "model": response.model,
+                "usage": response.usage.model_dump(),
+                "max_tokens": config.max_tokens if config is not None else None,
+                "content_length": len(response.content),
+                "reasoning_content_length": len(response.reasoning_content),
             },
         )

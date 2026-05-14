@@ -6,16 +6,22 @@ import asyncio
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
+from src.models.exceptions import ModelTimeoutError
 from src.models.client import ModelClient
 from src.models.schemas import Message, ModelConfig
 
 
 class _FakeCompletions:
-    def __init__(self) -> None:
+    def __init__(self, *, delay_seconds: float = 0.0) -> None:
         self.payload: dict[str, Any] | None = None
+        self.delay_seconds = delay_seconds
 
     async def create(self, **payload: Any) -> Any:
         self.payload = payload
+        if self.delay_seconds:
+            await asyncio.sleep(self.delay_seconds)
         message = SimpleNamespace(
             content="ok",
             reasoning_content="kept reasoning",
@@ -35,8 +41,8 @@ class _FakeCompletions:
 
 
 class _FakeOpenAIClient:
-    def __init__(self) -> None:
-        self.completions = _FakeCompletions()
+    def __init__(self, *, delay_seconds: float = 0.0) -> None:
+        self.completions = _FakeCompletions(delay_seconds=delay_seconds)
         self.chat = SimpleNamespace(completions=self.completions)
 
 
@@ -81,3 +87,16 @@ def test_chat_forwards_tool_choice_extra_body_and_reasoning_messages() -> None:
     assert payload["extra_body"] == {"thinking": {"type": "disabled"}}
     assert payload["messages"][0]["reasoning_content"] == "prior reasoning"
     assert response.reasoning_content == "kept reasoning"
+
+
+def test_chat_enforces_outer_request_timeout() -> None:
+    fake = _FakeOpenAIClient(delay_seconds=0.05)
+    client = _make_client(fake)
+
+    with pytest.raises(ModelTimeoutError):
+        asyncio.run(
+            client.chat(
+                messages=[Message(role="user", content="slow")],
+                config=ModelConfig(model="fake-model", timeout=0.01),
+            )
+        )

@@ -20,8 +20,9 @@ class ResultProcessor:
     _MIN_CRITICAL_CONFIDENCE = 0.85
     _MIN_WARNING_CONFIDENCE = 0.85
 
-    def __init__(self, token_budget: int = 12000) -> None:
+    def __init__(self, token_budget: int = 12000, token_hard_budget: int | None = None) -> None:
         self._token_budget = token_budget
+        self._token_hard_budget = max(token_budget, token_hard_budget or (2 * token_budget))
 
     def format_review(
         self,
@@ -110,10 +111,7 @@ class ResultProcessor:
                 and has_specific_diff_evidence(issue.evidence)
             )
         if issue.severity == Severity.WARNING:
-            return (
-                issue.confidence >= ResultProcessor._MIN_WARNING_CONFIDENCE
-                and has_specific_diff_evidence(issue.evidence)
-            )
+            return issue.confidence >= ResultProcessor._MIN_WARNING_CONFIDENCE
         return True
 
     def is_budget_exhausted(self, total_tokens: int) -> bool:
@@ -122,7 +120,7 @@ class ResultProcessor:
 
     def budget_state(self, total_tokens: int) -> str:
         """Return 'none' | 'soft_capped' | 'hard_capped'."""
-        if total_tokens >= 2 * self._token_budget:
+        if total_tokens >= self._token_hard_budget:
             return "hard_capped"
         if total_tokens >= self._token_budget:
             return "soft_capped"

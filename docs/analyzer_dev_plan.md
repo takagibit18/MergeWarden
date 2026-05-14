@@ -140,7 +140,7 @@ MVP 阶段（设计目标，与实现对齐）：
 
 - `format_result()` 阶段检查累计 token 用量是否超出预算
 - 超预算 -> 标记为 `budget_exhausted`，进入终止流程
-- 预算值由 `Settings.token_budget`（环境变量 `TOKEN_BUDGET`，默认 12000）控制
+- 预算值由 `Settings.token_budget`（环境变量 `TOKEN_BUDGET`，默认 30000）控制；硬上限由 `TOKEN_HARD_BUDGET`（默认 36000）控制
 
 **异常兜底**：
 
