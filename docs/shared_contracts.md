@@ -157,8 +157,13 @@ CLI、FastAPI 与 CI 校验应只依赖上述稳定字段；**增删字段** 需
 | `LOG_LEVEL` | 日志级别 | 与可观测性约定一致 |
 | `REVIEW_MAX_ITERATIONS` | Review 模式最大循环轮次 | 默认 `1`，对应 `Settings.review_max_iterations` |
 | `DEBUG_MAX_ITERATIONS` | Debug 模式最大循环轮次 | 默认 `3`，对应 `Settings.debug_max_iterations` |
-| `TOKEN_BUDGET` | 单次运行累计 token 用量上限（用于终止判定） | 默认 `12000`，对应 `Settings.token_budget` |
+| `TOKEN_BUDGET` | 单次运行累计 token 用量软上限（soft cap） | 默认 `30000`，对应 `Settings.token_budget`；达到后停止追加 finalize-only 调用 |
+| `TOKEN_HARD_BUDGET` | 单次运行累计 token 用量硬上限（hard cap） | 默认 `36000`，对应 `Settings.token_hard_budget`；不低于 `TOKEN_BUDGET` |
 | `PROMPT_INPUT_TOKEN_BUDGET` | 首轮用户消息中 **可截断上下文块**（meta、diff hunk、文件、结构等）的估算 token 上限 | 默认 `32000`，对应 `Settings.prompt_input_token_budget`；与 `TOKEN_BUDGET` 语义分离，见 [analyzer_dev_plan.md](./analyzer_dev_plan.md) §2.3 |
+| `MODEL_MAX_TOKENS` | 非 finalize 模型调用的最大输出 token | 默认 `2048`，对应 `Settings.model_max_tokens` |
+| `MODEL_REQUEST_TIMEOUT_SECONDS` | 单次模型 provider 调用的硬超时 | 默认 `60`，对应 `Settings.model_request_timeout_seconds` |
+| `MODEL_MAX_RETRIES` | 单次逻辑模型调用的最大尝试次数 | 默认 `1`，对应 `Settings.model_max_retries` |
+| `AGENT_RUN_TIMEOUT_SECONDS` | 单次编排运行的总墙钟截止线 | 默认 `170`，对应 `Settings.agent_run_timeout_seconds` |
 | `EVENT_LOG_DIR` | 事件 JSONL 日志目录 | 默认 `.mergewarden/logs`；相对路径时相对于 `repo_path` 解析，见编排层实现 |
 | `PERMISSION_MODE` | 权限模式（`default` \| `plan`） | 默认 `default`；`plan` 模式禁止执行工具，仅生成计划与结构化输出 |
 | `CI` | 常见 CI 环境变量 | 设为 `true`/`1`/`yes` 时，编排层对 `write`/`execute` 工具默认拒绝（与 [cli_tools_orchestrator_contract.md](./cli_tools_orchestrator_contract.md) §11 一致） |

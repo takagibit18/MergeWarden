@@ -8,6 +8,7 @@ from pathlib import Path, PurePath
 
 from src.analyzer.event_log import EventType
 from src.analyzer.schemas import AnalysisPlan, DebugRequest, ReviewRequest
+from src.models.exceptions import ModelTimeoutError
 from src.orchestrator.agent_loop import AgentOrchestrator
 from src.tools.base import BaseTool, ToolRegistry, ToolSafety, ToolSpec
 from src.tools.file_read import FileReadTool
@@ -634,3 +635,102 @@ def test_format_result_emits_format_result_event(tmp_path, monkeypatch) -> None:
     )
     assert format_event["payload"]["iteration"] == 0
     assert "used_placeholder_summary" in format_event["payload"]
+
+
+def test_soft_budget_skips_force_submit_finalize(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TOKEN_BUDGET", "10")
+    orchestrator = AgentOrchestrator()
+    analyze_calls: list[bool] = []
+
+    async def _soft_cap_without_submit(state, request, tool_specs, **kwargs):  # type: ignore[no-untyped-def]
+        analyze_calls.append(bool(kwargs.get("force_submit")))
+        orchestrator._latest_tokens = 10  # noqa: SLF001
+        return AnalysisPlan(needs_tools=False, tool_calls=[])
+
+    monkeypatch.setattr(orchestrator, "analyze", _soft_cap_without_submit)
+
+    response = asyncio.run(orchestrator.run_review(ReviewRequest(repo_path=".")))
+
+    assert analyze_calls == [False]
+    assert response.context.decisions[-1].result == "stop:budget_soft_capped"
+    log_path = tmp_path / ".mergewarden" / "logs" / f"{response.run_id}.jsonl"
+    events = [
+        json.loads(line)
+        for line in log_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    finalize_event = next(
+        item for item in events if item["event_type"] == EventType.DECISION.value and item["phase"] == "finalize"
+    )
+    assert finalize_event["payload"]["finalize_attempt"] is False
+    assert finalize_event["payload"]["skip_reason"] == "budget_soft_capped"
+
+
+def test_run_timeout_stops_and_skips_force_submit_finalize(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AGENT_RUN_TIMEOUT_SECONDS", "0.001")
+    orchestrator = AgentOrchestrator()
+    analyze_calls: list[bool] = []
+
+    async def _slow_without_submit(state, request, tool_specs, **kwargs):  # type: ignore[no-untyped-def]
+        analyze_calls.append(bool(kwargs.get("force_submit")))
+        await asyncio.sleep(0.01)
+        return AnalysisPlan(needs_tools=False, tool_calls=[])
+
+    monkeypatch.setattr(orchestrator, "analyze", _slow_without_submit)
+
+    response = asyncio.run(orchestrator.run_review(ReviewRequest(repo_path=".")))
+
+    assert analyze_calls == [False]
+    assert response.context.decisions[-1].result == "stop:run_timeout"
+    log_path = tmp_path / ".mergewarden" / "logs" / f"{response.run_id}.jsonl"
+    events = [
+        json.loads(line)
+        for line in log_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    continue_event = next(
+        item for item in events if item["event_type"] == EventType.DECISION.value and item["phase"] == "continue"
+    )
+    finalize_event = next(
+        item for item in events if item["event_type"] == EventType.DECISION.value and item["phase"] == "finalize"
+    )
+    assert continue_event["payload"]["run_timed_out"] is True
+    assert finalize_event["payload"]["finalize_attempt"] is False
+    assert finalize_event["payload"]["skip_reason"] == "run_timeout"
+
+
+def test_model_timeout_skips_force_submit_finalize(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    orchestrator = AgentOrchestrator()
+
+    class _TimeoutEngine:
+        def __init__(self) -> None:
+            self.force_submit_calls: list[bool] = []
+
+        async def analyze(self, **kwargs):  # type: ignore[no-untyped-def]
+            self.force_submit_calls.append(bool(kwargs.get("force_submit")))
+            raise ModelTimeoutError("provider timed out", code="timeout")
+
+    engine = _TimeoutEngine()
+    monkeypatch.setattr(orchestrator, "_build_engine", lambda: engine)
+
+    response = asyncio.run(orchestrator.run_review(ReviewRequest(repo_path=".")))
+
+    assert engine.force_submit_calls == [False]
+    log_path = tmp_path / ".mergewarden" / "logs" / f"{response.run_id}.jsonl"
+    events = [
+        json.loads(line)
+        for line in log_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    error_event = next(
+        item for item in events if item["event_type"] == EventType.ERROR.value and item["phase"] == "analyze"
+    )
+    finalize_event = next(
+        item for item in events if item["event_type"] == EventType.DECISION.value and item["phase"] == "finalize"
+    )
+    assert error_event["payload"]["error_type"] == "ModelTimeoutError"
+    assert finalize_event["payload"]["finalize_attempt"] is False
+    assert finalize_event["payload"]["skip_reason"] == "model_timeout"

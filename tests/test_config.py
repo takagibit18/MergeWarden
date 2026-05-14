@@ -43,3 +43,31 @@ def test_docker_execute_settings_normalize_invalid_values(monkeypatch) -> None:
     assert settings.execute_docker_network == "none"
     assert settings.execute_docker_memory_mb == 0
     assert settings.execute_docker_cpus == 0.0
+
+
+def test_workspace_eval_budget_defaults_are_bounded(monkeypatch) -> None:
+    monkeypatch.delenv("TOKEN_BUDGET", raising=False)
+    monkeypatch.delenv("TOKEN_HARD_BUDGET", raising=False)
+    monkeypatch.delenv("MODEL_MAX_TOKENS", raising=False)
+    monkeypatch.delenv("MODEL_REQUEST_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("MODEL_MAX_RETRIES", raising=False)
+    monkeypatch.delenv("AGENT_RUN_TIMEOUT_SECONDS", raising=False)
+
+    settings = get_settings()
+
+    assert settings.token_budget == 30_000
+    assert settings.token_hard_budget == 36_000
+    assert settings.model_max_tokens == 2_048
+    assert settings.model_request_timeout_seconds == 60.0
+    assert settings.model_max_retries == 1
+    assert settings.agent_run_timeout_seconds == 170.0
+
+
+def test_token_hard_budget_is_not_below_soft_budget(monkeypatch) -> None:
+    monkeypatch.setenv("TOKEN_BUDGET", "12000")
+    monkeypatch.setenv("TOKEN_HARD_BUDGET", "8000")
+
+    settings = get_settings()
+
+    assert settings.token_budget == 12_000
+    assert settings.token_hard_budget == 12_000

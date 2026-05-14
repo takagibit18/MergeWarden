@@ -21,7 +21,7 @@ from src.analyzer.trace import TraceRecorder
 from src.analyzer.result_processor import ResultProcessor
 from src.config import get_settings
 from src.models.client import ModelClient
-from src.models.exceptions import ModelClientError
+from src.models.exceptions import ModelClientError, ModelTimeoutError
 from src.orchestrator.tool_schemas import build_submit_tool_schemas, build_tool_schemas
 from src.tools import create_default_registry
 from src.tools.base import BaseTool, ToolRegistry, ToolResult, ToolSafety, ToolSpec
@@ -43,7 +43,10 @@ class AgentOrchestrator:
         self._external_registry: ToolRegistry | None = registry
         self._registry = registry or create_default_registry(include_execute=False)
         self._context_builder = ContextBuilder()
-        self._result_processor = ResultProcessor(token_budget=self._settings.token_budget)
+        self._result_processor = ResultProcessor(
+            token_budget=self._settings.token_budget,
+            token_hard_budget=self._settings.token_hard_budget,
+        )
         self._model_client: ModelClient | None = None
         self._confirm_high_risk = confirm_high_risk
         self._permission_mode: Literal["default", "plan"] = (
@@ -68,6 +71,9 @@ class AgentOrchestrator:
         self._model_completed = False
         self._last_decision_reason: str = ""
         self._workspace_root: Path | None = None
+        self._run_started_at = 0.0
+        self._run_timeout_seconds = self._settings.agent_run_timeout_seconds
+        self._model_timeout_seen = False
         self._temperature = temperature
         self._trace_recorder = TraceRecorder(
             detail_mode=self._settings.agent_trace_detail,
@@ -134,7 +140,9 @@ class AgentOrchestrator:
         assert response is not None
         if self._permission_mode == "plan":
             return response
-        if self._budget_state == "hard_capped":
+        skip_reason = self._finalize_skip_reason()
+        if skip_reason:
+            self._record_finalize_skipped(skip_reason)
             return response
         if not isinstance(response, ReviewResponse):
             return response
@@ -165,7 +173,9 @@ class AgentOrchestrator:
         assert response is not None
         if self._permission_mode == "plan":
             return response
-        if self._budget_state == "hard_capped":
+        skip_reason = self._finalize_skip_reason()
+        if skip_reason:
+            self._record_finalize_skipped(skip_reason)
             return response
         if not isinstance(response, DebugResponse):
             return response
@@ -282,12 +292,24 @@ class AgentOrchestrator:
                 if result.draft_debug is not None:
                     self._submit_debug_seen_any = True
             except ModelClientError as exc:
+                if isinstance(exc, ModelTimeoutError):
+                    self._model_timeout_seen = True
                 state.errors.append(
                     ErrorDetail(
                         file=request.repo_path,
                         message=f"Model analysis failed: {exc}",
                         category="runtime",
                     )
+                )
+                self._record_event(
+                    EventType.ERROR,
+                    "analyze",
+                    {
+                        "iteration": self._iteration,
+                        "error_type": exc.__class__.__name__,
+                        "code": exc.code or "",
+                        "message": str(exc),
+                    },
                 )
                 result = self._fallback_plan(request)
                 self._latest_tokens = 0
@@ -584,8 +606,9 @@ class AgentOrchestrator:
         )
         self._model_completed = not has_pending_tools and not self._blocking_error
         reached_limit = (self._iteration + 1) >= self._max_iterations
+        run_timed_out = self._run_timeout_exceeded()
 
-        stop = self._model_completed or reached_limit or self._budget_exhausted
+        stop = self._model_completed or reached_limit or self._budget_exhausted or run_timed_out
         if self._budget_exhausted:
             state.errors.append(
                 ErrorDetail(
@@ -594,15 +617,25 @@ class AgentOrchestrator:
                     category="runtime",
                 )
             )
+        if run_timed_out:
+            state.errors.append(
+                ErrorDetail(
+                    file="",
+                    message="Run wall-clock timeout reached; returning partial result.",
+                    category="runtime",
+                )
+            )
 
-        if self._model_completed:
-            reason = "model_completed"
-        elif reached_limit:
-            reason = "max_iterations"
-        elif self._budget_state == "hard_capped":
+        if self._budget_state == "hard_capped":
             reason = "budget_hard_capped"
         elif self._budget_state == "soft_capped":
             reason = "budget_soft_capped"
+        elif run_timed_out:
+            reason = "run_timeout"
+        elif reached_limit:
+            reason = "max_iterations"
+        elif self._model_completed:
+            reason = "model_completed"
         else:
             reason = "continue"
         self._last_decision_reason = reason
@@ -622,6 +655,8 @@ class AgentOrchestrator:
                 "has_pending_tools": has_pending_tools,
                 "model_completed": self._model_completed,
                 "reached_limit": reached_limit,
+                "run_timed_out": run_timed_out,
+                "elapsed_ms": int(self._run_elapsed_seconds() * 1000),
                 "budget_exhausted": self._budget_exhausted,
                 "budget_state": self._budget_state,
                 "reason": reason,
@@ -658,7 +693,41 @@ class AgentOrchestrator:
         self._budget_state = "none"
         self._model_completed = False
         self._last_decision_reason = ""
+        self._run_started_at = perf_counter()
+        self._run_timeout_seconds = self._settings.agent_run_timeout_seconds
+        self._model_timeout_seen = False
         self._record_event(EventType.PHASE_START, "prepare", {"run_id": self._run_id})
+
+    def _run_elapsed_seconds(self) -> float:
+        if self._run_started_at <= 0:
+            return 0.0
+        return perf_counter() - self._run_started_at
+
+    def _run_timeout_exceeded(self) -> bool:
+        return self._run_elapsed_seconds() >= self._run_timeout_seconds
+
+    def _finalize_skip_reason(self) -> str:
+        if self._model_timeout_seen:
+            return "model_timeout"
+        if self._budget_state != "none":
+            return f"budget_{self._budget_state}"
+        if self._run_timeout_exceeded():
+            return "run_timeout"
+        return ""
+
+    def _record_finalize_skipped(self, skip_reason: str) -> None:
+        self._record_event(
+            EventType.DECISION,
+            "finalize",
+            {
+                "iteration": self._iteration,
+                "finalize_attempt": False,
+                "skip_reason": skip_reason,
+                "budget_state": self._budget_state,
+                "run_timed_out": self._run_timeout_exceeded(),
+                "elapsed_ms": int(self._run_elapsed_seconds() * 1000),
+            },
+        )
 
     async def _execute_one_tool(
         self,

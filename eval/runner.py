@@ -172,7 +172,7 @@ async def run_single(fixture: Fixture, *, temperature: float = 0.0) -> EvalResul
                 parsed_response = ReviewResponse.model_validate(
                     review_response.model_dump()
                 )
-                actual_count = len(parsed_response.report.issues)
+                actual_count = len(_effective_review_issues(fixture, parsed_response))
             else:
                 original_error_log = fixture.input.error_log or ""
                 debug_request = DebugRequest(
@@ -593,9 +593,7 @@ def _match_issues(
 ) -> tuple[list[EvalIssueMatch], int, int]:
     expected = fixture.expected.issues
     if isinstance(response, ReviewResponse):
-        effective_issues = [
-            issue for issue in response.report.issues if _is_eval_effective_issue(issue)
-        ]
+        effective_issues = _effective_review_issues(fixture, response)
         actual_locations = [issue.location for issue in effective_issues]
         actual_severity = [issue.severity.value for issue in effective_issues]
     else:
@@ -635,6 +633,14 @@ def _match_issues(
     return matches, matched_count, false_positive_count
 
 
+def _effective_review_issues(fixture: Fixture, response: ReviewResponse) -> list[Any]:
+    return [
+        issue
+        for issue in response.report.issues
+        if _is_eval_effective_issue(issue, fixture)
+    ]
+
+
 def _location_matches(pattern: str, location: str) -> bool:
     if not pattern:
         return True
@@ -669,7 +675,7 @@ def _semantic_location_matches(expected_issue: Any, location: str) -> bool:
     return actual_start <= expected_end and actual_end >= expected_line
 
 
-def _is_eval_effective_issue(issue: Any) -> bool:
+def _is_eval_effective_issue(issue: Any, fixture: Fixture | None = None) -> bool:
     severity = str(
         getattr(getattr(issue, "severity", ""), "value", getattr(issue, "severity", ""))
     )
@@ -681,11 +687,31 @@ def _is_eval_effective_issue(issue: Any) -> bool:
     evidence = str(getattr(issue, "evidence", "") or "")
 
     if severity == Severity.CRITICAL.value:
-        return confidence >= _MIN_CRITICAL_CONFIDENCE and has_specific_diff_evidence(
-            evidence
+        return confidence >= _MIN_CRITICAL_CONFIDENCE and (
+            has_specific_diff_evidence(evidence)
+            or _issue_location_is_changed_line(issue, fixture)
         )
     if severity == Severity.WARNING.value:
-        return confidence >= _MIN_WARNING_CONFIDENCE and has_specific_diff_evidence(
-            evidence
+        return confidence >= _MIN_WARNING_CONFIDENCE and (
+            has_specific_diff_evidence(evidence)
+            or _issue_location_is_changed_line(issue, fixture)
         )
-    return True
+    return False
+
+
+def _issue_location_is_changed_line(issue: Any, fixture: Fixture | None) -> bool:
+    if fixture is None or fixture.type != "review" or not fixture.input.diff_text.strip():
+        return False
+    location = str(getattr(issue, "location", "") or "")
+    parsed = normalize_location(location)
+    if not parsed.valid or not parsed.path or parsed.line is None:
+        return False
+    changed_for_path = _changed_new_lines_by_file(fixture.input.diff_text).get(
+        parsed.path,
+        set(),
+    )
+    if not changed_for_path:
+        return False
+    actual_start = parsed.line
+    actual_end = parsed.end_line or actual_start
+    return any(line in changed_for_path for line in range(actual_start, actual_end + 1))

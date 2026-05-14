@@ -36,7 +36,7 @@ class ModelClient:
         self,
         settings: Settings | None = None,
         *,
-        max_retries: int = 3,
+        max_retries: int | None = None,
         temperature: float | None = None,
     ) -> None:
         self._settings = settings or get_settings()
@@ -47,11 +47,15 @@ class ModelClient:
             api_key=self._settings.openai_api_key,
             base_url=str(self._settings.openai_base_url),
         )
-        default_config_kwargs: dict[str, Any] = {"model": self._settings.model_name}
+        default_config_kwargs: dict[str, Any] = {
+            "model": self._settings.model_name,
+            "max_tokens": self._settings.model_max_tokens,
+            "timeout": self._settings.model_request_timeout_seconds,
+        }
         if temperature is not None:
             default_config_kwargs["temperature"] = temperature
         self._default_config = ModelConfig(**default_config_kwargs)
-        self._max_retries = max(1, max_retries)
+        self._max_retries = max(1, max_retries if max_retries is not None else self._settings.model_max_retries)
 
     @property
     def default_config(self) -> ModelConfig:
@@ -86,8 +90,11 @@ class ModelClient:
         last_error: ModelClientError | None = None
         for attempt in range(self._max_retries):
             try:
-                completion = await self._client.chat.completions.create(
-                    **payload,
+                completion = await asyncio.wait_for(
+                    self._client.chat.completions.create(
+                        **payload,
+                        timeout=runtime_config.timeout,
+                    ),
                     timeout=runtime_config.timeout,
                 )
                 return self._parse_completion(completion)
@@ -103,9 +110,9 @@ class ModelClient:
                     status_code=429,
                     code="rate_limited",
                 )
-            except APITimeoutError:
+            except (APITimeoutError, asyncio.TimeoutError):
                 last_error = ModelTimeoutError(
-                    "Model provider request timed out",
+                    f"Model provider request timed out after {runtime_config.timeout:g}s",
                     code="timeout",
                 )
             except APIStatusError as exc:
