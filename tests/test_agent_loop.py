@@ -892,6 +892,7 @@ def test_pre_budget_submit_triggers_when_budget_near_and_tool_feedback_exists(
     monkeypatch.setenv("TOKEN_BUDGET", "200")
     monkeypatch.setenv("TOKEN_HARD_BUDGET", "300")
     monkeypatch.setenv("PRE_BUDGET_SUBMIT_TOKEN_RATIO", "0.3")
+    monkeypatch.setenv("REVIEW_MAX_ITERATIONS", "2")
 
     registry = ToolRegistry()
     registry.register(DummyEchoTool())
