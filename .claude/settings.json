@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "defaultMode": "auto",
+    "allow": [
+      "Bash(python -c ' *)",
+      "Bash(python -m pytest tests/test_inference_engine.py tests/test_agent_loop.py -v)",
+      "Read(//c/Users/Lenovo/Desktop/**)",
+      "Read(//e/PycharmProjects/2026Agent/MultiAgent/agent/**)"
+    ]
+  }
+}

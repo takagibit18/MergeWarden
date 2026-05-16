@@ -616,6 +616,48 @@ def test_execute_tools_emits_tool_io_event_with_iteration(tmp_path, monkeypatch)
     assert tool_io["payload"]["name"] == "echo_tool"
 
 
+def test_execute_tools_times_out_slow_readonly_tool_and_logs_duration(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AGENT_TOOL_TIMEOUT_SECONDS", "0.01")
+    events_seen: list[str] = []
+    registry = ToolRegistry()
+    registry.register(SlowReadonlyTool("slow_tool", events_seen, delay=0.05))
+    orchestrator = AgentOrchestrator(registry=registry)
+    orchestrator._reset_run(max_iterations=1, repo_path=".")  # noqa: SLF001
+    state = orchestrator.prepare_context(ReviewRequest(repo_path="."))
+    plan = AnalysisPlan(
+        needs_tools=True,
+        tool_calls=[{"function": {"name": "slow_tool", "arguments": "{}"}}],
+    )
+
+    results = asyncio.run(orchestrator.execute_tools(plan, registry, state))
+
+    assert events_seen == []
+    assert len(results) == 1
+    assert results[0].ok is False
+    assert results[0].data["error_type"] == "ToolTimeoutError"
+    assert "timed out" in (results[0].error or "")
+    assert any(error.category == "runtime" and "timed out" in error.message for error in state.errors)
+    log_path = tmp_path / ".mergewarden" / "logs" / f"{orchestrator._run_id}.jsonl"  # noqa: SLF001
+    events = [
+        json.loads(line)
+        for line in log_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    tool_call = next(
+        item
+        for item in events
+        if item["event_type"] == EventType.TOOL_CALL.value
+        and item["phase"] == "execute_tools"
+    )
+    assert tool_call["payload"]["ok"] is False
+    assert tool_call["payload"]["skip_reason"] == "tool_timeout"
+    assert tool_call["payload"]["elapsed_ms"] >= 1
+
+
 def test_format_result_emits_format_result_event(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AGENT_TRACE_DETAIL", "compact")
@@ -731,6 +773,384 @@ def test_model_timeout_skips_force_submit_finalize(tmp_path, monkeypatch) -> Non
     finalize_event = next(
         item for item in events if item["event_type"] == EventType.DECISION.value and item["phase"] == "finalize"
     )
+    model_event = next(
+        item for item in events if item["event_type"] == EventType.MODEL_CALL.value and item["phase"] == "analyze"
+    )
     assert error_event["payload"]["error_type"] == "ModelTimeoutError"
+    assert model_event["payload"]["model_request_timeout_seconds"] == 90.0
+    assert model_event["payload"]["model_max_retries"] == 1
+    assert model_event["payload"]["force_submit"] is False
+    assert model_event["payload"]["budget_state"] == "none"
     assert finalize_event["payload"]["finalize_attempt"] is False
     assert finalize_event["payload"]["skip_reason"] == "model_timeout"
+
+
+def test_prepare_start_logs_runtime_budget_and_timeout_settings(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TOKEN_BUDGET", "26000")
+    monkeypatch.setenv("TOKEN_HARD_BUDGET", "32000")
+    monkeypatch.setenv("PROMPT_INPUT_TOKEN_BUDGET", "28000")
+    monkeypatch.setenv("MODEL_REQUEST_TIMEOUT_SECONDS", "45")
+    monkeypatch.setenv("AGENT_RUN_TIMEOUT_SECONDS", "90")
+    monkeypatch.setenv("AGENT_TOOL_TIMEOUT_SECONDS", "12")
+    monkeypatch.setenv("MODEL_MAX_TOKENS", "1024")
+    monkeypatch.setenv("REVIEW_DIFF_FIRST_CHANGED_FILES", "1")
+
+    orchestrator = AgentOrchestrator()
+    orchestrator._reset_run(max_iterations=1, repo_path=".")  # noqa: SLF001
+
+    log_path = tmp_path / ".mergewarden" / "logs" / f"{orchestrator._run_id}.jsonl"  # noqa: SLF001
+    events = [
+        json.loads(line)
+        for line in log_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    start_event = next(
+        item for item in events if item["event_type"] == EventType.PHASE_START.value
+    )
+
+    assert start_event["payload"]["token_budget"] == 26000
+    assert start_event["payload"]["token_hard_budget"] == 32000
+    assert start_event["payload"]["prompt_input_token_budget"] == 28000
+    assert start_event["payload"]["model_request_timeout_seconds"] == 45.0
+    assert start_event["payload"]["agent_run_timeout_seconds"] == 90.0
+    assert start_event["payload"]["agent_tool_timeout_seconds"] == 12.0
+    assert start_event["payload"]["model_max_tokens"] == 1024
+    assert start_event["payload"]["review_diff_first_changed_files"] is True
+
+
+def test_review_diff_first_prefetch_reads_changed_files_before_model(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("REVIEW_DIFF_FIRST_CHANGED_FILES", "1")
+    repo = tmp_path / "repo"
+    changed = repo / "src" / "module.py"
+    changed.parent.mkdir(parents=True)
+    changed.write_text("print('changed')\n", encoding="utf-8")
+    registry = ToolRegistry()
+    registry.register(FileReadTool())
+    orchestrator = AgentOrchestrator(registry=registry)
+    feedback_seen_by_model: list[list[str]] = []
+
+    async def _assert_prefetched_feedback(state, request, tool_specs, **kwargs):  # type: ignore[no-untyped-def]
+        feedback_seen_by_model.append(
+            [
+                item["tool_call"]["function"]["name"]
+                for item in orchestrator._tool_feedback  # noqa: SLF001
+            ]
+        )
+        return AnalysisPlan(needs_tools=False, tool_calls=[])
+
+    monkeypatch.setattr(orchestrator, "analyze", _assert_prefetched_feedback)
+    diff_text = (
+        "diff --git a/src/module.py b/src/module.py\n"
+        "--- a/src/module.py\n"
+        "+++ b/src/module.py\n"
+        "@@ -1 +1 @@\n"
+        "+print('changed')\n"
+    )
+
+    asyncio.run(
+        orchestrator.run_review(
+            ReviewRequest(repo_path=str(repo), diff_mode=True, diff_text=diff_text)
+        )
+    )
+
+    assert feedback_seen_by_model[0] == ["read_file"]
+    first_feedback_call = orchestrator._tool_feedback[0]["tool_call"]  # noqa: SLF001
+    assert first_feedback_call["type"] == "function"
+    assert first_feedback_call["id"].startswith("prefetch-read-file-")
+    prefetch_args = json.loads(first_feedback_call["function"]["arguments"])
+    assert prefetch_args == {"file_path": "src/module.py", "offset": 0, "limit": 80}
+    log_path = repo / ".mergewarden" / "logs" / f"{orchestrator._run_id}.jsonl"  # noqa: SLF001
+    events = [
+        json.loads(line)
+        for line in log_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    prefetch_event = next(
+        item
+        for item in events
+        if item["event_type"] == EventType.DECISION.value
+        and item["phase"] == "diff_first_prefetch"
+    )
+    assert prefetch_event["payload"]["enabled"] is True
+    assert prefetch_event["payload"]["selected_files"] == ["src/module.py"]
+
+
+# ---------------------------------------------------------------------------
+# Pre-budget submit-only path
+# ---------------------------------------------------------------------------
+
+
+def test_pre_budget_submit_triggers_when_budget_near_and_tool_feedback_exists(
+    tmp_path, monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TOKEN_BUDGET", "200")
+    monkeypatch.setenv("TOKEN_HARD_BUDGET", "300")
+    monkeypatch.setenv("PRE_BUDGET_SUBMIT_TOKEN_RATIO", "0.3")
+
+    registry = ToolRegistry()
+    registry.register(DummyEchoTool())
+    orchestrator = AgentOrchestrator(registry=registry)
+    analyze_calls: list[dict[str, bool]] = []
+
+    async def _controlled_analyze(state, request, tool_specs, **kwargs):  # type: ignore[no-untyped-def]
+        force_submit = bool(kwargs.get("force_submit"))
+        analyze_calls.append({"force_submit": force_submit})
+        if force_submit:
+            orchestrator._latest_tokens = 5  # noqa: SLF001
+            return AnalysisPlan(needs_tools=False, tool_calls=[])
+        orchestrator._latest_tokens = 70  # noqa: SLF001  # pushes total to 70 >= 200*0.3=60
+        return AnalysisPlan(
+            needs_tools=True,
+            tool_calls=[{"function": {"name": "echo_tool", "arguments": "{}"}}],
+        )
+
+    monkeypatch.setattr(orchestrator, "analyze", _controlled_analyze)
+
+    response = asyncio.run(orchestrator.run_review(ReviewRequest(repo_path=".")))
+
+    # Call 1: normal analyze → tool exec → format (total=70) → pre-budget fires
+    # Call 2: pre-budget submit (force_submit=True) → draft absent → break
+    # _maybe_force_submit skips (pre_budget_submit_attempted)
+    assert len(analyze_calls) == 2
+    assert analyze_calls[0]["force_submit"] is False
+    assert analyze_calls[1]["force_submit"] is True
+
+    # Verify pre_budget_submit event was logged
+    log_path = tmp_path / ".mergewarden" / "logs" / f"{response.run_id}.jsonl"
+    events = [
+        json.loads(line)
+        for line in log_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    pre_budget_events = [
+        item
+        for item in events
+        if item["event_type"] == EventType.DECISION.value
+        and item["phase"] == "pre_budget_submit"
+    ]
+    assert len(pre_budget_events) == 2
+    assert pre_budget_events[0]["payload"]["stage"] == "attempt"
+    assert pre_budget_events[0]["payload"]["has_tool_feedback"] is True
+    assert pre_budget_events[1]["payload"]["stage"] == "completed"
+
+
+def test_pre_budget_submit_skips_when_budget_below_threshold(
+    tmp_path, monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TOKEN_BUDGET", "200")
+    monkeypatch.setenv("PRE_BUDGET_SUBMIT_TOKEN_RATIO", "0.5")
+    monkeypatch.setenv("REVIEW_MAX_ITERATIONS", "1")
+
+    registry = ToolRegistry()
+    registry.register(DummyEchoTool())
+    orchestrator = AgentOrchestrator(registry=registry)
+    analyze_calls: list[dict[str, bool]] = []
+
+    async def _controlled_analyze(state, request, tool_specs, **kwargs):  # type: ignore[no-untyped-def]
+        force_submit = bool(kwargs.get("force_submit"))
+        analyze_calls.append({"force_submit": force_submit})
+        orchestrator._latest_tokens = 30  # noqa: SLF001  # well below 200*0.5=100
+        return AnalysisPlan(
+            needs_tools=True,
+            tool_calls=[{"function": {"name": "echo_tool", "arguments": "{}"}}],
+        )
+
+    monkeypatch.setattr(orchestrator, "analyze", _controlled_analyze)
+
+    asyncio.run(orchestrator.run_review(ReviewRequest(repo_path=".")))
+
+    # Total = 30 < 100 threshold → no pre-budget submit fired
+    # Loop breaks with reached_limit (max_iterations=1); _maybe_force_submit fires
+    assert len(analyze_calls) == 2
+    assert analyze_calls[0]["force_submit"] is False
+    assert analyze_calls[1]["force_submit"] is True
+
+
+def test_pre_budget_submit_skips_without_tool_feedback(
+    tmp_path, monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TOKEN_BUDGET", "100")
+    monkeypatch.setenv("PRE_BUDGET_SUBMIT_TOKEN_RATIO", "0.3")
+
+    orchestrator = AgentOrchestrator()
+    analyze_calls: list[dict[str, bool]] = []
+
+    async def _no_tool_state(state, request, tool_specs, **kwargs):  # type: ignore[no-untyped-def]
+        force_submit = bool(kwargs.get("force_submit"))
+        analyze_calls.append({"force_submit": force_submit})
+        orchestrator._latest_tokens = 50  # noqa: SLF001  # >= 100*0.3=30
+        # No tool calls → no tool_feedback accumulated
+        return AnalysisPlan(needs_tools=False, tool_calls=[])
+
+    monkeypatch.setattr(orchestrator, "analyze", _no_tool_state)
+
+    asyncio.run(orchestrator.run_review(ReviewRequest(repo_path=".")))
+
+    # Budget crossed threshold but no tool feedback → pre-budget should not fire
+    # Call 1: normal analyze (force_submit=False)
+    # Call 2: _maybe_force_submit (force_submit=True) because no draft was submitted
+    assert len(analyze_calls) == 2
+    assert analyze_calls[0]["force_submit"] is False
+    assert analyze_calls[1]["force_submit"] is True
+
+
+def test_hard_cap_still_skips_extra_finalize(tmp_path, monkeypatch) -> None:
+    """Hard cap must never trigger an extra model call in finalize."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TOKEN_BUDGET", "100")
+    monkeypatch.setenv("TOKEN_HARD_BUDGET", "150")
+
+    orchestrator = AgentOrchestrator()
+    analyze_calls: list[dict[str, bool]] = []
+
+    async def _blow_budget(state, request, tool_specs, **kwargs):  # type: ignore[no-untyped-def]
+        force_submit = bool(kwargs.get("force_submit"))
+        analyze_calls.append({"force_submit": force_submit})
+        orchestrator._latest_tokens = 200  # noqa: SLF001  # exceeds hard cap
+        return AnalysisPlan(needs_tools=False, tool_calls=[])
+
+    monkeypatch.setattr(orchestrator, "analyze", _blow_budget)
+
+    response = asyncio.run(orchestrator.run_review(ReviewRequest(repo_path=".")))
+
+    # One call → hard_capped → finalize skipped
+    assert len(analyze_calls) == 1
+    assert response.context.decisions[-1].result == "stop:budget_hard_capped"
+    log_path = tmp_path / ".mergewarden" / "logs" / f"{response.run_id}.jsonl"
+    events = [
+        json.loads(line)
+        for line in log_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    finalize_event = next(
+        item
+        for item in events
+        if item["event_type"] == EventType.DECISION.value
+        and item["phase"] == "finalize"
+    )
+    assert finalize_event["payload"]["finalize_attempt"] is False
+    assert finalize_event["payload"]["skip_reason"] == "budget_hard_capped"
+
+
+def test_model_timeout_still_skips_extra_finalize(tmp_path, monkeypatch) -> None:
+    """Model timeout in _maybe_force_submit path does not cause extra retry."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TOKEN_BUDGET", "200")
+    monkeypatch.setenv("PRE_BUDGET_SUBMIT_TOKEN_RATIO", "0.2")
+    monkeypatch.setenv("TOKEN_HARD_BUDGET", "500")
+    monkeypatch.setenv("REVIEW_MAX_ITERATIONS", "1")
+
+    registry = ToolRegistry()
+    registry.register(DummyEchoTool())
+    orchestrator = AgentOrchestrator(registry=registry)
+
+    class _TimeoutOnSubmitEngine:
+        def __init__(self) -> None:
+            self.call_count = 0
+            self.force_submit_calls: list[bool] = []
+
+        async def analyze(self, **kwargs):  # type: ignore[no-untyped-def]
+            self.call_count += 1
+            self.force_submit_calls.append(bool(kwargs.get("force_submit")))
+            if self.call_count == 1:
+                return (
+                    AnalysisPlan(
+                        needs_tools=True,
+                        tool_calls=[{"function": {"name": "echo_tool", "arguments": "{}"}}],
+                    ),
+                    100,
+                    "",
+                )
+            raise ModelTimeoutError("provider timed out after 90s", code="timeout")
+
+    engine = _TimeoutOnSubmitEngine()
+    monkeypatch.setattr(orchestrator, "_build_engine", lambda: engine)
+
+    response = asyncio.run(orchestrator.run_review(ReviewRequest(repo_path=".")))
+
+    # Call 1: normal analyze (force_submit=False) → token budget crossed but
+    # should_continue returns False (reached_limit) before pre_budget check
+    # Call 2: _maybe_force_submit → analyze(force_submit=True) → timeout caught,
+    # fallback plan returned, finalize_attempt=True logged
+    assert engine.force_submit_calls == [False, True]
+
+    log_path = tmp_path / ".mergewarden" / "logs" / f"{response.run_id}.jsonl"
+    events = [
+        json.loads(line)
+        for line in log_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+    # Pre-budget is NOT fired: should_continue returns False before the check
+    pre_budget_events = [
+        item
+        for item in events
+        if item["event_type"] == EventType.DECISION.value
+        and item["phase"] == "pre_budget_submit"
+    ]
+    assert len(pre_budget_events) == 0
+
+    # _maybe_force_submit fires but times out; method completes normally
+    finalize_event = next(
+        item
+        for item in events
+        if item["event_type"] == EventType.DECISION.value
+        and item["phase"] == "finalize"
+    )
+    assert finalize_event["payload"]["finalize_attempt"] is True
+    assert finalize_event["payload"]["finalize_submit_seen"] is False
+
+    # Verify model timeout was logged
+    error_event = next(
+        item for item in events
+        if item["event_type"] == EventType.ERROR.value
+        and item["phase"] == "analyze"
+    )
+    assert error_event["payload"]["error_type"] == "ModelTimeoutError"
+
+
+def test_negative_fixture_fallback_emits_no_fabricated_high_confidence_issues(
+    tmp_path, monkeypatch,
+) -> None:
+    """Placeholder fallback path must not fabricate critical/warning issues."""
+    monkeypatch.chdir(tmp_path)
+
+    orchestrator = AgentOrchestrator()
+
+    async def _placeholder_only(state, request, tool_specs, **kwargs):  # type: ignore[no-untyped-def]
+        return AnalysisPlan(needs_tools=False, tool_calls=[])
+
+    monkeypatch.setattr(orchestrator, "analyze", _placeholder_only)
+
+    response = asyncio.run(orchestrator.run_review(ReviewRequest(repo_path=".")))
+
+    # Placeholder path: no draft → summary is the placeholder message
+    assert "placeholder summary" in response.report.summary.lower()
+    assert response.report.issues == []
+
+
+def test_prepare_logs_pre_budget_submit_token_ratio(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PRE_BUDGET_SUBMIT_TOKEN_RATIO", "0.55")
+
+    orchestrator = AgentOrchestrator()
+    orchestrator._reset_run(max_iterations=1, repo_path=".")  # noqa: SLF001
+
+    log_path = tmp_path / ".mergewarden" / "logs" / f"{orchestrator._run_id}.jsonl"  # noqa: SLF001
+    events = [
+        json.loads(line)
+        for line in log_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    start_event = next(
+        item for item in events if item["event_type"] == EventType.PHASE_START.value
+    )
+    assert start_event["payload"]["pre_budget_submit_token_ratio"] == 0.55

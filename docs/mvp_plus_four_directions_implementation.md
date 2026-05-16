@@ -1,9 +1,11 @@
-# MVP+ 四方向落地实施说明（本次提交）
+# MVP+ 四方向落地实施说明（历史快照）
 
 > 日期：2026-04-20  
 > 目标：将“评测侧可行”升级为“生产侧一致可用”，并把质量门禁前置到 CI 主干流程。
 >
 > 口径更新（2026-05-08）：本文是历史实施记录，其中“CI 门禁”指 MergeWarden 项目自身的评测回归门禁，不表示产品侧要用 Agent 输出 hard block 用户 PR 合并。后续 PR 集成默认产出建议、soft check 或 review comment，硬性合并裁决仍交给 GitHub CI / branch protection。
+>
+> 口径更新（2026-05-16）：本文保留 2026-04-20 当次提交的历史实现说明，不再作为当前 MVP+ 状态来源。当前黄金集为 4 正 + 2 负，真实 CI gate 为 `schema_validity_rate >= 1.0`、`hit_rate >= 0.6`、`false_positive_rate <= 0.5`；以 [mvp_plus_roadmap.md](mvp_plus_roadmap.md) 和 [eval/README.md](../eval/README.md) 为准。
 
 ---
 
@@ -20,7 +22,7 @@
   - review/debug 系统提示词加入路径探索策略约束。
   - 工具失败结构化回退，显式推荐下一步（优先 `list_dir`）。
   - 工具失败摘要注入模型上下文，降低无效重试。
-- **方向 C（P0）Golden 扩容与 CI 门禁**
+- **方向 C（P0）Golden 扩容与 CI 门禁（历史口径）**
   - Golden 集扩容至 **10 条**，并满足 `4/3/3`（应检出/零问题/边界噪声）分布。
   - fixture 加载优先 `manifest`，统一读取入口。
   - 新增 eval gate 脚本并接入 CI，上传评测产物。
@@ -115,7 +117,7 @@
 
 ## 2.3 方向 C：Golden 扩容与 CI 门禁
 
-### 2.3.1 Golden fixture 扩容
+### 2.3.1 Golden fixture 扩容（历史口径）
 
 - 新增 8 条 fixture（`eval/fixtures/golden_manual_*.json`）：
   - 检出类（3）：`detect_unchecked_none` / `detect_sql_injection` / `detect_swallow_exception`

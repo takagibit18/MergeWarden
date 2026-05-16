@@ -52,15 +52,19 @@ def test_workspace_eval_budget_defaults_are_bounded(monkeypatch) -> None:
     monkeypatch.delenv("MODEL_REQUEST_TIMEOUT_SECONDS", raising=False)
     monkeypatch.delenv("MODEL_MAX_RETRIES", raising=False)
     monkeypatch.delenv("AGENT_RUN_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("AGENT_TOOL_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("EVAL_GIT_TIMEOUT_SECONDS", raising=False)
 
     settings = get_settings()
 
     assert settings.token_budget == 30_000
     assert settings.token_hard_budget == 36_000
     assert settings.model_max_tokens == 2_048
-    assert settings.model_request_timeout_seconds == 60.0
+    assert settings.model_request_timeout_seconds == 90.0
     assert settings.model_max_retries == 1
     assert settings.agent_run_timeout_seconds == 170.0
+    assert settings.agent_tool_timeout_seconds == 30.0
+    assert settings.eval_git_timeout_seconds == 120.0
 
 
 def test_token_hard_budget_is_not_below_soft_budget(monkeypatch) -> None:

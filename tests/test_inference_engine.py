@@ -71,6 +71,69 @@ class RecordingFakeModelClient:
         )
 
 
+class InvalidThenValidSubmitClient(RecordingFakeModelClient):
+    """Return one invalid submit_review call, then a repaired valid one."""
+
+    async def chat(self, messages, config=None, tools=None):  # type: ignore[no-untyped-def,unused-argument]
+        self.calls.append(messages)
+        self.configs.append(config)
+        self.tools.append(tools)
+        if len(self.calls) == 1:
+            return ModelResponse(
+                content="",
+                tool_calls=[
+                    {
+                        "function": {
+                            "name": "submit_review",
+                            "arguments": json.dumps(
+                                {
+                                    "summary": "found issue",
+                                    "issues": [
+                                        {
+                                            "location": "src/x.py:10",
+                                            "evidence": "x",
+                                            "suggestion": "fix",
+                                            "confidence": 0.9,
+                                        }
+                                    ],
+                                }
+                            ),
+                        }
+                    }
+                ],
+                usage=TokenUsage(total_tokens=11),
+                model="fake-model",
+                finish_reason="tool_calls",
+            )
+        return ModelResponse(
+            content="",
+            tool_calls=[
+                {
+                    "function": {
+                        "name": "submit_review",
+                        "arguments": json.dumps(
+                            {
+                                "summary": "repaired issue",
+                                "issues": [
+                                    {
+                                        "severity": "warning",
+                                        "location": "src/x.py:10",
+                                        "evidence": "x",
+                                        "suggestion": "fix",
+                                        "confidence": 0.9,
+                                    }
+                                ],
+                            }
+                        ),
+                    }
+                }
+            ],
+            usage=TokenUsage(total_tokens=13),
+            model="fake-model",
+            finish_reason="tool_calls",
+        )
+
+
 def test_analyze_appends_tool_feedback_messages(monkeypatch) -> None:
     monkeypatch.setenv("CONTEXT_SUMMARY_ENABLED", "false")
     client = RecordingFakeModelClient()
@@ -98,6 +161,89 @@ def test_analyze_appends_tool_feedback_messages(monkeypatch) -> None:
     roles = [message.role for message in client.calls[-1]]
     assert "assistant" in roles
     assert "tool" in roles
+
+
+def test_analyze_injects_synthetic_prefetch_feedback_as_user_context(monkeypatch) -> None:
+    monkeypatch.setenv("CONTEXT_SUMMARY_ENABLED", "false")
+    client = RecordingFakeModelClient()
+    engine = InferenceEngine(model_client=client)  # type: ignore[arg-type]
+    state = ContextState(goal="Run structured code review")
+    request = ReviewRequest(repo_path=".")
+    tool_feedback = [
+        {
+            "tool_call": {
+                "id": "prefetch-read-file-0",
+                "type": "function",
+                "synthetic_context": True,
+                "function": {"name": "read_file", "arguments": '{"file_path":"a.py"}'},
+            },
+            "result": ToolResult(ok=True, data={"file_path": "a.py", "content": "1: pass"}),
+        }
+    ]
+
+    asyncio.run(
+        engine.analyze(
+            state=state,
+            request=request,
+            tool_specs=[],
+            tool_feedback=tool_feedback,
+        )
+    )
+
+    roles = [message.role for message in client.calls[-1]]
+    assert "tool" not in roles
+    assert "assistant" not in roles
+    assert any(
+        message.role == "user" and "prefetched_tool_context" in message.content
+        for message in client.calls[-1]
+    )
+
+
+def test_synthetic_prefetch_feedback_is_compacted(monkeypatch) -> None:
+    monkeypatch.setenv("CONTEXT_SUMMARY_ENABLED", "false")
+    client = RecordingFakeModelClient()
+    engine = InferenceEngine(model_client=client)  # type: ignore[arg-type]
+    state = ContextState(goal="Run structured code review")
+    request = ReviewRequest(repo_path=".")
+    oversized_content = "\n".join(f"{idx}: line" for idx in range(1000))
+    tool_feedback = [
+        {
+            "tool_call": {
+                "id": "prefetch-read-file-0",
+                "type": "function",
+                "synthetic_context": True,
+                "function": {"name": "read_file", "arguments": '{"file_path":"a.py"}'},
+            },
+            "result": ToolResult(
+                ok=True,
+                data={
+                    "file_path": "a.py",
+                    "content": oversized_content,
+                    "start_line": 1,
+                    "line_count": 1000,
+                    "truncated": False,
+                },
+            ),
+        }
+    ]
+
+    asyncio.run(
+        engine.analyze(
+            state=state,
+            request=request,
+            tool_specs=[],
+            tool_feedback=tool_feedback,
+        )
+    )
+
+    prefetch_messages = [
+        message.content
+        for message in client.calls[-1]
+        if message.role == "user" and "prefetched_tool_context" in message.content
+    ]
+    assert len(prefetch_messages) == 1
+    assert len(prefetch_messages[0]) < 5000
+    assert "truncated_for_prompt" in prefetch_messages[0]
 
 
 def test_analyze_summary_disabled_only_one_main_call(monkeypatch) -> None:
@@ -309,7 +455,61 @@ def test_force_submit_review_forces_submit_tool_and_disables_deepseek_thinking(m
     assert [tool["function"]["name"] for tool in client.tools[-1]] == ["submit_review"]
 
 
-def test_force_submit_debug_forces_debug_tool_without_non_deepseek_thinking_override(monkeypatch) -> None:
+def test_force_submit_review_disables_qwen_dashscope_thinking(monkeypatch) -> None:
+    monkeypatch.setenv("CONTEXT_SUMMARY_ENABLED", "false")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+    client = RecordingFakeModelClient()
+    client.default_config = client.default_config.model_copy(update={"model": "qwen3.6-27b"})
+    engine = InferenceEngine(model_client=client)  # type: ignore[arg-type]
+    state = ContextState(goal="Run structured code review")
+    request = ReviewRequest(repo_path=".")
+
+    asyncio.run(
+        engine.analyze(
+            state=state,
+            request=request,
+            tool_specs=[],
+            tool_schemas=[{"type": "function", "function": {"name": "submit_review"}}],
+            force_submit=True,
+        )
+    )
+
+    config = client.configs[-1]
+    assert config.tool_choice == {
+        "type": "function",
+        "function": {"name": "submit_review"},
+    }
+    assert config.extra_body == {"enable_thinking": False}
+
+
+def test_force_submit_review_disables_glm_dashscope_thinking(monkeypatch) -> None:
+    monkeypatch.setenv("CONTEXT_SUMMARY_ENABLED", "false")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+    client = RecordingFakeModelClient()
+    client.default_config = client.default_config.model_copy(update={"model": "glm-4.7"})
+    engine = InferenceEngine(model_client=client)  # type: ignore[arg-type]
+    state = ContextState(goal="Run structured code review")
+    request = ReviewRequest(repo_path=".")
+
+    asyncio.run(
+        engine.analyze(
+            state=state,
+            request=request,
+            tool_specs=[],
+            tool_schemas=[{"type": "function", "function": {"name": "submit_review"}}],
+            force_submit=True,
+        )
+    )
+
+    config = client.configs[-1]
+    assert config.tool_choice == {
+        "type": "function",
+        "function": {"name": "submit_review"},
+    }
+    assert config.extra_body == {"enable_thinking": False}
+
+
+def test_force_submit_debug_forces_debug_tool_without_openai_thinking_override(monkeypatch) -> None:
     monkeypatch.setenv("CONTEXT_SUMMARY_ENABLED", "false")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     client = RecordingFakeModelClient()
@@ -385,3 +585,26 @@ def test_invalid_submit_review_arguments_do_not_create_empty_draft() -> None:
 
     assert plan.draft_review is None
     assert "Invalid JSON" in parse_meta["submit_review_validation_error"]
+
+
+def test_invalid_submit_review_payload_gets_repair_retry(monkeypatch) -> None:
+    monkeypatch.setenv("CONTEXT_SUMMARY_ENABLED", "false")
+    client = InvalidThenValidSubmitClient()
+    engine = InferenceEngine(model_client=client)  # type: ignore[arg-type]
+    state = ContextState(goal="Run structured code review")
+    request = ReviewRequest(repo_path=".")
+
+    plan, total_tokens, _ = asyncio.run(
+        engine.analyze(
+            state=state,
+            request=request,
+            tool_specs=[],
+            tool_schemas=[{"type": "function", "function": {"name": "submit_review"}}],
+        )
+    )
+
+    assert plan.draft_review is not None
+    assert plan.draft_review.issues[0].severity.value == "warning"
+    assert total_tokens == 24
+    assert len(client.calls) == 2
+    assert any("issues.0.severity" in message.content for message in client.calls[1])

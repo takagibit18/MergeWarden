@@ -32,6 +32,7 @@ from src.tools.base import ToolResult, ToolSpec
 
 logger = logging.getLogger(__name__)
 _SUBMIT_MAX_TOKENS = 2048
+_SYNTHETIC_CONTEXT_MAX_CHARS = 3600
 
 
 class InferenceEngine:
@@ -170,11 +171,13 @@ class InferenceEngine:
                 )
             else:
                 config.model = request.model_name
-        if submit_only and config is not None and self._is_deepseek_request(config):
-            config.extra_body = {
-                **(config.extra_body or {}),
-                "thinking": {"type": "disabled"},
-            }
+        if submit_only and config is not None:
+            thinking_override = self._thinking_disable_extra_body(config)
+            if thinking_override:
+                config.extra_body = {
+                    **(config.extra_body or {}),
+                    **thinking_override,
+                }
         response = await self._model_client.chat(messages=messages, config=config, tools=tools)
         self._record_length_finish(response, iteration, config)
         plan, parse_meta = self._parse_tool_calls(
@@ -182,6 +185,28 @@ class InferenceEngine:
         )
         parse_meta["tool_choice"] = self._trace_tool_choice(config)
         parse_meta["thinking_disabled"] = self._is_thinking_disabled(config)
+        if (
+            isinstance(request, ReviewRequest)
+            and plan.draft_review is None
+            and parse_meta.get("submit_review_seen")
+            and parse_meta.get("submit_review_validation_error")
+        ):
+            initial_usage = response.usage
+            repair_plan, repair_response, repair_meta = await self._retry_submit_review_validation_repair(
+                messages=messages,
+                request=request,
+                tool_schemas=tool_schemas or [],
+                validation_error=str(parse_meta["submit_review_validation_error"]),
+            )
+            repair_response.usage.total_tokens += initial_usage.total_tokens
+            repair_response.usage.prompt_tokens += initial_usage.prompt_tokens
+            repair_response.usage.completion_tokens += initial_usage.completion_tokens
+            if repair_plan.draft_review is not None:
+                plan = repair_plan
+                response = repair_response
+                parse_meta = repair_meta
+            else:
+                response.usage = repair_response.usage
         fallback_json_found = False
         fallback_parse_valid = False
         if not plan.draft_review and not plan.draft_debug:
@@ -194,6 +219,45 @@ class InferenceEngine:
                     plan = parsed
         self._record_trace(response, plan, parse_meta, iteration, fallback_json_found, fallback_parse_valid)
         return plan, response.usage.total_tokens, response.reasoning_content
+
+    async def _retry_submit_review_validation_repair(
+        self,
+        *,
+        messages: list[Message],
+        request: ReviewRequest,
+        tool_schemas: list[dict[str, Any]],
+        validation_error: str,
+    ) -> tuple[AnalysisPlan, ModelResponse, dict[str, Any]]:
+        repair_messages = [
+            *messages,
+            Message(
+                role="user",
+                content=(
+                    "Your previous submit_review tool call was rejected by schema validation. "
+                    "Call submit_review again as your only action, preserving supported findings "
+                    "but fixing this exact validation error:\n"
+                    f"{validation_error}"
+                ),
+            ),
+        ]
+        config = self._build_submit_config(request)
+        thinking_override = self._thinking_disable_extra_body(config)
+        if thinking_override:
+            config.extra_body = {
+                **(config.extra_body or {}),
+                **thinking_override,
+            }
+        response = await self._model_client.chat(
+            messages=repair_messages,
+            config=config,
+            tools=self._submit_only_tools(tool_schemas, request),
+        )
+        plan, parse_meta = self._parse_tool_calls(
+            response.tool_calls, request, force_submit=True
+        )
+        parse_meta["tool_choice"] = self._trace_tool_choice(config)
+        parse_meta["thinking_disabled"] = self._is_thinking_disabled(config)
+        return plan, response, parse_meta
 
     def _build_submit_config(self, request: ReviewRequest | DebugRequest) -> ModelConfig:
         return self._model_client.default_config.model_copy(
@@ -224,15 +288,25 @@ class InferenceEngine:
         ]
 
     @staticmethod
-    def _is_deepseek_request(config: ModelConfig) -> bool:
+    def _thinking_disable_extra_body(config: ModelConfig) -> dict[str, Any]:
         model = config.model.strip().lower()
         base_url = str(get_settings().openai_base_url).strip().lower()
-        return model.startswith("deepseek") or "deepseek" in base_url
+        if model.startswith("deepseek") or "deepseek" in base_url:
+            return {"thinking": {"type": "disabled"}}
+        if "dashscope" in base_url or model.startswith(("qwen", "glm")):
+            return {"enable_thinking": False}
+        return {}
+
+    @staticmethod
+    def _requires_thinking_disabled(config: ModelConfig) -> bool:
+        return bool(InferenceEngine._thinking_disable_extra_body(config))
 
     @staticmethod
     def _is_thinking_disabled(config: ModelConfig | None) -> bool:
         if config is None or not isinstance(config.extra_body, dict):
             return False
+        if config.extra_body.get("enable_thinking") is False:
+            return True
         thinking = config.extra_body.get("thinking")
         return isinstance(thinking, dict) and thinking.get("type") == "disabled"
 
@@ -462,6 +536,27 @@ class InferenceEngine:
 
             iteration = item.get("iteration")
             iter_tag = f"[iter={iteration}] " if iteration is not None else ""
+            if raw_tool_call.get("synthetic_context") is True:
+                result_payload = InferenceEngine._compact_synthetic_context_payload(
+                    result_payload
+                )
+                messages.append(
+                    Message(
+                        role="user",
+                        content=(
+                            f"{iter_tag}prefetched_tool_context: "
+                            + json.dumps(
+                                {
+                                    "tool": function_block.get("name", "unknown"),
+                                    "arguments": function_block.get("arguments", "{}"),
+                                    "result": result_payload,
+                                },
+                                ensure_ascii=True,
+                            )
+                        ),
+                    )
+                )
+                continue
 
             call_id = str(raw_tool_call.get("id", "")).strip()
             if not call_id:
@@ -485,6 +580,21 @@ class InferenceEngine:
                 )
             )
         return messages
+
+    @staticmethod
+    def _compact_synthetic_context_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        compacted = dict(payload)
+        data = compacted.get("data")
+        if not isinstance(data, dict):
+            return compacted
+        compacted_data = dict(data)
+        content = compacted_data.get("content")
+        if isinstance(content, str) and len(content) > _SYNTHETIC_CONTEXT_MAX_CHARS:
+            compacted_data["content"] = content[:_SYNTHETIC_CONTEXT_MAX_CHARS]
+            compacted_data["truncated_for_prompt"] = True
+            compacted_data["original_content_chars"] = len(content)
+        compacted["data"] = compacted_data
+        return compacted
 
     @staticmethod
     def _build_folded_feedback_summary(

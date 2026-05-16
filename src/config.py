@@ -188,7 +188,7 @@ class Settings(BaseModel):
         description="Maximum completion tokens for a non-finalize model call.",
     )
     model_request_timeout_seconds: float = Field(
-        default_factory=lambda: float(os.getenv("MODEL_REQUEST_TIMEOUT_SECONDS", "60")),
+        default_factory=lambda: float(os.getenv("MODEL_REQUEST_TIMEOUT_SECONDS", "90")),
         gt=0.0,
         le=600.0,
         description="Hard wall-clock timeout for one model provider request.",
@@ -204,6 +204,28 @@ class Settings(BaseModel):
         gt=0.0,
         le=3600.0,
         description="Soft wall-clock deadline for one orchestrator run.",
+    )
+    agent_tool_timeout_seconds: float = Field(
+        default_factory=lambda: float(os.getenv("AGENT_TOOL_TIMEOUT_SECONDS", "30")),
+        gt=0.0,
+        le=600.0,
+        description="Hard wall-clock timeout for one orchestrator tool call.",
+    )
+    pre_budget_submit_token_ratio: float = Field(
+        default_factory=lambda: float(os.getenv("PRE_BUDGET_SUBMIT_TOKEN_RATIO", "0.40")),
+        ge=0.1,
+        le=0.9,
+        description="Ratio of token_budget at which a pre-budget submit-only call triggers when useful tool feedback exists.",
+    )
+    review_diff_first_changed_files: bool = Field(
+        default_factory=lambda: _parse_bool_env("REVIEW_DIFF_FIRST_CHANGED_FILES", False),
+        description="Read changed diff files before the first review model call for A/B eval runs.",
+    )
+    review_diff_first_changed_files_max: int = Field(
+        default_factory=lambda: int(os.getenv("REVIEW_DIFF_FIRST_CHANGED_FILES_MAX", "4")),
+        ge=1,
+        le=20,
+        description="Maximum number of changed diff files to pre-read before the first review model call.",
     )
     event_log_dir: str = Field(
         default_factory=lambda: os.getenv("EVENT_LOG_DIR", ".mergewarden/logs"),
@@ -232,6 +254,12 @@ class Settings(BaseModel):
     eval_concurrency: int = Field(
         default_factory=lambda: int(os.getenv("EVAL_CONCURRENCY", "1")),
         ge=1,
+    )
+    eval_git_timeout_seconds: float = Field(
+        default_factory=lambda: float(os.getenv("EVAL_GIT_TIMEOUT_SECONDS", "120")),
+        gt=0.0,
+        le=1800.0,
+        description="Hard wall-clock timeout for eval fixture git operations.",
     )
     permission_mode: PermissionMode = Field(
         default="default",
