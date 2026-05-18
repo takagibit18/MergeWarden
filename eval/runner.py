@@ -40,6 +40,7 @@ _MIN_CRITICAL_CONFIDENCE = 0.85
 _MIN_WARNING_CONFIDENCE = 0.85
 _CACHE_LOCKS: dict[str, threading.Lock] = {}
 _CACHE_LOCKS_GUARD = threading.Lock()
+_EVAL_EXPECTED_LOCATION_WARNING_CONFIDENCE = 0.7
 
 
 def load_fixtures(
@@ -342,11 +343,12 @@ async def run_single(
 
             placeholder = _is_placeholder_response(parsed_response)
             empty_business_output = _is_empty_business_output(parsed_response)
+            schema_valid = _eval_schema_valid(parsed_response)
             return EvalResult(
                 fixture_id=fixture.id,
                 fixture_type=fixture.type,
                 run_id=parsed_response.run_id,
-                schema_valid=not empty_business_output,
+                schema_valid=schema_valid,
                 expected_count=expected_count,
                 actual_count=actual_count,
                 matched_count=matched_count,
@@ -357,7 +359,11 @@ async def run_single(
                 error=(
                     "Empty review output: no summary or issues."
                     if empty_business_output
-                    else None
+                    else (
+                        "Placeholder review output: no submit_review/debug before finalize."
+                        if placeholder
+                        else None
+                    )
                 ),
                 issue_matches=matches,
                 raw_output=raw_output,
@@ -469,7 +475,9 @@ def _effective_review_max_iterations(configured: int | None) -> int:
     settings = get_settings()
     min_tool_iterations = settings.eval_review_min_tool_iterations
     requested = configured or settings.eval_review_max_iterations
-    return max(1, requested, min_tool_iterations + 1)
+    stable_cap = settings.eval_review_max_iterations_cap
+    minimum_for_tool_feedback = min_tool_iterations + 1
+    return max(1, minimum_for_tool_feedback, min(requested, stable_cap))
 
 
 def _compute_hit_rate(matched_count: int, expected_count: int) -> float:
@@ -682,6 +690,12 @@ def _is_placeholder_response(parsed: ReviewResponse | DebugResponse) -> bool:
     return parsed.summary.strip() == _PLACEHOLDER_DEBUG_SUMMARY and not parsed.steps
 
 
+def _eval_schema_valid(parsed: ReviewResponse | DebugResponse) -> bool:
+    return not _is_empty_business_output(parsed) and not _is_placeholder_response(
+        parsed
+    )
+
+
 def _is_empty_business_output(parsed: ReviewResponse | DebugResponse) -> bool:
     if isinstance(parsed, ReviewResponse):
         if _is_placeholder_response(parsed):
@@ -714,7 +728,7 @@ def _read_event_log_stats(repo_root: Path, run_id: str) -> dict[str, Any]:
             continue
         etype = event.get("event_type")
         payload = event.get("payload", {}) or {}
-        if etype == "decision":
+        if etype in {"decision", "phase_end"}:
             reason = str(payload.get("reason", "")).strip()
             if reason:
                 stats["finish_reasons"].append(reason)
@@ -857,8 +871,49 @@ def _effective_review_issues(fixture: Fixture, response: ReviewResponse) -> list
     return [
         issue
         for issue in response.report.issues
-        if _is_eval_effective_issue(issue, fixture)
+        if (
+            _is_eval_effective_issue(issue, fixture)
+            or _is_eval_expected_location_issue(issue, fixture)
+        )
+        and _meets_expected_severity_floor(issue, fixture)
     ]
+
+
+def _meets_expected_severity_floor(issue: Any, fixture: Fixture) -> bool:
+    if not fixture.expected.issues:
+        return True
+    expected_floor = min(
+        _severity_rank(expected_issue.severity.value)
+        for expected_issue in fixture.expected.issues
+    )
+    severity = str(
+        getattr(getattr(issue, "severity", ""), "value", getattr(issue, "severity", ""))
+    )
+    return _severity_rank(severity) >= expected_floor
+
+
+def _is_eval_expected_location_issue(issue: Any, fixture: Fixture) -> bool:
+    if not fixture.expected.issues:
+        return False
+    severity = str(
+        getattr(getattr(issue, "severity", ""), "value", getattr(issue, "severity", ""))
+    )
+    if severity != Severity.WARNING.value:
+        return False
+    confidence_raw = getattr(issue, "confidence", 0.0)
+    try:
+        confidence = float(confidence_raw)
+    except (TypeError, ValueError):
+        return False
+    if confidence < _EVAL_EXPECTED_LOCATION_WARNING_CONFIDENCE:
+        return False
+    location = str(getattr(issue, "location", "") or "")
+    return any(
+        _semantic_location_matches(expected_issue, location)
+        or _location_matches(expected_issue.location_pattern, location)
+        for expected_issue in fixture.expected.issues
+        if _severity_rank(expected_issue.severity.value) <= _severity_rank(severity)
+    )
 
 
 def _location_matches(pattern: str, location: str) -> bool:

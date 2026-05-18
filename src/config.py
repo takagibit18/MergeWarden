@@ -269,6 +269,10 @@ class Settings(BaseModel):
         default_factory=lambda: int(os.getenv("EVAL_REVIEW_MAX_ITERATIONS", "2")),
         ge=1,
     )
+    eval_review_max_iterations_cap: int = Field(
+        default_factory=lambda: int(os.getenv("EVAL_REVIEW_MAX_ITERATIONS_CAP", "2")),
+        ge=1,
+    )
     eval_review_min_tool_iterations: int = Field(
         default_factory=lambda: int(os.getenv("EVAL_REVIEW_MIN_TOOL_ITERATIONS", "1")),
         ge=0,

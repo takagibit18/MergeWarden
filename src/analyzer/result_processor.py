@@ -9,6 +9,7 @@ from src.analyzer.output_formatter import (
     ReviewIssue,
     ReviewReport,
     Severity,
+    has_specific_code_evidence,
     has_specific_diff_evidence,
 )
 from src.analyzer.schemas import AnalysisPlan, DebugResponse, ReviewResponse
@@ -108,7 +109,7 @@ class ResultProcessor:
         if issue.severity == Severity.CRITICAL:
             return (
                 issue.confidence >= ResultProcessor._MIN_CRITICAL_CONFIDENCE
-                and has_specific_diff_evidence(issue.evidence)
+                and has_specific_code_evidence(issue.evidence)
             )
         if issue.severity == Severity.WARNING:
             return issue.confidence >= ResultProcessor._MIN_WARNING_CONFIDENCE

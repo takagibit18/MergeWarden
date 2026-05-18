@@ -10,11 +10,14 @@ import eval.runner as runner_module
 from eval.runner import (
     _aggregate_sampled_result,
     _checkout_git_workspace,
+    _eval_schema_valid,
+    _effective_review_max_iterations,
     _validate_diff_added_lines_against_workspace,
     _prepare_fixture_workspace,
     _is_empty_business_output,
     _match_issues,
     _persist_event_log_to_outputs,
+    _read_event_log_stats,
     _semantic_location_matches,
     _validate_expected_locations_against_diff,
     _resolve_event_log_path,
@@ -195,6 +198,63 @@ def test_persist_event_log_to_outputs_returns_none_when_file_missing(
     tmp_path: Path,
 ) -> None:
     assert _persist_event_log_to_outputs(tmp_path / "nope.jsonl", "f", "r") is None
+
+
+def test_read_event_log_stats_counts_phase_end_budget_exhaustion(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("EVENT_LOG_DIR", "logs")
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "run-1.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "event_type": "phase_end",
+                        "phase": "format",
+                        "payload": {
+                            "budget_state": "hard_capped",
+                            "budget_exhausted": True,
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "event_type": "decision",
+                        "phase": "finalize",
+                        "payload": {"budget_state": "hard_capped"},
+                    }
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    stats = _read_event_log_stats(tmp_path, "run-1")
+
+    assert stats["budget_state"] == "hard_capped"
+    assert stats["budget_exhausted"] is True
+
+
+def test_effective_review_max_iterations_caps_unstable_eval_rounds(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("EVAL_REVIEW_MAX_ITERATIONS", raising=False)
+    monkeypatch.delenv("EVAL_REVIEW_MAX_ITERATIONS_CAP", raising=False)
+    monkeypatch.delenv("EVAL_REVIEW_MIN_TOOL_ITERATIONS", raising=False)
+
+    assert _effective_review_max_iterations(3) == 2
+
+
+def test_effective_review_max_iterations_allows_explicit_eval_cap_override(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EVAL_REVIEW_MAX_ITERATIONS_CAP", "3")
+    monkeypatch.delenv("EVAL_REVIEW_MIN_TOOL_ITERATIONS", raising=False)
+
+    assert _effective_review_max_iterations(3) == 3
 
 
 def test_resolve_fixture_paths_prefers_manifest(tmp_path: Path) -> None:
@@ -708,6 +768,19 @@ def test_placeholder_review_output_is_not_empty_business_output() -> None:
     assert _is_empty_business_output(response) is False
 
 
+def test_placeholder_review_output_is_invalid_for_eval_schema() -> None:
+    response = ReviewResponse(
+        run_id="run-1",
+        report=ReviewReport(
+            summary="Review pipeline completed with placeholder summary.",
+            issues=[],
+        ),
+        context=ContextState(),
+    )
+
+    assert _eval_schema_valid(response) is False
+
+
 def test_nonempty_no_issue_review_output_is_valid_business_output() -> None:
     response = ReviewResponse(
         run_id="run-1",
@@ -837,6 +910,110 @@ def test_match_issues_counts_high_confidence_warning_on_changed_line() -> None:
                     evidence="risky_change() now runs inside parse",
                     suggestion="Restore the original guard.",
                     confidence=0.9,
+                )
+            ],
+        ),
+        context=ContextState(),
+    )
+
+    _, matched_count, false_positive_count = _match_issues(fixture, response)
+    assert matched_count == 1
+    assert false_positive_count == 0
+
+
+def test_match_issues_ignores_warning_fp_when_fixture_expects_critical() -> None:
+    fixture = Fixture.model_validate(
+        {
+            "id": "critical-fixture",
+            "type": "review",
+            "source": {"repo_full_name": "a/b", "pr_number": 1},
+            "input": {
+                "diff_text": (
+                    "diff --git a/src/main.py b/src/main.py\n"
+                    "--- a/src/main.py\n"
+                    "+++ b/src/main.py\n"
+                    "@@ -8,4 +8,5 @@ def parse(value):\n"
+                    "     old_call()\n"
+                    "+    misleading_log_message()\n"
+                ),
+                "files": {},
+            },
+            "expected": {
+                "issues": [
+                    {
+                        "severity": "critical",
+                        "location_pattern": "src/main.py",
+                        "path": "src/main.py",
+                        "line": 20,
+                    }
+                ]
+            },
+            "metadata": {"suite": "golden", "reviewed": True},
+        }
+    )
+    response = ReviewResponse(
+        run_id="run-1",
+        report=ReviewReport(
+            summary="minor issue",
+            issues=[
+                ReviewIssue(
+                    severity=Severity.WARNING,
+                    location="src/main.py:9",
+                    evidence="+    misleading_log_message()",
+                    suggestion="Clarify the log message.",
+                    confidence=0.95,
+                )
+            ],
+        ),
+        context=ContextState(),
+    )
+
+    _, matched_count, false_positive_count = _match_issues(fixture, response)
+    assert matched_count == 0
+    assert false_positive_count == 0
+
+
+def test_match_issues_counts_expected_location_warning_with_eval_relaxed_confidence() -> None:
+    fixture = Fixture.model_validate(
+        {
+            "id": "warning-fixture",
+            "type": "review",
+            "source": {"repo_full_name": "a/b", "pr_number": 1},
+            "input": {
+                "diff_text": (
+                    "diff --git a/src/main.py b/src/main.py\n"
+                    "--- a/src/main.py\n"
+                    "+++ b/src/main.py\n"
+                    "@@ -8,4 +8,5 @@ def parse(value):\n"
+                    "     old_call()\n"
+                    "+    return generic_id()\n"
+                ),
+                "files": {},
+            },
+            "expected": {
+                "issues": [
+                    {
+                        "severity": "warning",
+                        "location_pattern": "src/main.py",
+                        "path": "src/main.py",
+                        "line": 9,
+                    }
+                ]
+            },
+            "metadata": {"suite": "golden", "reviewed": True},
+        }
+    )
+    response = ReviewResponse(
+        run_id="run-1",
+        report=ReviewReport(
+            summary="found likely regression",
+            issues=[
+                ReviewIssue(
+                    severity=Severity.WARNING,
+                    location="src/main.py:9",
+                    evidence="+    return generic_id()",
+                    suggestion="Do not silently replace descriptive IDs.",
+                    confidence=0.7,
                 )
             ],
         ),

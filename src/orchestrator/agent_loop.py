@@ -17,6 +17,7 @@ from src.analyzer.context_builder import ContextBuilder
 from src.analyzer.context_state import ContextState, DecisionStep, ErrorDetail
 from src.analyzer.event_log import EventEntry, EventLog, EventType
 from src.analyzer.inference_engine import InferenceEngine
+from src.analyzer.output_formatter import ReviewReport
 from src.analyzer.schemas import AnalysisPlan, DebugRequest, DebugResponse, ReviewRequest, ReviewResponse
 from src.analyzer.trace import TraceRecorder
 from src.analyzer.result_processor import ResultProcessor
@@ -178,7 +179,7 @@ class AgentOrchestrator:
         if not isinstance(response, ReviewResponse):
             return response
         plan = self._last_plan
-        if plan is None or plan.draft_review is not None:
+        if plan is None or self._has_review_business_output(plan.draft_review):
             return response
         finalize_plan = await self.analyze(state, request, tool_specs=[], force_submit=True)
         self._last_plan = finalize_plan
@@ -812,7 +813,8 @@ class AgentOrchestrator:
             return False
         plan = self._last_plan
         if plan is not None and (
-            plan.draft_review is not None or plan.draft_debug is not None
+            self._has_review_business_output(plan.draft_review)
+            or plan.draft_debug is not None
         ):
             return False
         ratio = self._settings.pre_budget_submit_token_ratio
@@ -855,6 +857,12 @@ class AgentOrchestrator:
         if self._run_timeout_exceeded():
             return "run_timeout"
         return ""
+
+    @staticmethod
+    def _has_review_business_output(report: ReviewReport | None) -> bool:
+        if report is None:
+            return False
+        return bool(report.summary.strip() or report.issues)
 
     def _record_finalize_skipped(self, skip_reason: str) -> None:
         self._record_event(

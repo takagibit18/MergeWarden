@@ -120,6 +120,55 @@ def test_merge_review_reports_keeps_bug_findings_with_diff_evidence() -> None:
     ]
 
 
+def test_merge_review_reports_keeps_high_confidence_critical_with_code_evidence() -> None:
+    report = ReviewReport(
+        summary="summary",
+        issues=[
+            ReviewIssue(
+                severity=Severity.CRITICAL,
+                location="src/_pytest/fixtures.py:246-249",
+                evidence=(
+                    "def __eq__(self, other: object) -> bool:\n"
+                    "    try:\n"
+                    "        res = self.obj == other\n"
+                    "        return bool(res)\n"
+                    "    except Exception:\n"
+                    "        return id(self.obj) == id(other)"
+                ),
+                suggestion="Compare against other.obj when other is a wrapper.",
+                confidence=0.95,
+            )
+        ],
+    )
+
+    merged = ResultProcessor.merge_review_reports([report])
+
+    assert [issue.location for issue in merged.issues] == [
+        "src/_pytest/fixtures.py:246-249",
+    ]
+
+
+def test_merge_review_reports_keeps_high_confidence_critical_with_single_line_code_evidence() -> None:
+    report = ReviewReport(
+        summary="summary",
+        issues=[
+            ReviewIssue(
+                severity=Severity.CRITICAL,
+                location="src/Nethermind/Nethermind.Merge.Plugin/EngineRpcModule.Paris.cs:77",
+                evidence="using IDisposable region = _gcKeeper.TryStartNoGCRegion();",
+                suggestion="Guard this runtime-sensitive path.",
+                confidence=0.85,
+            )
+        ],
+    )
+
+    merged = ResultProcessor.merge_review_reports([report])
+
+    assert [issue.location for issue in merged.issues] == [
+        "src/Nethermind/Nethermind.Merge.Plugin/EngineRpcModule.Paris.cs:77",
+    ]
+
+
 def test_merge_review_reports_filters_low_confidence_warning_and_critical() -> None:
     report = ReviewReport(
         summary="summary",
