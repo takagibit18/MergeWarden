@@ -71,6 +71,7 @@ def test_eval_performance_defaults_are_bounded(monkeypatch) -> None:
     monkeypatch.delenv("EVAL_CONCURRENCY", raising=False)
     monkeypatch.delenv("EVAL_FIXTURE_CONCURRENCY", raising=False)
     monkeypatch.delenv("EVAL_REVIEW_MAX_ITERATIONS", raising=False)
+    monkeypatch.delenv("EVAL_REVIEW_MAX_ITERATIONS_CAP", raising=False)
     monkeypatch.delenv("EVAL_REVIEW_MIN_TOOL_ITERATIONS", raising=False)
 
     settings = get_settings()
@@ -78,6 +79,7 @@ def test_eval_performance_defaults_are_bounded(monkeypatch) -> None:
     assert settings.eval_concurrency == 1
     assert settings.eval_fixture_concurrency == 3
     assert settings.eval_review_max_iterations == 2
+    assert settings.eval_review_max_iterations_cap == 2
     assert settings.eval_review_min_tool_iterations == 1
 
 

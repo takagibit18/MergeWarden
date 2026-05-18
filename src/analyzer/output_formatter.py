@@ -64,6 +64,10 @@ _MUST_FIX_MIN_CONFIDENCE = 0.85
 _DIFF_HEADER_PATTERN = re.compile(r"(?m)^diff --git ")
 _DIFF_HUNK_PATTERN = re.compile(r"(?m)^@@ .+ @@")
 _DIFF_CHANGE_LINE_PATTERN = re.compile(r"(?m)^(?:\+|-)(?!\+\+|--).+\S")
+_CODE_EVIDENCE_PATTERN = re.compile(
+    r"(?m)^\s*(?:def |class |if |elif |else:|try:|except |return |"
+    r"raise |with |using |[A-Za-z_][\w.]*\s*=|[A-Za-z_][\w.]*\()"
+)
 
 
 def triage_review_report(report: ReviewReport) -> ReviewTriage:
@@ -107,3 +111,12 @@ def has_specific_diff_evidence(evidence: str) -> bool:
         return True
     changed_lines = _DIFF_CHANGE_LINE_PATTERN.findall(text)
     return any(len(line.strip()) > 4 for line in changed_lines)
+
+
+def has_specific_code_evidence(evidence: str) -> bool:
+    text = evidence.strip()
+    if not text:
+        return False
+    if has_specific_diff_evidence(text):
+        return True
+    return _CODE_EVIDENCE_PATTERN.search(text) is not None

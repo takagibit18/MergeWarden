@@ -1033,6 +1033,32 @@ def test_pre_budget_submit_skips_without_tool_feedback(
     assert analyze_calls[1]["force_submit"] is True
 
 
+def test_empty_review_draft_allows_force_submit_finalize(
+    tmp_path, monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("REVIEW_MAX_ITERATIONS", "1")
+
+    orchestrator = AgentOrchestrator()
+    analyze_calls: list[dict[str, bool]] = []
+
+    async def _empty_then_final(state, request, tool_specs, **kwargs):  # type: ignore[no-untyped-def]
+        force_submit = bool(kwargs.get("force_submit"))
+        analyze_calls.append({"force_submit": force_submit})
+        if force_submit:
+            return AnalysisPlan(
+                draft_review=ReviewReport(summary="No issues found.", issues=[]),
+            )
+        return AnalysisPlan(draft_review=ReviewReport(summary="", issues=[]))
+
+    monkeypatch.setattr(orchestrator, "analyze", _empty_then_final)
+
+    response = asyncio.run(orchestrator.run_review(ReviewRequest(repo_path=".")))
+
+    assert [item["force_submit"] for item in analyze_calls] == [False, True]
+    assert response.report.summary == "No issues found."
+
+
 def test_hard_cap_still_skips_extra_finalize(tmp_path, monkeypatch) -> None:
     """Hard cap must never trigger an extra model call in finalize."""
     monkeypatch.chdir(tmp_path)
