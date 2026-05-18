@@ -1025,6 +1025,148 @@ def test_match_issues_counts_expected_location_warning_with_eval_relaxed_confide
     assert false_positive_count == 0
 
 
+def test_match_issues_counts_same_file_evidence_line_for_nethermind_callsite() -> None:
+    fixture = Fixture.model_validate(
+        {
+            "id": "nethermind-fixture",
+            "type": "review",
+            "source": {"repo_full_name": "NethermindEth/nethermind", "pr_number": 5381},
+            "input": {
+                "diff_text": (
+                    "diff --git a/src/Nethermind/Nethermind.Merge.Plugin/EngineRpcModule.Paris.cs "
+                    "b/src/Nethermind/Nethermind.Merge.Plugin/EngineRpcModule.Paris.cs\n"
+                    "--- a/src/Nethermind/Nethermind.Merge.Plugin/EngineRpcModule.Paris.cs\n"
+                    "+++ b/src/Nethermind/Nethermind.Merge.Plugin/EngineRpcModule.Paris.cs\n"
+                    "@@ -75,6 +77,7 @@ public partial class EngineRpcModule : IEngineRpcModule\n"
+                    "             try\n"
+                    "             {\n"
+                    "+                using IDisposable region = _gcKeeper.TryStartNoGCRegion();\n"
+                    "                 return await _newPayloadV1Handler.HandleAsync(executionPayload);\n"
+                    "             }\n"
+                ),
+                "files": {},
+            },
+            "expected": {
+                "issues": [
+                    {
+                        "severity": "critical",
+                        "location_pattern": (
+                            r"src/Nethermind/Nethermind\.Merge\.Plugin/"
+                            r"EngineRpcModule\.Paris\.cs:80"
+                        ),
+                        "path": (
+                            "src/Nethermind/Nethermind.Merge.Plugin/EngineRpcModule.Paris.cs"
+                        ),
+                        "line": 80,
+                        "end_line": 80,
+                    }
+                ]
+            },
+            "metadata": {"suite": "golden", "reviewed": True},
+        }
+    )
+    response = ReviewResponse(
+        run_id="run-1",
+        report=ReviewReport(
+            summary="found critical constructor regression",
+            issues=[
+                ReviewIssue(
+                    severity=Severity.CRITICAL,
+                    location=(
+                        "src/Nethermind/Nethermind.Merge.Plugin/EngineRpcModule.Paris.cs:24"
+                    ),
+                    evidence=(
+                        "The diff adds `private readonly GCKeeper _gcKeeper;` but "
+                        "the constructor does not assign it. When "
+                        "`_gcKeeper.TryStartNoGCRegion()` is called at line 80, "
+                        "this will throw NullReferenceException at runtime."
+                    ),
+                    suggestion="Assign the GCKeeper dependency before calling it.",
+                    confidence=0.95,
+                )
+            ],
+        ),
+        context=ContextState(),
+    )
+
+    _, matched_count, false_positive_count = _match_issues(fixture, response)
+    assert matched_count == 1
+    assert false_positive_count == 0
+
+
+def test_match_issues_keeps_valid_issue_when_budget_hard_capped_in_log_stats(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("EVENT_LOG_DIR", "logs")
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "run-1.jsonl").write_text(
+        json.dumps(
+            {
+                "event_type": "phase_end",
+                "phase": "format",
+                "payload": {
+                    "budget_state": "hard_capped",
+                    "budget_exhausted": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    fixture = Fixture.model_validate(
+        {
+            "id": "hard-cap-fixture",
+            "type": "review",
+            "source": {"repo_full_name": "a/b", "pr_number": 1},
+            "input": {
+                "diff_text": (
+                    "diff --git a/src/main.py b/src/main.py\n"
+                    "--- a/src/main.py\n"
+                    "+++ b/src/main.py\n"
+                    "@@ -1,2 +1,3 @@\n"
+                    "+    fail_closed()\n"
+                ),
+                "files": {},
+            },
+            "expected": {
+                "issues": [
+                    {
+                        "severity": "critical",
+                        "location_pattern": "src/main.py",
+                        "path": "src/main.py",
+                        "line": 1,
+                    }
+                ]
+            },
+        }
+    )
+    response = ReviewResponse(
+        run_id="run-1",
+        report=ReviewReport(
+            summary="found critical issue",
+            issues=[
+                ReviewIssue(
+                    severity=Severity.CRITICAL,
+                    location="src/main.py:1",
+                    evidence="+    fail_closed()",
+                    suggestion="Keep the guard.",
+                    confidence=0.95,
+                )
+            ],
+        ),
+        context=ContextState(),
+    )
+
+    stats = _read_event_log_stats(tmp_path, "run-1")
+    _, matched_count, false_positive_count = _match_issues(fixture, response)
+
+    assert stats["budget_state"] == "hard_capped"
+    assert stats["budget_exhausted"] is True
+    assert matched_count == 1
+    assert false_positive_count == 0
+
+
 def test_golden_fixture_distribution_has_required_buckets() -> None:
     real = load_fixtures(Path("eval") / "fixtures", suite="golden", reviewed_only=True)
     synth = load_fixtures(
