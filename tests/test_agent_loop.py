@@ -7,6 +7,7 @@ import json
 from pathlib import Path, PurePath
 
 from src.analyzer.event_log import EventType
+from src.analyzer.output_formatter import ReviewReport
 from src.analyzer.schemas import AnalysisPlan, DebugRequest, ReviewRequest
 from src.models.exceptions import ModelTimeoutError
 from src.orchestrator.agent_loop import AgentOrchestrator
@@ -137,6 +138,35 @@ def test_review_iterations_respect_settings(monkeypatch, tmp_path) -> None:
     continue_steps = [step for step in response.context.decisions if step.phase == "continue"]
     assert len(continue_steps) == 2
     assert continue_steps[-1].result in {"stop:max_iterations", "stop:budget_hard_capped"}
+
+
+def test_review_min_tool_iterations_defers_first_round_submit(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    orchestrator = AgentOrchestrator(
+        review_max_iterations=2,
+        review_min_tool_iterations=1,
+    )
+    analyze_calls = 0
+
+    async def _submits_without_tools(state, request, tool_specs, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal analyze_calls
+        analyze_calls += 1
+        return AnalysisPlan(
+            needs_tools=False,
+            tool_calls=[],
+            draft_review=ReviewReport(summary="draft", issues=[]),
+        )
+
+    monkeypatch.setattr(orchestrator, "analyze", _submits_without_tools)
+
+    response = asyncio.run(orchestrator.run_review(ReviewRequest(repo_path=".")))
+
+    continue_steps = [step for step in response.context.decisions if step.phase == "continue"]
+    assert analyze_calls == 2
+    assert continue_steps[0].result == "continue"
+    assert continue_steps[-1].result == "stop:max_iterations"
 
 
 def test_debug_run_stops_at_iteration_limit(tmp_path, monkeypatch) -> None:

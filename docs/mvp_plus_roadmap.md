@@ -1,73 +1,87 @@
 # MVP+ 完整落地路线图
 
-> 本文档定义：当前版本已经具备什么、完整 MVP+ 必须交付什么、哪些能力明确留到 Phase 2，以及每个 MVP+ 里程碑的验收方式。  
+> 本文档定义：当前版本已经具备什么、完整 MVP+ 必须交付什么、哪些能力明确留到 Phase 2，以及每个 MVP+ 里程碑的验收方式。
 > 与 [project_plan.md](project_plan.md) 互补：`project_plan` 记录总体方向，本文记录 **从当前版本走到完整 MVP+ 的可执行落盘规划**。
 
 ---
 
-## 1. 当前版本基线
+## 1. Current Baseline
 
-当前版本已经超过最小 MVP，具备以下可直接依赖的基础能力：
+The current version is beyond the minimal MVP and has the following usable foundations:
 
-- **CLI 产品入口**：`review` / `debug` 子命令，输出结构化 `ReviewResponse` / `DebugResponse`。
-- **五阶段 Agent 编排**：prepare -> analyze -> execute -> process -> continue/stop；支持多轮工具反馈、轮次上限、token 预算与 finalize-only 收口。
-- **上下文管理**：按优先级截断、diff hunk / 文件粒度装载、`project_structure`、按需 `file_contents`、溢出块 LLM 摘要与 `truncated.summarized` 可观测字段。
-- **工具与安全**：只读工具、Debug-only execute 工具、首词白名单、`shell=False`、环境清洗、输出截断、高危门控、CI 默认拒绝 execute。
-- **Docker execute 后端**：`DockerBackend` 已通过本地 `docker run` 执行预构建镜像，复用 workspace/cwd 校验、容器内 cwd 映射、`SandboxResult` 观测字段。
-- **契约与输出**：canonical `location` 解析、`ReviewReport` / `DebugResponse` Pydantic 模型、CLI 可消费的稳定 JSON 结构。
-- **评测与回归**：`eval/` Golden fixtures、manifest、runner、report、gate、CI artifact 上传已经存在。
-- **CI 基础流水线**：ruff、mypy、pytest、golden eval、eval gate 已接入 GitHub Actions。
+- **CLI entrypoints**: `review` and `debug` produce structured `ReviewResponse` / `DebugResponse` output.
+- **Five-phase agent loop**: prepare -> analyze -> execute -> process -> continue/stop, with tool feedback, iteration limits, token budgets, and finalize-only closure.
+- **Context management**: prioritized truncation, diff hunk and file-level loading, `project_structure`, on-demand `file_contents`, LLM summaries for overflow chunks, and observable `truncated.summarized` fields.
+- **Tools and safety**: read-only review tools, debug-only execute tools, first-token allowlist, `shell=False`, environment cleanup, output truncation, high-risk gates, and CI execute refusal by default.
+- **Docker execute backend**: `DockerBackend` is available for local smoke tests and reuses workspace/cwd validation, container cwd mapping, and `SandboxResult` observability fields.
+- **Contracts and output**: canonical `location` parsing, Pydantic output models, and stable CLI-consumable JSON.
+- **Eval and regression**: `eval/` fixtures, manifest, runner, report, gate, and CI artifact upload exist. Workspace-backed fixtures are validated against their restored `checkout_sha` before model execution.
+- **CI foundation**: ruff, mypy, pytest, golden eval, and eval gate are wired in GitHub Actions.
 
-仍需注意的基线风险：
+Current status:
 
-- 部分规划文档仍滞后于代码现状（如 golden 样本分布、FastAPI 实现状态等），本轮 docs-audit 已逐份对齐。
-- CI 当前 `golden` suite 已有 4 正 + 2 负样本（全部 `annotated_by=manual`、`reviewed=true`）；gate 暂用过渡阈值 `hit_rate >= 0.0`，待 DeepSeek 命中率稳定后恢复 `hit_rate >= 0.6`。
-- Docker CLI demo 命令已在 README 和 docker-compose.yml 中就绪。
-
----
-
-## 2. 完整 MVP+ 完成定义
-
-完整 MVP+ 的目标不是增加大量新产品线，而是在当前 MVP 基础上补齐 **可交付、可验证、可运维、可展示** 的闭环。
-
-达到完整 MVP+ 时，必须同时满足：
-
-1. **CLI 稳定路径**：`review` / `debug` 有清晰 demo、错误处理和结构化输出，能作为主产品入口展示。
-2. **同步 FastAPI 薄层**：提供 `GET /health`、`POST /review`、`POST /debug`，复用现有 orchestrator 与 Pydantic 请求/响应模型，不引入 job queue 或持久状态。
-3. **Docker CLI demo 闭环**：以 `docker compose run --rm agent python cli.py ...` 作为主 demo 路径，文档中给出可复制命令和预期结果。
-4. **观测与降级收口**：run_id、phase 事件、工具失败、submit 校验失败、终止原因可排查；用户看到的 stop reason 不误导。
-5. **温和 eval gate**：CI gate 至少约束 MergeWarden 自身评测回归的 `schema_validity_rate >= 1.0` 与 `false_positive_rate <= 0.5`；当 `golden` suite 补齐正样本后，恢复 `hit_rate >= 0.6`。该 gate 不代表产品侧对用户 PR 的 hard merge block。
-6. **文档一致性**：README、architecture、project plan、shared contracts、execute design、golden fixture snapshot plan、env example 与代码现状一致。
-
-MVP+ 不要求：
-
-- 自动修复代码并提交补丁。
-- 支持完整多用户平台、数据库、任务队列或长期作业状态。
-- 在 CI 中默认真实运行 Docker execute smoke；该测试保持手动启用。
+- MVP+ engineering scope is in release-candidate shape: CLI, FastAPI thin layer, Docker CLI demo, event logs, soft eval gate, and documentation entrypoints are in place.
+- The `golden` suite has 4 positive and 2 negative fixtures; all are `annotated_by=manual` and `reviewed=true`; `manifest.json` is consistent with fixture metadata.
+- The latest diagnostic report `eval/outputs/20260517_152809_report.json` has schema validity `1.0`, hit rate `0.5`, and false positive rate `0.1667`. It proves the eval path is debuggable, but it does not satisfy the stable `hit_rate >= 0.6` target.
+- Fixture diff/snapshot drift has been fixed and is now blocked by runner validation. A fresh golden run on the corrected fixtures is required before recording a new quality baseline.
+- Docker CLI demo commands are documented in README and `docker-compose.yml`.
 
 ---
+## 2. Complete MVP+ Definition
 
-## 3. MVP+ 非目标与 Phase 2 边界
+Complete MVP+ means a deliverable, verifiable, operable, and demoable loop on top of the current MVP. It does not mean adding a large new product surface.
 
-以下能力不纳入完整 MVP+ 完成标准，只作为 Phase 2 或更后续阶段：
+Complete MVP+ requires:
 
-| 能力 | 阶段 | 边界说明 |
+1. **Stable CLI path**: `review` and `debug` have clear demos, error handling, and structured output.
+2. **Synchronous FastAPI thin layer**: `GET /health`, `POST /review`, and `POST /debug` reuse the existing orchestrator and Pydantic request/response models without a job queue or durable state.
+3. **Docker CLI demo loop**: `docker compose run --rm agent python cli.py ...` is the primary container demo path with documented commands and expected output.
+4. **Observability and graceful degradation**: run_id, phase events, tool failures, submit validation failures, budget state, and stop reasons are diagnosable.
+5. **Soft eval gate**: CI gates schema validity and false positive regression; hit rate remains transitional at `0.0` until a corrected fresh run passes the stable `hit_rate >= 0.6` target. This gate is not a hard merge block for user PRs.
+6. **Documentation consistency**: README, architecture, project plan, shared contracts, execute design, golden fixture snapshot plan, and env examples match the codebase.
+
+2026-05-17 status:
+
+- **MVP+ engineering scope: complete / release-candidate.** CLI, API, Docker demo, observability, eval runner, fixture snapshot strategy, and docs boundaries are closed.
+- **MVP+ stable quality evidence: not complete.** The latest diagnostic run did not pass `hit_rate >= 0.6`, and it was produced before fixture snapshot consistency was corrected. Rerun golden eval and pass the stable gate before calling the eval result high quality.
+- **Phase 2 should not block MVP+ engineering closure.** GitHub Bot, PR comment lifecycle, webhooks, async jobs, and productized run storage remain Phase 2 work.
+
+MVP+ does not require:
+
+- Automatic code repair and patch submission.
+- A full multi-user platform, database, task queue, or long-running job state.
+- Docker execute smoke tests enabled by default in CI; they remain manually enabled.
+
+---
+## 3. Non-goals and Phase 2 Boundary
+
+These capabilities are outside the complete MVP+ standard and belong to Phase 2 or later:
+
+| Capability | Stage | Boundary |
 |------|------|----------|
-| GitHub Action / Bot PR 自动评论 | Phase 2 | MVP+ 只准备稳定 CLI/API/评测/文档，PR 评论、review thread、check conclusion 策略后移。 |
-| PR webhook / GitHub App | Phase 2 | 当前不引入 webhook server、installation token、权限矩阵或 GitHub App 配置。 |
-| PR 评论去重与更新 | Phase 2 | 不在 MVP+ 内设计 inline comment lifecycle。 |
-| IDE 插件 | Later | `project_plan.md` 已定义为有余力再做，MVP+ 不规划实现。 |
-| 异步任务 API / job queue | Later | FastAPI 只做同步薄层；长任务、状态存储和后台 worker 后移。 |
+| GitHub Action / Bot PR comments | Phase 2 | MVP+ prepares stable CLI/API/eval/docs. PR comments, review threads, and check conclusion policy move later. |
+| PR webhook / GitHub App | Phase 2 | No webhook server, installation token, permission matrix, or GitHub App configuration in MVP+. |
+| PR comment deduplication and updates | Phase 2 | Inline comment lifecycle is not designed inside MVP+. |
+| Eval quality hardening | Phase 2-ready | Does not block MVP+ engineering closure, but restoring `hit_rate >= 0.6`, multi-sample stability, and provider matrix testing should precede GitHub integration. |
+| IDE plugin | Later | Already defined as optional later work in `project_plan.md`. |
+| Async API / job queue | Later | FastAPI remains synchronous; long-running jobs, state storage, and workers move later. |
 
-Phase 2 启动前置条件：
+Phase 2 prerequisites:
 
-- MVP+ 的 CLI 与 FastAPI 输出契约稳定。
-- eval gate 能可靠阻止 MergeWarden 自身质量明显退化；用户 PR 的硬性合并裁决仍交给 GitHub CI / branch protection。
-- README 能让新用户本地或 Docker 跑通 demo。
-- 事件日志足以复盘一次失败 review/debug。
+- MVP+ CLI and FastAPI output contracts are stable.
+- Eval gate reliably catches obvious MergeWarden quality regression; hard merge authority remains GitHub CI / branch protection.
+- README lets a new user run the local or Docker demo.
+- Event logs are sufficient to debug a failed review/debug run.
+
+Recommended Phase 2 order:
+
+1. **Restore eval quality**: rerun the corrected workspace-backed golden suite, restore `hit_rate >= 0.6`, then add pass@k and provider matrix sampling.
+2. **GitHub PR integration**: start with advisory check or draft review comments, not hard blocks; restrict inline comments to changed lines / changed hunks.
+3. **Comment lifecycle**: add dedupe, update, stale-comment folding, and run_id tracking.
+4. **Async execution and storage**: introduce job queue, durable state, and webhook callbacks only when GitHub integration needs long-running work.
+5. **Productized observability**: summarize event logs, budget state, provider/model, schema failure, hit/miss, and FP causes into queryable run summaries.
 
 ---
-
 ## 4. MVP+ 里程碑
 
 ### M+0 文档与基线校准
@@ -183,18 +197,27 @@ python -m eval.run eval --suite golden --output-json eval/outputs/ci_report.json
 python -m eval.gate --report eval/outputs/ci_report.json --schema-validity-min 1.0 --hit-rate-min 0.0 --false-positive-rate-max 0.5
 ```
 
-### M+4.1 Eval 正样本补齐与门禁恢复
+### M+4.1 Eval Positive Fixtures and Stable Gate Restore
 
-**状态**：✅ 正样本已补齐（4 正 + 2 负，全部 `annotated_by=manual`、`reviewed=true`）。剩余：恢复 CI `hit_rate >= 0.6` 门禁（待 DeepSeek 命中率稳定后执行）。
+**Status**: fixture count is complete (4 positive + 2 negative, all `annotated_by=manual`, `reviewed=true`), but the stable hit-rate gate is not restored.
 
-**已完成**
-- 已补充 4 条人工审核过的正样本（`pytest_pr8513`, `pytest_pr9350`, `pytest_pr7254`, `nethermind_pr5381`），2 条负样本（`ruff_pr24648`, `requests_pr7205`），每条 expected issue 可从 diff 直接定位。
-- `manifest.json` 已统一索引，覆盖 `should-detect` 与 `zero-issue`。
-- 正样本均满足 `annotated_by=manual`、`reviewed=true`、`tags` 含 `positive-sample` 与 `should-detect`。
+**Done**
 
-**待恢复**
-- 将 `.github/workflows/ci.yml` 的 eval gate 从 `--hit-rate-min 0.0` 恢复为 `--hit-rate-min 0.6`。
-- 同步 `eval/README.md` 中的门禁命令与样本分布描述。
+- Added 4 manually reviewed positive fixtures (`pytest_pr8513`, `pytest_pr9350`, `pytest_pr7254`, `nethermind_pr5381`) and 2 negative fixtures (`ruff_pr24648`, `requests_pr7205`).
+- `manifest.json` and fixture metadata are consistent for the reviewed golden suite.
+- Review fixtures use the `PR diff + repo snapshot` shape. The runner validates diff added lines against the `checkout_sha` workspace before model execution.
+
+**Current diagnostic result**
+
+- Latest local report: `eval/outputs/20260517_152809_report.json`.
+- Result: schema validity `1.0`, hit rate `0.5`, false positive rate `0.1667`.
+- Interpretation: execution path is healthy enough to debug, but this is not a high-quality MVP+ eval result. Rerun after fixture correction.
+
+**To restore**
+
+- Rerun `python -m eval.run eval --suite golden --output-json eval/outputs/ci_report.json`.
+- Pass `python -m eval.gate --report eval/outputs/ci_report.json --schema-validity-min 1.0 --hit-rate-min 0.6 --false-positive-rate-max 0.5`.
+- Sync `.github/workflows/ci.yml`, `eval/README.md`, and release checklist stable-gate wording.
 
 ### M+5 契约与文档一致性
 
@@ -247,22 +270,23 @@ docker compose run --rm agent python cli.py review --help
 
 ---
 
-## 5. 最终验收清单
+## 5. Final Acceptance Checklist
 
-完整 MVP+ 发布前逐项确认：
+Before a complete MVP+ release, confirm:
 
-- [ ] CLI `review` / `debug` 本地可运行，并有 README 示例。
-- [ ] Docker CLI demo 可运行，并有明确预期输出。
-- [ ] FastAPI `GET /health`、`POST /review`、`POST /debug` 有测试与文档。
-- [ ] `SandboxResult`、execute 后端、Docker 配置在契约文档中描述一致。
-- [ ] 事件日志能复盘失败原因和终止原因。
-- [ ] 当前 CI gate 使用过渡门禁：schema 1.0、hit rate 0.0、false positive 0.5；补齐 `golden` 正样本后恢复 hit rate 0.6。
-- [ ] Golden eval report 与 human review artifact 可查看。
-- [ ] README、architecture、project plan、shared contracts、execute design、golden fixture snapshot plan 口径一致。
-- [ ] Phase 2 backlog 清晰列出 GitHub Action/Bot、PR 评论、IDE 插件等后续事项。
+- [x] CLI `review` / `debug` local entrypoints and structured output contracts exist, with README examples.
+- [x] Docker CLI demo documentation exists; real Docker smoke remains manually enabled.
+- [x] FastAPI `GET /health`, `POST /review`, and `POST /debug` are in MVP+ scope and reuse current contracts.
+- [x] `SandboxResult`, execute backends, and Docker configuration are described consistently in contract docs.
+- [x] Event logs can explain failure reason, budget state, and stop reason.
+- [x] Current CI gate uses transitional thresholds: schema 1.0, hit rate 0.0, false positive 0.5.
+- [x] Golden fixtures use workspace-backed snapshots and diff/workspace consistency validation.
+- [ ] Rerun golden eval on corrected fixtures and restore stable `hit_rate >= 0.6`.
+- [ ] Fill the latest `golden_human_review.md` human acceptability scores and comments.
+- [x] README, architecture, project plan, shared contracts, execute design, and golden fixture snapshot plan align on MVP+ / Phase 2 boundaries.
+- [x] Phase 2 backlog clearly lists GitHub Action/Bot, PR comment lifecycle, async execution, and productized observability.
 
 ---
-
 ## 6. 维护规则
 
 - 涉及工具安全、Docker 后端、execute 策略时，必须同步 `execute_tools_design.md`、`shared_contracts.md` 和本路线图。

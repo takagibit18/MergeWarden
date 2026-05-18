@@ -38,6 +38,9 @@ class AgentOrchestrator:
         confirm_high_risk: Any | None = None,
         permission_mode: Literal["default", "plan"] | None = None,
         temperature: float | None = None,
+        review_max_iterations: int | None = None,
+        debug_max_iterations: int | None = None,
+        review_min_tool_iterations: int | None = None,
     ) -> None:
         self._settings = get_settings()
         self._external_registry: ToolRegistry | None = registry
@@ -75,6 +78,9 @@ class AgentOrchestrator:
         self._run_timeout_seconds = self._settings.agent_run_timeout_seconds
         self._model_timeout_seen = False
         self._temperature = temperature
+        self._review_max_iterations_override = review_max_iterations
+        self._debug_max_iterations_override = debug_max_iterations
+        self._review_min_tool_iterations = max(0, review_min_tool_iterations or 0)
         self._trace_recorder = TraceRecorder(
             detail_mode=self._settings.agent_trace_detail,
             max_chars=self._settings.agent_trace_max_chars,
@@ -84,7 +90,10 @@ class AgentOrchestrator:
     async def run_review(self, request: ReviewRequest) -> ReviewResponse:
         """Run review mode through the orchestrator loop."""
         self._reset_run(
-            max_iterations=self._settings.review_max_iterations,
+            max_iterations=(
+                self._review_max_iterations_override
+                or self._settings.review_max_iterations
+            ),
             repo_path=request.repo_path,
         )
         if self._external_registry is None:
@@ -108,7 +117,10 @@ class AgentOrchestrator:
     async def run_debug(self, request: DebugRequest) -> DebugResponse:
         """Run debug mode through the orchestrator loop."""
         self._reset_run(
-            max_iterations=self._settings.debug_max_iterations,
+            max_iterations=(
+                self._debug_max_iterations_override
+                or self._settings.debug_max_iterations
+            ),
             repo_path=request.repo_path,
         )
         if self._external_registry is None:
@@ -265,10 +277,18 @@ class AgentOrchestrator:
             self._latest_tokens = 0
         else:
             try:
+                defer_review_submit = (
+                    isinstance(request, ReviewRequest)
+                    and not force_submit
+                    and self._iteration < self._review_min_tool_iterations
+                    and self._permission_mode != "plan"
+                )
                 if force_submit:
                     serialized_tools = build_submit_tool_schemas()
                 else:
-                    serialized_tools = build_tool_schemas(tool_specs) + build_submit_tool_schemas()
+                    serialized_tools = build_tool_schemas(tool_specs)
+                    if not defer_review_submit:
+                        serialized_tools += build_submit_tool_schemas()
                 result, total_tokens, reasoning_content = await engine.analyze(
                     state=state,
                     request=request,
@@ -284,6 +304,7 @@ class AgentOrchestrator:
                     iteration=self._iteration,
                     force_submit=force_submit,
                     near_last_iteration=(self._iteration + 1) >= self._max_iterations,
+                    defer_submit=defer_review_submit,
                 )
                 self._latest_tokens = total_tokens
                 self._last_reasoning_content = reasoning_content
@@ -604,7 +625,15 @@ class AgentOrchestrator:
             if self._permission_mode == "plan"
             else bool(self._last_plan and self._last_plan.needs_tools)
         )
-        self._model_completed = not has_pending_tools and not self._blocking_error
+        defer_review_submit = (
+            self._is_review_mode(state)
+            and self._iteration < self._review_min_tool_iterations
+            and not self._blocking_error
+            and self._permission_mode != "plan"
+        )
+        self._model_completed = (
+            not has_pending_tools and not self._blocking_error and not defer_review_submit
+        )
         reached_limit = (self._iteration + 1) >= self._max_iterations
         run_timed_out = self._run_timeout_exceeded()
 
@@ -660,6 +689,7 @@ class AgentOrchestrator:
                 "budget_exhausted": self._budget_exhausted,
                 "budget_state": self._budget_state,
                 "reason": reason,
+                "defer_review_submit": defer_review_submit,
                 "submit_review_seen_any": self._submit_review_seen_any,
                 "submit_debug_seen_any": self._submit_debug_seen_any,
                 "run_id": response.run_id,

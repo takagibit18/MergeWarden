@@ -84,28 +84,52 @@ python -m eval.run crawl --suite golden_candidates --candidate-mode rejected-pr 
 # 2) 跑评测（调用 AgentOrchestrator）
 python -m eval.run eval --suite golden
 
+# 默认本地评测使用 fixture 级并发，并为 review fixture 保留一轮只读工具上下文探索：
+# EVAL_FIXTURE_CONCURRENCY=3, EVAL_REVIEW_MAX_ITERATIONS=2,
+# EVAL_REVIEW_MIN_TOOL_ITERATIONS=1。这样避免模型第一轮直接 submit_review
+# 导致 golden 正样本缺少必要上下文。
+
 # 3) 基于已有报告重新渲染终端输出
 python -m eval.run report --input eval/outputs/<timestamp>_report.json
 ```
 
-### MVP+ 温和门禁
+### MVP+ eval gate
 
-CI 使用温和 gate 阻止 MergeWarden 自身评测质量明显退化，而不是作为目标用户仓库的合并裁决。当前 `suite=golden`
-包含 4 条正样本（should-detect）和 2 条负样本（zero-issue），过渡阶段使用较低 hit_rate 阈值：
+CI uses a soft eval gate to prevent obvious MergeWarden regression. It is not a hard merge decision for user pull requests. The current `golden` suite contains 4 positive should-detect fixtures and 2 negative zero-issue fixtures. All are `annotated_by=manual` and `reviewed=true`.
+
+Workspace-backed fixtures are validated before model execution: every added line in `diff_text` must match the restored `checkout_sha` repository snapshot. A mismatch is treated as fixture validation failure, not as a model miss or false positive.
+
+The transitional CI gate remains:
 
 ```bash
 python -m eval.gate --report eval/outputs/ci_report.json --schema-validity-min 1.0 --hit-rate-min 0.0 --false-positive-rate-max 0.5
 ```
 
-- `schema_validity_rate >= 1.0`：结构化输出必须全部合法。
-- `hit_rate >= 0.0`：过渡阶段暂不强制命中率（DeepSeek 模型命中率仍在调优中）。
-- `false_positive_rate <= 0.5`：误报率超过 50% 时阻断。
+- `schema_validity_rate >= 1.0`: every response must be valid structured output.
+- `hit_rate >= 0.0`: hit rate is not enforced during the transition.
+- `false_positive_rate <= 0.5`: false positives above 50% fail the gate.
 
-待 DeepSeek 命中率稳定后，应恢复：
+The stable target remains:
 
 ```bash
 python -m eval.gate --report eval/outputs/ci_report.json --schema-validity-min 1.0 --hit-rate-min 0.6 --false-positive-rate-max 0.5
 ```
+
+Only restore CI to `--hit-rate-min 0.6` after a fresh run on the corrected fixtures passes schema validity, hit rate, false positive rate, and the human acceptability review is filled in.
+
+### 2026-05-17 local golden eval status
+
+Latest diagnostic report: `eval/outputs/20260517_152809_report.json`.
+
+- Suite shape: `golden`, 6 reviewed fixtures, 4 positive and 2 negative.
+- Schema validity: `100.00%`.
+- Hit rate: `50.00%` (2/4 positive fixtures), below the stable `60.00%` target.
+- False positive rate: `16.67%`.
+- Average latency: `64.7s`; P50 / P95 latency: `57.5s` / `93.8s`.
+- Average tokens: `21,745`; P50 / P95 tokens: `19,506` / `29,405`.
+- Run shape: review eval used `EVAL_REVIEW_MAX_ITERATIONS=2`; round 0 gathered read-only context and round 1 forced `submit_review`. The run did not hit a budget hard cap or workspace checkout failure.
+
+Interpretation: this report proves the MVP+ eval execution path is observable and debuggable, but it is not stable quality evidence. The run exposed stale fixture diff/snapshot drift; the runner now blocks that class of fixture issue before the model runs. A fresh golden eval is required before recording a new quality baseline.
 
 ## 产物说明
 

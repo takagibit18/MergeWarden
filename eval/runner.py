@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import shutil
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 from statistics import mean, pstdev
 from time import perf_counter
@@ -33,8 +35,11 @@ from src.config import get_settings
 from src.orchestrator.agent_loop import AgentOrchestrator
 
 EVAL_EVENT_LOGS_OUTPUT_DIR = Path("eval") / "outputs" / "event_logs"
+EVAL_WORKSPACE_CACHE_DIR = Path("eval") / "outputs" / "workspace_cache"
 _MIN_CRITICAL_CONFIDENCE = 0.85
 _MIN_WARNING_CONFIDENCE = 0.85
+_CACHE_LOCKS: dict[str, threading.Lock] = {}
+_CACHE_LOCKS_GUARD = threading.Lock()
 
 
 def load_fixtures(
@@ -65,11 +70,17 @@ def _run_git(args: list[str], *, cwd: Path | None = None) -> str:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
     )
     return completed.stdout.strip()
 
 
-def _prepare_fixture_workspace(fixture: Fixture, target_root: Path) -> Path:
+def _prepare_fixture_workspace(
+    fixture: Fixture,
+    target_root: Path,
+    *,
+    workspace_cache_dir: Path | None = None,
+) -> Path:
     """Restore the workspace for one fixture and return the repo root."""
     workspace = fixture.input.workspace
     if workspace is None:
@@ -81,6 +92,7 @@ def _prepare_fixture_workspace(fixture: Fixture, target_root: Path) -> Path:
             workspace,
             target_root,
             pr_number=fixture.source.pr_number,
+            workspace_cache_dir=workspace_cache_dir,
         )
     raise ValueError(f"Unsupported fixture workspace kind: {workspace.kind}")
 
@@ -90,18 +102,47 @@ def _checkout_git_workspace(
     target_root: Path,
     *,
     pr_number: int | None = None,
+    workspace_cache_dir: Path | None = None,
 ) -> Path:
     target_root.parent.mkdir(parents=True, exist_ok=True)
     if target_root.exists():
         shutil.rmtree(target_root)
-    _run_git(["clone", "--quiet", workspace.repo_url, str(target_root)])
+    cache_root = (
+        _ensure_git_workspace_cache(workspace, workspace_cache_dir)
+        if workspace_cache_dir is not None
+        else None
+    )
+    if cache_root is not None:
+        try:
+            _run_git(["clone", "--quiet", "--shared", str(cache_root), str(target_root)])
+        except subprocess.CalledProcessError:
+            shutil.rmtree(target_root) if target_root.exists() else None
+            cache_root = None
+    if cache_root is None:
+        _run_git(
+            [
+                "clone",
+                "--quiet",
+                "--filter=blob:none",
+                "--depth=1",
+                workspace.repo_url,
+                str(target_root),
+            ]
+        )
     try:
         _run_git(["checkout", "--quiet", workspace.checkout_sha], cwd=target_root)
     except subprocess.CalledProcessError:
         if pr_number is None:
             raise
         _run_git(
-            ["fetch", "--quiet", "origin", f"refs/pull/{pr_number}/head"],
+            [
+                "fetch",
+                "--quiet",
+                "--filter=blob:none",
+                "--depth=1",
+                "origin",
+                f"refs/pull/{pr_number}/head",
+            ],
             cwd=target_root,
         )
         _run_git(["checkout", "--quiet", workspace.checkout_sha], cwd=target_root)
@@ -112,6 +153,67 @@ def _checkout_git_workspace(
             f"expected {workspace.checkout_sha}, got {checked_out}"
         )
     return target_root
+
+
+def _ensure_git_workspace_cache(
+    workspace: FixtureWorkspace,
+    workspace_cache_dir: Path,
+) -> Path:
+    workspace_cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_root = workspace_cache_dir / _workspace_cache_key(workspace.repo_url)
+    lock = _workspace_cache_lock(str(cache_root))
+    with lock:
+        if not (cache_root / "objects").is_dir():
+            tmp_root = cache_root.with_name(f"{cache_root.name}.tmp")
+            if tmp_root.exists():
+                shutil.rmtree(tmp_root)
+            try:
+                _run_git(
+                    [
+                        "clone",
+                        "--mirror",
+                        "--quiet",
+                        workspace.repo_url,
+                        str(tmp_root),
+                    ]
+                )
+                tmp_root.replace(cache_root)
+            except Exception:
+                if tmp_root.exists():
+                    shutil.rmtree(tmp_root)
+                raise
+        else:
+            _run_git(["remote", "update", "--prune"], cwd=cache_root)
+        if workspace.checkout_sha:
+            _fetch_cache_ref(cache_root, workspace.checkout_sha)
+        return cache_root
+
+
+def _fetch_cache_ref(cache_root: Path, ref: str) -> None:
+    try:
+        _run_git(["cat-file", "-e", f"{ref}^{{commit}}"], cwd=cache_root)
+        return
+    except subprocess.CalledProcessError:
+        pass
+    _run_git(
+        ["fetch", "--quiet", "--depth=1", "origin", ref],
+        cwd=cache_root,
+    )
+
+
+def _workspace_cache_key(repo_url: str) -> str:
+    digest = hashlib.sha256(repo_url.encode("utf-8")).hexdigest()[:16]
+    stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", repo_url.rstrip("/").removesuffix(".git"))
+    return f"{stem[-48:]}_{digest}.git"
+
+
+def _workspace_cache_lock(key: str) -> threading.Lock:
+    with _CACHE_LOCKS_GUARD:
+        lock = _CACHE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _CACHE_LOCKS[key] = lock
+        return lock
 
 
 def _resolve_fixture_paths(root: Path) -> list[Path]:
@@ -135,14 +237,31 @@ def _resolve_fixture_paths(root: Path) -> list[Path]:
     return sorted(path for path in root.glob("*.json") if path.name != "manifest.json")
 
 
-async def run_single(fixture: Fixture, *, temperature: float = 0.0) -> EvalResult:
+async def run_single(
+    fixture: Fixture,
+    *,
+    temperature: float = 0.0,
+    review_max_iterations: int | None = None,
+) -> EvalResult:
     """Run one fixture and return evaluation metadata."""
     expected_count = len(fixture.expected.issues)
     try:
         with tempfile.TemporaryDirectory(prefix="eval-fixture-") as tmp_dir:
-            repo_root = _prepare_fixture_workspace(fixture, Path(tmp_dir) / "repo")
-            validation_errors = _validate_expected_locations_against_diff(
-                fixture, repo_root
+            repo_root = await asyncio.to_thread(
+                _prepare_fixture_workspace,
+                fixture,
+                Path(tmp_dir) / "repo",
+                workspace_cache_dir=EVAL_WORKSPACE_CACHE_DIR,
+            )
+            diff_workspace_errors = await asyncio.to_thread(
+                _validate_diff_added_lines_against_workspace,
+                fixture,
+                repo_root,
+            )
+            validation_errors = diff_workspace_errors + await asyncio.to_thread(
+                _validate_expected_locations_against_diff,
+                fixture,
+                repo_root,
             )
             if validation_errors:
                 return EvalResult(
@@ -153,7 +272,12 @@ async def run_single(fixture: Fixture, *, temperature: float = 0.0) -> EvalResul
                     error="; ".join(validation_errors),
                 )
             orchestrator = AgentOrchestrator(
-                permission_mode="default", temperature=temperature
+                permission_mode="default",
+                temperature=temperature,
+                review_max_iterations=_effective_review_max_iterations(
+                    review_max_iterations
+                ),
+                review_min_tool_iterations=get_settings().eval_review_min_tool_iterations,
             )
             sandbox_context = _build_fixture_context(fixture, repo_root)
 
@@ -245,20 +369,25 @@ async def run_suite(
     *,
     samples: int = 1,
     concurrency: int = 1,
+    fixture_concurrency: int = 1,
+    review_max_iterations: int | None = None,
     temperature: float = 0.0,
 ) -> list[SampledFixtureResult]:
     """Run all fixtures with optional K-sample aggregation."""
-    sampled_results: list[SampledFixtureResult] = []
-    for fixture in fixtures:
-        sampled_results.append(
-            await run_single_sampled(
+    max_fixture_concurrency = max(1, min(fixture_concurrency, len(fixtures) or 1))
+    semaphore = asyncio.Semaphore(max_fixture_concurrency)
+
+    async def _run_fixture(fixture: Fixture) -> SampledFixtureResult:
+        async with semaphore:
+            return await run_single_sampled(
                 fixture,
                 samples=samples,
                 concurrency=concurrency,
+                review_max_iterations=review_max_iterations,
                 temperature=temperature,
             )
-        )
-    return sampled_results
+
+    return await asyncio.gather(*(_run_fixture(fixture) for fixture in fixtures))
 
 
 async def run_single_sampled(
@@ -266,7 +395,8 @@ async def run_single_sampled(
     *,
     samples: int,
     concurrency: int,
-    temperature: float,
+    review_max_iterations: int | None = None,
+    temperature: float = 0.0,
 ) -> SampledFixtureResult:
     """Run one fixture K times and aggregate stability metrics."""
     sample_count = max(1, samples)
@@ -275,7 +405,11 @@ async def run_single_sampled(
 
     async def _run() -> EvalResult:
         async with semaphore:
-            return await run_single(fixture, temperature=temperature)
+            return await run_single(
+                fixture,
+                temperature=temperature,
+                review_max_iterations=review_max_iterations,
+            )
 
     runs = await asyncio.gather(*(_run() for _ in range(sample_count)))
     return _aggregate_sampled_result(fixture, runs)
@@ -315,6 +449,13 @@ def _aggregate_sampled_result(
         best_hit_rate=max(hit_rates) if hit_rates else 0.0,
         schema_valid_rate=schema_valid_rate,
     )
+
+
+def _effective_review_max_iterations(configured: int | None) -> int:
+    settings = get_settings()
+    min_tool_iterations = settings.eval_review_min_tool_iterations
+    requested = configured or settings.eval_review_max_iterations
+    return max(1, requested, min_tool_iterations + 1)
 
 
 def _compute_hit_rate(matched_count: int, expected_count: int) -> float:
@@ -413,6 +554,42 @@ def _validate_expected_locations_against_diff(
     return errors
 
 
+def _validate_diff_added_lines_against_workspace(
+    fixture: Fixture,
+    repo_root: Path,
+) -> list[str]:
+    if (
+        fixture.type != "review"
+        or fixture.input.workspace is None
+        or not fixture.input.diff_text.strip()
+    ):
+        return []
+    added_lines = _added_new_lines_by_file(fixture.input.diff_text)
+    errors: list[str] = []
+    for path, lines in added_lines.items():
+        workspace_file = repo_root / path
+        if not workspace_file.is_file():
+            errors.append(f"Diff file is missing from workspace: {path}")
+            continue
+        workspace_lines = workspace_file.read_text(
+            encoding="utf-8", errors="replace"
+        ).splitlines()
+        for line_number, expected_text in lines.items():
+            actual_text = (
+                workspace_lines[line_number - 1]
+                if 1 <= line_number <= len(workspace_lines)
+                else None
+            )
+            if actual_text != expected_text:
+                errors.append(
+                    "Fixture diff added line does not match workspace: "
+                    f"{path}:{line_number}"
+                )
+                if len(errors) >= 10:
+                    return errors
+    return errors
+
+
 def _changed_new_lines_by_file(diff_text: str) -> dict[str, set[int]]:
     changed: dict[str, set[int]] = {}
     current_path = ""
@@ -440,6 +617,35 @@ def _changed_new_lines_by_file(diff_text: str) -> dict[str, set[int]]:
         else:
             new_line += 1
     return changed
+
+
+def _added_new_lines_by_file(diff_text: str) -> dict[str, dict[int, str]]:
+    added: dict[str, dict[int, str]] = {}
+    current_path = ""
+    new_line: int | None = None
+    for raw_line in diff_text.splitlines():
+        if raw_line.startswith("+++ "):
+            marker = raw_line[4:].strip()
+            current_path = ""
+            if marker != "/dev/null":
+                current_path = marker[2:] if marker.startswith("b/") else marker
+                added.setdefault(current_path, {})
+            new_line = None
+            continue
+        if raw_line.startswith("@@"):
+            match = re.search(r"\+(\d+)(?:,(\d+))?", raw_line)
+            new_line = int(match.group(1)) if match else None
+            continue
+        if not current_path or new_line is None:
+            continue
+        if raw_line.startswith("+") and not raw_line.startswith("+++"):
+            added[current_path][new_line] = raw_line[1:]
+            new_line += 1
+        elif raw_line.startswith("-") and not raw_line.startswith("---"):
+            continue
+        else:
+            new_line += 1
+    return added
 
 
 def _prepend_context(original_text: str, sandbox_context: str) -> str:

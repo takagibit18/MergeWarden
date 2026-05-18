@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell($env:PYTHONIOENCODING='utf-8'; python -m eval.run eval --suite golden 2>&1)"
+    ]
+  }
+}
