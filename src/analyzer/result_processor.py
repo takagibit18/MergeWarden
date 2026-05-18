@@ -10,7 +10,6 @@ from src.analyzer.output_formatter import (
     ReviewReport,
     Severity,
     has_specific_code_evidence,
-    has_specific_diff_evidence,
 )
 from src.analyzer.schemas import AnalysisPlan, DebugResponse, ReviewResponse
 from src.tools.base import ToolResult
