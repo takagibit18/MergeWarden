@@ -87,6 +87,15 @@ Available endpoints:
 - `POST /review`
 - `POST /debug`
 
+### MVP+ status
+
+MVP+ is in release-candidate shape for the engineering scope: CLI, FastAPI,
+Docker CLI demo, event logs, workspace-backed golden fixtures, and the
+transitional eval gate are in place. The stable quality gate is not restored
+yet: the latest diagnostic golden run reached schema validity `1.0`, hit rate
+`0.5`, and false-positive rate `0.1667`, so the next step is to rerun the fixed
+golden suite and restore `hit_rate >= 0.6` only after it passes.
+
 ## 项目结构
 
 ```

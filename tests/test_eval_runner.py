@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
 import eval.runner as runner_module
 from eval.runner import (
     _aggregate_sampled_result,
+    _checkout_git_workspace,
+    _validate_diff_added_lines_against_workspace,
     _prepare_fixture_workspace,
     _is_empty_business_output,
     _match_issues,
@@ -19,6 +22,7 @@ from eval.runner import (
     _run_git,
     _sanitize_fixture_id_for_filename,
     load_fixtures,
+    run_suite,
 )
 from eval.schemas import EvalResult, Fixture, MetricSummary, SampledFixtureResult
 from src.analyzer.context_state import ContextState
@@ -353,8 +357,161 @@ def test_prepare_fixture_workspace_fetches_pr_ref_after_checkout_failure(
 
     _prepare_fixture_workspace(fixture, tmp_path / "workspace")
 
-    assert ["fetch", "--quiet", "origin", "refs/pull/12/head"] in calls
+    assert [
+        "fetch",
+        "--quiet",
+        "--filter=blob:none",
+        "--depth=1",
+        "origin",
+        "refs/pull/12/head",
+    ] in calls
     assert checkout_attempts == 2
+
+
+def test_checkout_git_workspace_uses_shallow_partial_clone_without_cache(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    workspace = Fixture.model_validate(
+        {
+            "id": "workspace-fixture",
+            "type": "review",
+            "source": {"repo_full_name": "example/repo", "pr_number": 12},
+            "input": {
+                "diff_text": "",
+                "files": {},
+                "workspace": {
+                    "kind": "git",
+                    "repo_url": "https://github.com/example/repo.git",
+                    "checkout_sha": "head",
+                },
+            },
+            "expected": {"issues": []},
+        }
+    ).input.workspace
+    assert workspace is not None
+    calls: list[list[str]] = []
+
+    def fake_run_git(args: list[str], *, cwd: Path | None = None) -> str:
+        calls.append(args)
+        if args[0] == "clone":
+            Path(args[-1]).mkdir(parents=True)
+            return ""
+        if args[:2] == ["checkout", "--quiet"]:
+            return ""
+        if args == ["rev-parse", "HEAD"]:
+            return "head"
+        raise AssertionError(f"Unexpected git args: {args}")
+
+    monkeypatch.setattr(runner_module, "_run_git", fake_run_git)
+
+    _checkout_git_workspace(workspace, tmp_path / "workspace", pr_number=12)
+
+    assert calls[0] == [
+        "clone",
+        "--quiet",
+        "--filter=blob:none",
+        "--depth=1",
+        "https://github.com/example/repo.git",
+        str(tmp_path / "workspace"),
+    ]
+
+
+def test_prepare_fixture_workspace_reuses_git_workspace_cache(tmp_path: Path) -> None:
+    source, base_sha, head_sha, diff_text = _build_source_repo(tmp_path)
+    fixture = Fixture.model_validate(
+        {
+            "id": "workspace-fixture",
+            "type": "review",
+            "source": {"repo_full_name": "example/repo", "pr_number": 1},
+            "input": {
+                "diff_text": diff_text,
+                "files": {},
+                "workspace": {
+                    "kind": "git",
+                    "repo_url": str(source),
+                    "base_sha": base_sha,
+                    "head_sha": head_sha,
+                    "checkout_sha": head_sha,
+                    "diff_base_sha": base_sha,
+                },
+            },
+            "expected": {"issues": []},
+        }
+    )
+    cache_dir = tmp_path / "cache"
+
+    first = _prepare_fixture_workspace(
+        fixture,
+        tmp_path / "workspace-1",
+        workspace_cache_dir=cache_dir,
+    )
+    second = _prepare_fixture_workspace(
+        fixture,
+        tmp_path / "workspace-2",
+        workspace_cache_dir=cache_dir,
+    )
+
+    assert _git(first, "rev-parse", "HEAD") == head_sha
+    assert _git(second, "rev-parse", "HEAD") == head_sha
+    assert len(list(cache_dir.iterdir())) == 1
+
+
+def test_run_suite_limits_fixture_concurrency(monkeypatch) -> None:
+    fixtures = [
+        Fixture.model_validate(
+            {
+                "id": f"fixture-{idx}",
+                "type": "review",
+                "source": {"repo_full_name": "a/b", "pr_number": idx + 1},
+                "input": {"diff_text": "", "files": {}},
+                "expected": {"issues": []},
+            }
+        )
+        for idx in range(4)
+    ]
+    active = 0
+    max_active = 0
+
+    async def fake_run_single_sampled(
+        fixture: Fixture,
+        *,
+        samples: int,
+        concurrency: int,
+        review_max_iterations: int | None,
+        temperature: float,
+    ) -> SampledFixtureResult:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await runner_module.asyncio.sleep(0.01)
+        active -= 1
+        return SampledFixtureResult(
+            fixture_id=fixture.id,
+            fixture_type=fixture.type,
+            expected_count=0,
+            runs=[],
+        )
+
+    monkeypatch.setattr(
+        runner_module, "run_single_sampled", fake_run_single_sampled
+    )
+
+    results = runner_module.asyncio.run(
+        run_suite(
+            fixtures,
+            fixture_concurrency=2,
+            review_max_iterations=1,
+        )
+    )
+
+    assert [item.fixture_id for item in results] == [
+        "fixture-0",
+        "fixture-1",
+        "fixture-2",
+        "fixture-3",
+    ]
+    assert max_active == 2
 
 
 def test_validate_expected_locations_against_diff_requires_changed_workspace_line(
@@ -409,6 +566,43 @@ def test_validate_expected_locations_against_diff_requires_changed_workspace_lin
 
     assert errors
     assert "pkg/module.py:99" in errors[0]
+
+
+def test_validate_diff_added_lines_against_workspace_detects_stale_diff(
+    tmp_path: Path,
+) -> None:
+    source, base_sha, head_sha, diff_text = _build_source_repo(tmp_path)
+    stale_diff = diff_text.replace(
+        "+    return normalize(value)",
+        "+    return normalize(value.strip())",
+    )
+    fixture = Fixture.model_validate(
+        {
+            "id": "workspace-fixture",
+            "type": "review",
+            "source": {"repo_full_name": "example/repo", "pr_number": 1},
+            "input": {
+                "diff_text": stale_diff,
+                "files": {},
+                "workspace": {
+                    "kind": "git",
+                    "repo_url": str(source),
+                    "base_sha": base_sha,
+                    "head_sha": head_sha,
+                    "checkout_sha": head_sha,
+                    "diff_base_sha": base_sha,
+                },
+            },
+            "expected": {"issues": []},
+        }
+    )
+    workspace = _prepare_fixture_workspace(fixture, tmp_path / "workspace")
+
+    errors = _validate_diff_added_lines_against_workspace(fixture, workspace)
+
+    assert errors
+    assert "pkg/module.py:4" in errors[0]
+    assert "diff added line does not match workspace" in errors[0]
 
 
 def test_semantic_location_matches_with_overlap() -> None:
@@ -659,6 +853,7 @@ def test_golden_fixture_distribution_has_required_buckets() -> None:
     synth = load_fixtures(
         Path("eval") / "fixtures", suite="golden_synth", reviewed_only=True
     )
+    manifest = json.loads((Path("eval") / "fixtures" / "manifest.json").read_text())
 
     assert {fixture.id for fixture in real} == {
         "golden_astral-sh_ruff_pr24648",
@@ -669,6 +864,12 @@ def test_golden_fixture_distribution_has_required_buckets() -> None:
         "golden_pytest-dev_pytest_pr7254",
     }
     assert synth == []
+    fixture_by_path = {
+        entry["path"]: Fixture.model_validate_json(Path(entry["path"]).read_text())
+        for entry in manifest["entries"]
+    }
+    for entry in manifest["entries"]:
+        assert entry["reviewed"] == fixture_by_path[entry["path"]].metadata.reviewed
 
 
 def test_reviewed_golden_fixtures_use_git_workspaces_without_sparse_files(

@@ -64,6 +64,7 @@ class InferenceEngine:
         iteration: int = 0,
         force_submit: bool = False,
         near_last_iteration: bool = False,
+        defer_submit: bool = False,
     ) -> tuple[AnalysisPlan, int, str]:
         file_contents = file_contents or {}
         budget = (
@@ -131,6 +132,18 @@ class InferenceEngine:
         )
         if folded is not None:
             messages.append(folded)
+        if defer_submit:
+            messages.append(
+                Message(
+                    role="user",
+                    content=(
+                        "Do not call submit_review yet. This evaluation run requires "
+                        "one context-gathering round before final review. Use the "
+                        "available read-only tools to inspect the most relevant changed "
+                        "file, test, snapshot, or adjacent implementation context."
+                    ),
+                )
+            )
         if tool_feedback and not force_submit:
             messages.extend(self._build_tool_feedback_messages(tool_feedback))
             failure_guidance = self._build_failure_guidance_message(tool_feedback)

@@ -100,6 +100,18 @@ def crawl_cmd(
     help="Max concurrent sampled runs per fixture. Defaults to EVAL_CONCURRENCY or 1.",
 )
 @click.option(
+    "--fixture-concurrency",
+    default=None,
+    type=int,
+    help="Max concurrent fixtures. Defaults to EVAL_FIXTURE_CONCURRENCY or 3.",
+)
+@click.option(
+    "--review-max-iterations",
+    default=None,
+    type=int,
+    help="Review loop iterations for eval runs. Defaults to EVAL_REVIEW_MAX_ITERATIONS or 2.",
+)
+@click.option(
     "--temperature",
     default=None,
     type=float,
@@ -116,6 +128,8 @@ def eval_cmd(
     include_unreviewed: bool,
     samples: int | None,
     concurrency: int | None,
+    fixture_concurrency: int | None,
+    review_max_iterations: int | None,
     temperature: float | None,
     output_json: str | None,
 ) -> None:
@@ -128,6 +142,16 @@ def eval_cmd(
             samples=samples if samples is not None else settings.eval_samples,
             concurrency=(
                 concurrency if concurrency is not None else settings.eval_concurrency
+            ),
+            fixture_concurrency=(
+                fixture_concurrency
+                if fixture_concurrency is not None
+                else settings.eval_fixture_concurrency
+            ),
+            review_max_iterations=(
+                review_max_iterations
+                if review_max_iterations is not None
+                else settings.eval_review_max_iterations
             ),
             temperature=(
                 temperature if temperature is not None else settings.eval_temperature
@@ -206,6 +230,8 @@ async def _evaluate(
     *,
     samples: int = 1,
     concurrency: int = 1,
+    fixture_concurrency: int = 1,
+    review_max_iterations: int = 1,
     temperature: float = 0.0,
     output_json: str | None = None,
 ) -> None:
@@ -217,6 +243,8 @@ async def _evaluate(
         fixtures,
         samples=max(1, samples),
         concurrency=max(1, concurrency),
+        fixture_concurrency=max(1, fixture_concurrency),
+        review_max_iterations=max(1, review_max_iterations),
         temperature=temperature,
     )
     results: list[EvalResult] = [item.runs[0] for item in sampled_results if item.runs]
