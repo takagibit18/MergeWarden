@@ -58,14 +58,28 @@ def load_fixtures(
 
 
 def _run_git(args: list[str], *, cwd: Path | None = None) -> str:
-    completed = subprocess.run(
-        ["git", *args],
-        cwd=cwd,
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    timeout = get_settings().eval_git_timeout_seconds
+    try:
+        completed = subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        command = "git " + " ".join(args)
+        raise TimeoutError(f"{command} timed out after {timeout:g}s") from exc
+    except subprocess.CalledProcessError as exc:
+        command = "git " + " ".join(args)
+        stderr = (exc.stderr or "").strip()
+        stdout = (exc.stdout or "").strip()
+        details = stderr or stdout or str(exc)
+        raise RuntimeError(
+            f"{command} failed with exit code {exc.returncode}: {details}"
+        ) from exc
     return completed.stdout.strip()
 
 
@@ -97,7 +111,7 @@ def _checkout_git_workspace(
     _run_git(["clone", "--quiet", workspace.repo_url, str(target_root)])
     try:
         _run_git(["checkout", "--quiet", workspace.checkout_sha], cwd=target_root)
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, RuntimeError):
         if pr_number is None:
             raise
         _run_git(

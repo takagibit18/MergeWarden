@@ -16,6 +16,7 @@ from eval.runner import (
     _validate_expected_locations_against_diff,
     _resolve_event_log_path,
     _resolve_fixture_paths,
+    _run_git,
     _sanitize_fixture_id_for_filename,
     load_fixtures,
 )
@@ -35,6 +36,62 @@ def _git(cwd: Path, *args: str) -> str:
         text=True,
     )
     return completed.stdout.strip()
+
+
+def test_run_git_uses_configured_timeout(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("EVAL_GIT_TIMEOUT_SECONDS", "7")
+    captured: dict[str, object] = {}
+
+    def fake_run(args, **kwargs):  # type: ignore[no-untyped-def]
+        captured["args"] = args
+        captured["timeout"] = kwargs.get("timeout")
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(runner_module.subprocess, "run", fake_run)
+
+    assert _run_git(["status"], cwd=tmp_path) == "ok"
+    assert captured["args"] == ["git", "status"]
+    assert captured["timeout"] == 7.0
+
+
+def test_run_git_timeout_has_explicit_error(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("EVAL_GIT_TIMEOUT_SECONDS", "7")
+
+    def fake_run(args, **kwargs):  # type: ignore[no-untyped-def]
+        raise subprocess.TimeoutExpired(cmd=args, timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(runner_module.subprocess, "run", fake_run)
+
+    try:
+        _run_git(["clone", "repo"], cwd=tmp_path)
+    except TimeoutError as exc:
+        assert "git clone repo timed out after 7s" in str(exc)
+    else:
+        raise AssertionError("Expected explicit git timeout error")
+
+
+def test_run_git_called_process_error_includes_stderr(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    def fake_run(args, **kwargs):  # type: ignore[no-untyped-def]
+        raise subprocess.CalledProcessError(
+            128,
+            args,
+            output="",
+            stderr="fatal: unable to access repo: SEC_E_NO_CREDENTIALS",
+        )
+
+    monkeypatch.setattr(runner_module.subprocess, "run", fake_run)
+
+    try:
+        _run_git(["clone", "repo"], cwd=tmp_path)
+    except RuntimeError as exc:
+        message = str(exc)
+        assert "git clone repo failed with exit code 128" in message
+        assert "SEC_E_NO_CREDENTIALS" in message
+    else:
+        raise AssertionError("Expected git failure details")
 
 
 def _build_source_repo(tmp_path: Path) -> tuple[Path, str, str, str]:

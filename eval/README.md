@@ -88,24 +88,18 @@ python -m eval.run eval --suite golden
 python -m eval.run report --input eval/outputs/<timestamp>_report.json
 ```
 
-### MVP+ 温和门禁
+### MVP+ 真实门禁
 
-CI 使用温和 gate 阻止 MergeWarden 自身评测质量明显退化，而不是作为目标用户仓库的合并裁决。当前 `suite=golden`
-包含 4 条正样本（should-detect）和 2 条负样本（zero-issue），过渡阶段使用较低 hit_rate 阈值：
-
-```bash
-python -m eval.gate --report eval/outputs/ci_report.json --schema-validity-min 1.0 --hit-rate-min 0.0 --false-positive-rate-max 0.5
-```
-
-- `schema_validity_rate >= 1.0`：结构化输出必须全部合法。
-- `hit_rate >= 0.0`：过渡阶段暂不强制命中率（DeepSeek 模型命中率仍在调优中）。
-- `false_positive_rate <= 0.5`：误报率超过 50% 时阻断。
-
-待 DeepSeek 命中率稳定后，应恢复：
+CI 使用 gate 阻止 MergeWarden 自身评测质量明显退化，而不是作为目标用户仓库的合并裁决。当前 `suite=golden`
+包含 4 条正样本（should-detect）和 2 条负样本（zero-issue），已恢复正样本命中率门禁：
 
 ```bash
 python -m eval.gate --report eval/outputs/ci_report.json --schema-validity-min 1.0 --hit-rate-min 0.6 --false-positive-rate-max 0.5
 ```
+
+- `schema_validity_rate >= 1.0`：结构化输出必须全部合法。
+- `hit_rate >= 0.6`：正样本命中率低于 60% 时阻断 MergeWarden 自身回归。
+- `false_positive_rate <= 0.5`：误报率超过 50% 时阻断。
 
 ## 产物说明
 

@@ -231,6 +231,7 @@ CLI、FastAPI 与 CI 校验应只依赖上述稳定字段；**增删字段** 需
 | 2026-04-09 | 初稿：工具、状态、Review 输出、配置、观测与协作流程 |
 | 2026-04-12 | Debug 输出协议定稿落地；补充编排相关环境变量（轮次、token、事件日志、CI 与高危工具） |
 | 2026-04-17 | execute 工具硬化：argv + 首词白名单、pluggable backend（subprocess/docker）、输出截断、Review 模式不暴露 execute 工具；新增 `EXECUTE_*` 环境变量 |
-| 2026-05-06 | MVP+ 最小闭环：FastAPI 同步薄层、Docker CLI demo、eval gate（过渡阈值 `hit_rate >= 0.0`）；Docker execute 后端口径更新为已落地 |
+| 2026-05-06 | MVP+ 最小闭环：FastAPI 同步薄层、Docker CLI demo、eval gate 过渡阈值；Docker execute 后端口径更新为已落地 |
 | 2026-05-08 | PR review 产品边界对齐：Review 输出为建议/soft check，硬合并阻断交给 CI；inline finding 约束为 changed line / changed hunk |
-| 2026-05-10 | docs-audit：对齐文档与代码现状 — golden 样本分布（4正/2负）、FastAPI 已实现、load_diff 用 `git diff HEAD`、eval gate 过渡阈值 `hit_rate=0.0` |
+| 2026-05-10 | docs-audit：对齐文档与代码现状 — golden 样本分布（4正/2负）、FastAPI 已实现、load_diff 用 `git diff HEAD`、eval gate 仍处于过渡期 |
+| 2026-05-16 | 恢复 MVP+ 真实 eval gate：`schema_validity_rate >= 1.0`、`hit_rate >= 0.6`、`false_positive_rate <= 0.5` |

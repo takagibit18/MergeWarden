@@ -19,7 +19,7 @@ class ModelConfig(BaseModel):
     )
     top_p: float = Field(default=1.0, ge=0.0, le=1.0, description="Nucleus sampling")
     timeout: float = Field(
-        default=60.0, gt=0.0, le=600.0, description="Request timeout in seconds"
+        default=90.0, gt=0.0, le=600.0, description="Request timeout in seconds"
     )
     tool_choice: str | dict[str, Any] | None = Field(
         default=None,

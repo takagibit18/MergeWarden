@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import json as _json
 import os
+import re
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Literal
@@ -74,6 +75,7 @@ class AgentOrchestrator:
         self._run_started_at = 0.0
         self._run_timeout_seconds = self._settings.agent_run_timeout_seconds
         self._model_timeout_seen = False
+        self._pre_budget_submit_attempted = False
         self._temperature = temperature
         self._trace_recorder = TraceRecorder(
             detail_mode=self._settings.agent_trace_detail,
@@ -90,6 +92,7 @@ class AgentOrchestrator:
         if self._external_registry is None:
             self._registry = create_default_registry(include_execute=False)
         state = self.prepare_context(request)
+        await self._maybe_prefetch_review_changed_files(state, request)
         response: ReviewResponse | DebugResponse | None = None
         while True:
             tool_specs = [] if self._permission_mode == "plan" else self._registry.list_specs()
@@ -98,6 +101,14 @@ class AgentOrchestrator:
             tool_results = await self.execute_tools(plan, self._registry, state)
             response = self.format_result(state, tool_results)
             if not self.should_continue(state, response):
+                break
+            if self._should_pre_budget_submit(state):
+                self._pre_budget_submit_attempted = True
+                self._record_pre_budget_submit("attempt", state)
+                submit_plan = await self.analyze(state, request, tool_specs=[], force_submit=True)
+                self._last_plan = submit_plan
+                response = self.format_result(state, tool_results=[])
+                self._record_pre_budget_submit("completed", state, submit_plan)
                 break
             self._iteration += 1
         response = await self._maybe_force_submit_review(state, request, response)
@@ -122,6 +133,14 @@ class AgentOrchestrator:
             tool_results = await self.execute_tools(plan, self._registry, state)
             response = self.format_result(state, tool_results)
             if not self.should_continue(state, response):
+                break
+            if self._should_pre_budget_submit(state):
+                self._pre_budget_submit_attempted = True
+                self._record_pre_budget_submit("attempt", state)
+                submit_plan = await self.analyze(state, request, tool_specs=[], force_submit=True)
+                self._last_plan = submit_plan
+                response = self.format_result(state, tool_results=[])
+                self._record_pre_budget_submit("completed", state, submit_plan)
                 break
             self._iteration += 1
         response = await self._maybe_force_submit_debug(state, request, response)
@@ -323,6 +342,10 @@ class AgentOrchestrator:
                 "tool_calls": len(result.tool_calls),
                 "elapsed_ms": int((perf_counter() - start) * 1000),
                 "tokens": self._latest_tokens,
+                "model_request_timeout_seconds": self._settings.model_request_timeout_seconds,
+                "model_max_retries": self._settings.model_max_retries,
+                "force_submit": force_submit,
+                "budget_state": self._budget_state,
             },
         )
         return result
@@ -403,7 +426,7 @@ class AgentOrchestrator:
                     index += 1
                     continue
 
-                result, error_detail = await self._execute_one_tool(
+                result, error_detail, elapsed_ms = await self._execute_one_tool(
                     tool_name=tool_name,
                     tool=tool,
                     args=args,
@@ -414,7 +437,11 @@ class AgentOrchestrator:
                 self._record_event(
                     EventType.TOOL_CALL,
                     "execute_tools",
-                    {"iteration": self._iteration, "name": tool_name, "ok": result.ok},
+                    self._build_tool_call_event_payload(
+                        name=tool_name,
+                        result=result,
+                        elapsed_ms=elapsed_ms,
+                    ),
                 )
                 self._trace_recorder.record(
                     self._record_event,
@@ -436,7 +463,7 @@ class AgentOrchestrator:
                 continue
 
             if not tool.is_concurrency_safe():
-                result, error_detail = await self._execute_one_tool(
+                result, error_detail, elapsed_ms = await self._execute_one_tool(
                     tool_name=tool_name,
                     tool=tool,
                     args=args,
@@ -447,7 +474,11 @@ class AgentOrchestrator:
                 self._record_event(
                     EventType.TOOL_CALL,
                     "execute_tools",
-                    {"iteration": self._iteration, "name": tool_name, "ok": result.ok},
+                    self._build_tool_call_event_payload(
+                        name=tool_name,
+                        result=result,
+                        elapsed_ms=elapsed_ms,
+                    ),
                 )
                 self._trace_recorder.record(
                     self._record_event,
@@ -498,7 +529,11 @@ class AgentOrchestrator:
                     for (_, batch_name, batch_tool, batch_args) in batch_calls
                 ]
             )
-            for (batch_raw, batch_name, _, _), (batch_result, batch_error) in zip(
+            for (batch_raw, batch_name, _, _), (
+                batch_result,
+                batch_error,
+                elapsed_ms,
+            ) in zip(
                 batch_calls, batch_results
             ):
                 if batch_error is not None:
@@ -507,11 +542,11 @@ class AgentOrchestrator:
                 self._record_event(
                     EventType.TOOL_CALL,
                     "execute_tools",
-                    {
-                        "iteration": self._iteration,
-                        "name": batch_name,
-                        "ok": batch_result.ok,
-                    },
+                    self._build_tool_call_event_payload(
+                        name=batch_name,
+                        result=batch_result,
+                        elapsed_ms=elapsed_ms,
+                    ),
                 )
                 batch_call = self._parse_tool_call(batch_raw)
                 self._trace_recorder.record(
@@ -696,7 +731,24 @@ class AgentOrchestrator:
         self._run_started_at = perf_counter()
         self._run_timeout_seconds = self._settings.agent_run_timeout_seconds
         self._model_timeout_seen = False
-        self._record_event(EventType.PHASE_START, "prepare", {"run_id": self._run_id})
+        self._pre_budget_submit_attempted = False
+        self._record_event(
+            EventType.PHASE_START,
+            "prepare",
+            {
+                "run_id": self._run_id,
+                "token_budget": self._settings.token_budget,
+                "token_hard_budget": self._settings.token_hard_budget,
+                "prompt_input_token_budget": self._settings.prompt_input_token_budget,
+                "model_request_timeout_seconds": self._settings.model_request_timeout_seconds,
+                "agent_run_timeout_seconds": self._settings.agent_run_timeout_seconds,
+                "agent_tool_timeout_seconds": self._settings.agent_tool_timeout_seconds,
+                "model_max_tokens": self._settings.model_max_tokens,
+                "pre_budget_submit_token_ratio": self._settings.pre_budget_submit_token_ratio,
+                "review_diff_first_changed_files": self._settings.review_diff_first_changed_files,
+                "review_diff_first_changed_files_max": self._settings.review_diff_first_changed_files_max,
+            },
+        )
 
     def _run_elapsed_seconds(self) -> float:
         if self._run_started_at <= 0:
@@ -706,9 +758,68 @@ class AgentOrchestrator:
     def _run_timeout_exceeded(self) -> bool:
         return self._run_elapsed_seconds() >= self._run_timeout_seconds
 
+    def _has_useful_tool_feedback(self) -> bool:
+        """Return True when at least one tool call returned usable data."""
+        if not self._tool_feedback:
+            return False
+        return any(
+            isinstance(item.get("result"), ToolResult)
+            and item["result"].ok
+            for item in self._tool_feedback
+        )
+
+    def _should_pre_budget_submit(self, state: ContextState) -> bool:
+        """Decide whether to trigger a bounded submit-only call before the next analysis turn."""
+        if self._permission_mode == "plan":
+            return False
+        if self._pre_budget_submit_attempted:
+            return False
+        if self._budget_exhausted:
+            return False
+        if self._model_timeout_seen:
+            return False
+        if not self._has_useful_tool_feedback():
+            return False
+        plan = self._last_plan
+        if plan is not None and (
+            plan.draft_review is not None or plan.draft_debug is not None
+        ):
+            return False
+        ratio = self._settings.pre_budget_submit_token_ratio
+        threshold = int(self._settings.token_budget * ratio)
+        return self._total_tokens >= threshold
+
+    def _record_pre_budget_submit(
+        self,
+        stage: str,
+        state: ContextState,
+        plan: AnalysisPlan | None = None,
+    ) -> None:
+        """Log a pre-budget-submit decision and its outcome."""
+        payload: dict[str, Any] = {
+            "iteration": self._iteration,
+            "stage": stage,
+            "total_tokens": self._total_tokens,
+            "token_budget": self._settings.token_budget,
+            "token_hard_budget": self._settings.token_hard_budget,
+            "budget_state": self._budget_state,
+            "has_tool_feedback": bool(self._tool_feedback),
+            "pre_budget_submit_ratio": self._settings.pre_budget_submit_token_ratio,
+            "pre_budget_submit_threshold": int(
+                self._settings.token_budget * self._settings.pre_budget_submit_token_ratio
+            ),
+        }
+        if plan is not None:
+            payload["draft_present"] = (
+                plan.draft_review is not None or plan.draft_debug is not None
+            )
+        self._record_event(EventType.DECISION, "pre_budget_submit", payload)
+
     def _finalize_skip_reason(self) -> str:
         if self._model_timeout_seen:
             return "model_timeout"
+        if self._pre_budget_submit_attempted:
+            return "pre_budget_submit_attempted"
         if self._budget_state != "none":
             return f"budget_{self._budget_state}"
         if self._run_timeout_exceeded():
@@ -729,13 +840,110 @@ class AgentOrchestrator:
             },
         )
 
+    async def _maybe_prefetch_review_changed_files(
+        self,
+        state: ContextState,
+        request: ReviewRequest,
+    ) -> None:
+        if not self._settings.review_diff_first_changed_files:
+            return
+        if self._permission_mode == "plan" or not request.diff_mode:
+            return
+        diff_text = request.diff_text or ""
+        selected_files = self._select_changed_files_for_prefetch(diff_text)
+        self._record_event(
+            EventType.DECISION,
+            "diff_first_prefetch",
+            {
+                "iteration": self._iteration,
+                "enabled": True,
+                "selected_files": selected_files,
+                "max_files": self._settings.review_diff_first_changed_files_max,
+            },
+        )
+        if not selected_files:
+            return
+        plan = AnalysisPlan(
+            needs_tools=True,
+            tool_calls=[
+                {
+                    "id": f"prefetch-read-file-{index}",
+                    "type": "function",
+                    "synthetic_context": True,
+                    "function": {
+                        "name": "read_file",
+                        "arguments": _json.dumps(
+                            self._prefetch_read_args(path, diff_text),
+                            ensure_ascii=True,
+                        ),
+                    }
+                }
+                for index, path in enumerate(selected_files)
+            ],
+        )
+        await self.execute_tools(plan, self._registry, state)
+
+    def _select_changed_files_for_prefetch(self, diff_text: str) -> list[str]:
+        selected: list[str] = []
+        seen: set[str] = set()
+        for path in self._context_builder._extract_diff_paths(diff_text):  # noqa: SLF001
+            if path in seen:
+                continue
+            seen.add(path)
+            selected.append(path)
+            if len(selected) >= self._settings.review_diff_first_changed_files_max:
+                break
+        return selected
+
+    @staticmethod
+    def _prefetch_read_args(path: str, diff_text: str) -> dict[str, Any]:
+        changed_lines = AgentOrchestrator._changed_new_lines_for_file(diff_text).get(path)
+        if not changed_lines:
+            return {"file_path": path, "offset": 0, "limit": 80}
+        start_line = max(1, min(changed_lines) - 40)
+        return {"file_path": path, "offset": start_line - 1, "limit": 80}
+
+    @staticmethod
+    def _changed_new_lines_for_file(diff_text: str) -> dict[str, set[int]]:
+        changed: dict[str, set[int]] = {}
+        current_path = ""
+        new_line: int | None = None
+        for line in diff_text.splitlines():
+            if line.startswith("diff --git "):
+                current_path = ""
+                new_line = None
+                parts = line.split(" ")
+                if len(parts) >= 4:
+                    current_path = ContextBuilder._normalize_diff_path(parts[3].strip())  # noqa: SLF001
+                continue
+            if line.startswith("+++ "):
+                current_path = ContextBuilder._normalize_diff_path(
+                    line[4:].strip().split("\t", 1)[0].strip()
+                )
+                continue
+            if line.startswith("@@"):
+                match = re.search(r"\+(\d+)(?:,(\d+))?", line)
+                new_line = int(match.group(1)) if match else None
+                continue
+            if not current_path or new_line is None:
+                continue
+            if line.startswith("+") and not line.startswith("+++"):
+                changed.setdefault(current_path, set()).add(new_line)
+                new_line += 1
+                continue
+            if line.startswith("-") and not line.startswith("---"):
+                continue
+            new_line += 1
+        return changed
+
     async def _execute_one_tool(
         self,
         *,
         tool_name: str,
         tool: BaseTool,
         args: dict[str, Any],
-    ) -> tuple[ToolResult, ErrorDetail | None]:
+    ) -> tuple[ToolResult, ErrorDetail | None, int]:
+        started = perf_counter()
         dedup_key = None
         if tool.spec().safety == ToolSafety.READONLY:
             dedup_key = self._tool_dedup_key(tool_name, args)
@@ -758,29 +966,74 @@ class AgentOrchestrator:
                         "name": tool_name,
                         "ok": True,
                         "dedup_hit": True,
+                        "elapsed_ms": 0,
                     },
                 )
-                return ToolResult(ok=True, data=hint), None
+                return ToolResult(ok=True, data=hint), None, 0
         with tool_workspace_root(self._workspace_root):
             try:
-                data = await tool.execute(**args)
+                data = await asyncio.wait_for(
+                    tool.execute(**args),
+                    timeout=self._settings.agent_tool_timeout_seconds,
+                )
                 result = ToolResult(ok=True, data=data)
                 if dedup_key is not None:
                     self._tool_dedup_cache[dedup_key] = result
-                return result, None
+                return result, None, int((perf_counter() - started) * 1000)
+            except TimeoutError:
+                timeout = self._settings.agent_tool_timeout_seconds
+                elapsed_ms = max(1, int((perf_counter() - started) * 1000))
+                err = f"Tool execution timed out for {tool_name} after {timeout:g}s"
+                data = {
+                    "ok": False,
+                    "error_type": "ToolTimeoutError",
+                    "tool_name": tool_name,
+                    "timeout_seconds": timeout,
+                    "skip_reason": "tool_timeout",
+                    "message": err,
+                }
+                return (
+                    ToolResult(ok=False, error=err, data=data),
+                    ErrorDetail(file="", message=err, category="runtime"),
+                    elapsed_ms,
+                )
             except ToolError as exc:
                 err = f"Tool execution failed for {tool_name}: {exc}"
                 hint = self._tool_error_hint(tool_name=tool_name, message=str(exc))
                 return (
                     ToolResult(ok=False, error=err, data=hint),
                     ErrorDetail(file=exc.path, message=err, category="runtime"),
+                    int((perf_counter() - started) * 1000),
                 )
             except Exception as exc:  # noqa: BLE001
                 err = f"Tool execution failed for {tool_name}: {exc}"
                 return (
                     ToolResult(ok=False, error=err),
                     ErrorDetail(file="", message=err, category="runtime"),
+                    int((perf_counter() - started) * 1000),
                 )
+
+    def _build_tool_call_event_payload(
+        self,
+        *,
+        name: str,
+        result: ToolResult,
+        elapsed_ms: int,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "iteration": self._iteration,
+            "name": name,
+            "ok": result.ok,
+            "elapsed_ms": elapsed_ms,
+        }
+        if isinstance(result.data, dict):
+            skip_reason = str(result.data.get("skip_reason", "")).strip()
+            if skip_reason:
+                payload["skip_reason"] = skip_reason
+            error_type = str(result.data.get("error_type", "")).strip()
+            if error_type:
+                payload["error_type"] = error_type
+        return payload
 
     @staticmethod
     def _tool_error_hint(*, tool_name: str, message: str) -> dict[str, Any]:

@@ -18,10 +18,10 @@
 - **评测与回归**：`eval/` Golden fixtures、manifest、runner、report、gate、CI artifact 上传已经存在。
 - **CI 基础流水线**：ruff、mypy、pytest、golden eval、eval gate 已接入 GitHub Actions。
 
-仍需注意的基线风险：
+当前基线说明：
 
-- 部分规划文档仍滞后于代码现状（如 golden 样本分布、FastAPI 实现状态等），本轮 docs-audit 已逐份对齐。
-- CI 当前 `golden` suite 已有 4 正 + 2 负样本（全部 `annotated_by=manual`、`reviewed=true`）；gate 暂用过渡阈值 `hit_rate >= 0.0`，待 DeepSeek 命中率稳定后恢复 `hit_rate >= 0.6`。
+- 当前状态口径以本文、`README.md`、`architecture.md`、`shared_contracts.md`、`execute_tools_design.md`、`golden_fixture_snapshot_plan.md`、`eval/README.md` 与 `.env.example` 为准；`mvp_plus_four_directions_implementation.md` 保留为历史实施快照。
+- CI 当前 `golden` suite 已有 4 正 + 2 负样本（全部 `annotated_by=manual`、`reviewed=true`）；gate 已恢复真实阈值 `hit_rate >= 0.6`，同时保持 `schema_validity_rate >= 1.0` 与 `false_positive_rate <= 0.5`。
 - Docker CLI demo 命令已在 README 和 docker-compose.yml 中就绪。
 
 ---
@@ -36,7 +36,7 @@
 2. **同步 FastAPI 薄层**：提供 `GET /health`、`POST /review`、`POST /debug`，复用现有 orchestrator 与 Pydantic 请求/响应模型，不引入 job queue 或持久状态。
 3. **Docker CLI demo 闭环**：以 `docker compose run --rm agent python cli.py ...` 作为主 demo 路径，文档中给出可复制命令和预期结果。
 4. **观测与降级收口**：run_id、phase 事件、工具失败、submit 校验失败、终止原因可排查；用户看到的 stop reason 不误导。
-5. **温和 eval gate**：CI gate 至少约束 MergeWarden 自身评测回归的 `schema_validity_rate >= 1.0` 与 `false_positive_rate <= 0.5`；当 `golden` suite 补齐正样本后，恢复 `hit_rate >= 0.6`。该 gate 不代表产品侧对用户 PR 的 hard merge block。
+5. **真实 eval gate**：CI gate 约束 MergeWarden 自身评测回归的 `schema_validity_rate >= 1.0`、`hit_rate >= 0.6` 与 `false_positive_rate <= 0.5`。该 gate 不代表产品侧对用户 PR 的 hard merge block。
 6. **文档一致性**：README、architecture、project plan、shared contracts、execute design、golden fixture snapshot plan、env example 与代码现状一致。
 
 MVP+ 不要求：
@@ -156,23 +156,23 @@ docker compose run --rm agent python cli.py debug --help
 - 单测覆盖 schema 校验失败、工具连续失败、budget hard cap、max iteration stop。
 - 手动检查 `.mergewarden/logs/<run_id>.jsonl` 的事件顺序。
 
-### M+4 Eval gate 温和门禁
+### M+4 Eval gate 真实门禁
 
 **目标**：让 CI 中的 Golden eval 真正阻止 MergeWarden 自身明显质量退化，同时避免把 Agent 输出误定义为用户 PR 的硬合并门禁。
 
 **任务**
 
-- 当前 `suite=golden` 只有负样本时，将 GitHub Actions 中 eval gate 设为：
+- 当前 `suite=golden` 已包含 4 条正样本与 2 条负样本，GitHub Actions 中 eval gate 设为：
   - `--schema-validity-min 1.0`
-  - `--hit-rate-min 0.0`
+  - `--hit-rate-min 0.6`
   - `--false-positive-rate-max 0.5`
-- 在 `eval/README.md` 中说明当前阈值是过渡门禁；下一个最小闭环补充正样本后恢复 `--hit-rate-min 0.6`。
+- 在 `eval/README.md` 中说明该门禁只约束 MergeWarden 自身回归，不作为用户 PR 的 hard merge block。
 - 保持 eval artifact 上传，失败时可查看 machine report、human review 模板和 event logs。
 
 **验收**
 
 - CI 不再接受 schema 无效输出。
-- 纯负样本阶段不因缺少 expected issue 而错误阻塞 PR。
+- 正样本命中率低于 60% 时 CI 会失败。
 - false positive rate 超过阈值时 CI 会失败。
 - 这里的 CI 失败只表示本项目评测质量退化；Phase 2 的 GitHub PR 集成默认产出建议、soft check 或 review comment。
 
@@ -180,21 +180,21 @@ docker compose run --rm agent python cli.py debug --help
 
 ```bash
 python -m eval.run eval --suite golden --output-json eval/outputs/ci_report.json
-python -m eval.gate --report eval/outputs/ci_report.json --schema-validity-min 1.0 --hit-rate-min 0.0 --false-positive-rate-max 0.5
+python -m eval.gate --report eval/outputs/ci_report.json --schema-validity-min 1.0 --hit-rate-min 0.6 --false-positive-rate-max 0.5
 ```
 
 ### M+4.1 Eval 正样本补齐与门禁恢复
 
-**状态**：✅ 正样本已补齐（4 正 + 2 负，全部 `annotated_by=manual`、`reviewed=true`）。剩余：恢复 CI `hit_rate >= 0.6` 门禁（待 DeepSeek 命中率稳定后执行）。
+**状态**：✅ 已完成。正样本已补齐（4 正 + 2 负，全部 `annotated_by=manual`、`reviewed=true`），CI 已恢复 `hit_rate >= 0.6` 门禁。
 
 **已完成**
 - 已补充 4 条人工审核过的正样本（`pytest_pr8513`, `pytest_pr9350`, `pytest_pr7254`, `nethermind_pr5381`），2 条负样本（`ruff_pr24648`, `requests_pr7205`），每条 expected issue 可从 diff 直接定位。
 - `manifest.json` 已统一索引，覆盖 `should-detect` 与 `zero-issue`。
 - 正样本均满足 `annotated_by=manual`、`reviewed=true`、`tags` 含 `positive-sample` 与 `should-detect`。
 
-**待恢复**
-- 将 `.github/workflows/ci.yml` 的 eval gate 从 `--hit-rate-min 0.0` 恢复为 `--hit-rate-min 0.6`。
-- 同步 `eval/README.md` 中的门禁命令与样本分布描述。
+**已恢复**
+- `.github/workflows/ci.yml` 的 eval gate 使用 `--hit-rate-min 0.6`。
+- `eval/README.md` 中的门禁命令与样本分布描述已同步为当前真实门禁。
 
 ### M+5 契约与文档一致性
 
@@ -241,7 +241,7 @@ ruff check --no-cache .
 mypy src/
 pytest -q
 python -m eval.run eval --suite golden --output-json eval/outputs/ci_report.json
-python -m eval.gate --report eval/outputs/ci_report.json --schema-validity-min 1.0 --hit-rate-min 0.0 --false-positive-rate-max 0.5
+python -m eval.gate --report eval/outputs/ci_report.json --schema-validity-min 1.0 --hit-rate-min 0.6 --false-positive-rate-max 0.5
 docker compose run --rm agent python cli.py review --help
 ```
 
@@ -256,7 +256,7 @@ docker compose run --rm agent python cli.py review --help
 - [ ] FastAPI `GET /health`、`POST /review`、`POST /debug` 有测试与文档。
 - [ ] `SandboxResult`、execute 后端、Docker 配置在契约文档中描述一致。
 - [ ] 事件日志能复盘失败原因和终止原因。
-- [ ] 当前 CI gate 使用过渡门禁：schema 1.0、hit rate 0.0、false positive 0.5；补齐 `golden` 正样本后恢复 hit rate 0.6。
+- [x] 当前 CI gate 使用真实门禁：schema 1.0、hit rate 0.6、false positive 0.5。
 - [ ] Golden eval report 与 human review artifact 可查看。
 - [ ] README、architecture、project plan、shared contracts、execute design、golden fixture snapshot plan 口径一致。
 - [ ] Phase 2 backlog 清晰列出 GitHub Action/Bot、PR 评论、IDE 插件等后续事项。
