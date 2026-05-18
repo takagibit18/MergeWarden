@@ -68,6 +68,11 @@ _CODE_EVIDENCE_PATTERN = re.compile(
     r"(?m)^\s*(?:def |class |if |elif |else:|try:|except |return |"
     r"raise |with |using |[A-Za-z_][\w.]*\s*=|[A-Za-z_][\w.]*\()"
 )
+_INLINE_CODE_SPAN_PATTERN = re.compile(r"`([^`\n]+)`")
+_INLINE_CODE_EVIDENCE_PATTERN = re.compile(
+    r"(?:\b(?:private|public|protected|internal|readonly|using|return|if|throw)\b|"
+    r"[A-Za-z_][\w.]*\s*\(|[A-Za-z_][\w.]*\s*=|;)"
+)
 
 
 def triage_review_report(report: ReviewReport) -> ReviewTriage:
@@ -119,4 +124,9 @@ def has_specific_code_evidence(evidence: str) -> bool:
         return False
     if has_specific_diff_evidence(text):
         return True
-    return _CODE_EVIDENCE_PATTERN.search(text) is not None
+    if _CODE_EVIDENCE_PATTERN.search(text):
+        return True
+    return any(
+        _INLINE_CODE_EVIDENCE_PATTERN.search(span) is not None
+        for span in _INLINE_CODE_SPAN_PATTERN.findall(text)
+    )

@@ -169,6 +169,31 @@ def test_merge_review_reports_keeps_high_confidence_critical_with_single_line_co
     ]
 
 
+def test_merge_review_reports_keeps_critical_with_inline_backtick_code_evidence() -> None:
+    report = ReviewReport(
+        summary="summary",
+        issues=[
+            ReviewIssue(
+                severity=Severity.CRITICAL,
+                location="src/Nethermind/Nethermind.Merge.Plugin/EngineRpcModule.Paris.cs:24",
+                evidence=(
+                    "The diff adds `private readonly GCKeeper _gcKeeper;` but no "
+                    "constructor assignment. When `_gcKeeper.TryStartNoGCRegion()` "
+                    "runs at line 80, it will throw NullReferenceException."
+                ),
+                suggestion="Assign _gcKeeper before using it in NewPayload.",
+                confidence=0.95,
+            )
+        ],
+    )
+
+    merged = ResultProcessor.merge_review_reports([report])
+
+    assert [issue.location for issue in merged.issues] == [
+        "src/Nethermind/Nethermind.Merge.Plugin/EngineRpcModule.Paris.cs:24",
+    ]
+
+
 def test_merge_review_reports_filters_low_confidence_warning_and_critical() -> None:
     report = ReviewReport(
         summary="summary",

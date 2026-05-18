@@ -24,7 +24,11 @@ from eval.schemas import (
     SampledFixtureResult,
 )
 from src.analyzer.location import normalize_location
-from src.analyzer.output_formatter import Severity, has_specific_diff_evidence
+from src.analyzer.output_formatter import (
+    Severity,
+    has_specific_code_evidence,
+    has_specific_diff_evidence,
+)
 from src.analyzer.schemas import (
     DebugRequest,
     DebugResponse,
@@ -827,24 +831,21 @@ def _match_issues(
 ) -> tuple[list[EvalIssueMatch], int, int]:
     expected = fixture.expected.issues
     if isinstance(response, ReviewResponse):
-        effective_issues = _effective_review_issues(fixture, response)
-        actual_locations = [issue.location for issue in effective_issues]
-        actual_severity = [issue.severity.value for issue in effective_issues]
+        actual_issues = _effective_review_issues(fixture, response)
+        actual_severity = [issue.severity.value for issue in actual_issues]
     else:
-        actual_locations = [step.location for step in response.steps]
-        actual_severity = ["warning" for _ in response.steps]
+        actual_issues = response.steps
+        actual_severity = ["warning" for _ in actual_issues]
 
     used_actual_indices: set[int] = set()
     matches: list[EvalIssueMatch] = []
     matched_count = 0
     for idx, expected_issue in enumerate(expected):
         hit_index: int | None = None
-        for actual_idx, location in enumerate(actual_locations):
+        for actual_idx, issue in enumerate(actual_issues):
             if actual_idx in used_actual_indices:
                 continue
-            semantic_hit = _semantic_location_matches(expected_issue, location)
-            legacy_hit = _location_matches(expected_issue.location_pattern, location)
-            if not semantic_hit and not legacy_hit:
+            if not _issue_matches_expected_location(expected_issue, issue):
                 continue
             if _severity_rank(actual_severity[actual_idx]) < _severity_rank(
                 expected_issue.severity.value
@@ -863,7 +864,7 @@ def _match_issues(
                 matched_actual_index=hit_index,
             )
         )
-    false_positive_count = max(0, len(actual_locations) - matched_count)
+    false_positive_count = max(0, len(actual_issues) - matched_count)
     return matches, matched_count, false_positive_count
 
 
@@ -950,6 +951,41 @@ def _semantic_location_matches(expected_issue: Any, location: str) -> bool:
     return actual_start <= expected_end and actual_end >= expected_line
 
 
+def _issue_matches_expected_location(expected_issue: Any, issue: Any) -> bool:
+    location = str(getattr(issue, "location", "") or "")
+    return (
+        _semantic_location_matches(expected_issue, location)
+        or _location_matches(expected_issue.location_pattern, location)
+        or _issue_evidence_mentions_expected_line(expected_issue, issue)
+    )
+
+
+def _issue_evidence_mentions_expected_line(expected_issue: Any, issue: Any) -> bool:
+    expected_path = (
+        str(getattr(expected_issue, "path", "") or "").strip().replace("\\", "/")
+    )
+    expected_line = getattr(expected_issue, "line", None)
+    if not expected_path or not isinstance(expected_line, int):
+        return False
+    location = str(getattr(issue, "location", "") or "")
+    parsed = normalize_location(location)
+    if not parsed.valid or parsed.path != expected_path:
+        return False
+    evidence = str(getattr(issue, "evidence", "") or "")
+    expected_end = getattr(expected_issue, "end_line", None)
+    lines = range(
+        expected_line,
+        (expected_end if isinstance(expected_end, int) else expected_line) + 1,
+    )
+    return any(_evidence_mentions_line(evidence, line) for line in lines)
+
+
+def _evidence_mentions_line(evidence: str, line: int) -> bool:
+    if not evidence:
+        return False
+    return re.search(rf"\bline\s+{line}\b|:{line}\b", evidence, re.IGNORECASE) is not None
+
+
 def _is_eval_effective_issue(issue: Any, fixture: Fixture | None = None) -> bool:
     severity = str(
         getattr(getattr(issue, "severity", ""), "value", getattr(issue, "severity", ""))
@@ -964,6 +1000,7 @@ def _is_eval_effective_issue(issue: Any, fixture: Fixture | None = None) -> bool
     if severity == Severity.CRITICAL.value:
         return confidence >= _MIN_CRITICAL_CONFIDENCE and (
             has_specific_diff_evidence(evidence)
+            or has_specific_code_evidence(evidence)
             or _issue_location_is_changed_line(issue, fixture)
         )
     if severity == Severity.WARNING.value:
