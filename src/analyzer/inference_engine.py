@@ -356,7 +356,7 @@ class InferenceEngine:
             arguments = function_block.get("arguments", "{}")
             argument_error = ""
             try:
-                payload = json.loads(arguments) if isinstance(arguments, str) else arguments
+                payload = self._parse_tool_arguments(arguments)
             except json.JSONDecodeError as exc:
                 payload = {}
                 argument_error = f"Invalid JSON arguments for {name}: {exc}"
@@ -425,6 +425,17 @@ class InferenceEngine:
             ),
             parse_meta,
         )
+
+    @staticmethod
+    def _parse_tool_arguments(arguments: Any) -> Any:
+        if not isinstance(arguments, str):
+            return arguments
+        try:
+            return json.loads(arguments)
+        except json.JSONDecodeError as exc:
+            if "Invalid control character" not in exc.msg:
+                raise
+            return json.loads(arguments, strict=False)
 
     def _try_parse_submit_payload_from_json(
         self, payload: dict[str, Any], request: ReviewRequest | DebugRequest

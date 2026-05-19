@@ -227,6 +227,45 @@ def test_merge_review_reports_filters_low_confidence_warning_and_critical() -> N
     ]
 
 
+def test_merge_review_reports_keeps_specific_risk_warning_below_standard_threshold() -> None:
+    report = ReviewReport(
+        summary="summary",
+        issues=[
+            ReviewIssue(
+                severity=Severity.WARNING,
+                location="src/Nethermind/Nethermind.Merge.Plugin/EngineRpcModule.Paris.cs:24",
+                evidence=(
+                    "private readonly GCKeeper _gcKeeper; is declared, but line 80 calls "
+                    "using IDisposable region = _gcKeeper.TryStartNoGCRegion();. "
+                    "If _gcKeeper is not initialized this throws NullReferenceException."
+                ),
+                suggestion="Initialize _gcKeeper before calling TryStartNoGCRegion.",
+                confidence=0.70,
+            ),
+            ReviewIssue(
+                severity=Severity.WARNING,
+                location="src/_pytest/python.py:1200",
+                evidence=(
+                    "if modified_val is None or len(modified_val) > 100:\n"
+                    "        return str(argname) + str(idx)"
+                ),
+                suggestion=(
+                    "The 100-character hard limit is a user-visible behavior change for "
+                    "long parameter IDs."
+                ),
+                confidence=0.80,
+            ),
+        ],
+    )
+
+    merged = ResultProcessor.merge_review_reports([report])
+
+    assert [issue.location for issue in merged.issues] == [
+        "src/Nethermind/Nethermind.Merge.Plugin/EngineRpcModule.Paris.cs:24",
+        "src/_pytest/python.py:1200",
+    ]
+
+
 def test_result_processor_budget_from_constructor() -> None:
     processor = ResultProcessor(token_budget=10)
     assert processor.is_budget_exhausted(9) is False

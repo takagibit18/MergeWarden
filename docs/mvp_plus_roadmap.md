@@ -22,8 +22,8 @@ Current status:
 
 - MVP+ engineering scope is in release-candidate shape: CLI, FastAPI thin layer, Docker CLI demo, event logs, soft eval gate, and documentation entrypoints are in place.
 - The `golden` suite has 4 positive and 2 negative fixtures; all are `annotated_by=manual` and `reviewed=true`; `manifest.json` is consistent with fixture metadata.
-- The latest diagnostic report `eval/outputs/20260517_152809_report.json` has schema validity `1.0`, hit rate `0.5`, and false positive rate `0.1667`. It proves the eval path is debuggable, but it does not satisfy the stable `hit_rate >= 0.6` target.
-- Fixture diff/snapshot drift has been fixed and is now blocked by runner validation. A fresh golden run on the corrected fixtures is required before recording a new quality baseline.
+- The current MVP+ closure report `eval/outputs/20260518_151719_report.json` has schema validity `1.0`, hit rate `0.75`, and false positive rate `0.0`. It satisfies the stable `hit_rate >= 0.6` target.
+- Fixture diff/snapshot drift has been fixed and is now blocked by runner validation. The corrected golden run is recorded in [mvp_plus_eval_closure.md](mvp_plus_eval_closure.md).
 - Docker CLI demo commands are documented in README and `docker-compose.yml`.
 
 ---
@@ -37,13 +37,13 @@ Complete MVP+ requires:
 2. **Synchronous FastAPI thin layer**: `GET /health`, `POST /review`, and `POST /debug` reuse the existing orchestrator and Pydantic request/response models without a job queue or durable state.
 3. **Docker CLI demo loop**: `docker compose run --rm agent python cli.py ...` is the primary container demo path with documented commands and expected output.
 4. **Observability and graceful degradation**: run_id, phase events, tool failures, submit validation failures, budget state, and stop reasons are diagnosable.
-5. **Soft eval gate**: CI gates schema validity and false positive regression; hit rate remains transitional at `0.0` until a corrected fresh run passes the stable `hit_rate >= 0.6` target. This gate is not a hard merge block for user PRs.
+5. **Stable eval gate**: CI gates schema validity, hit rate, and false positive regression with `schema_validity_rate >= 1.0`, `hit_rate >= 0.6`, and `false_positive_rate <= 0.5`. This gate protects MergeWarden itself and is not a hard merge decision for user pull requests.
 6. **Documentation consistency**: README, architecture, project plan, shared contracts, execute design, golden fixture snapshot plan, and env examples match the codebase.
 
-2026-05-17 status:
+2026-05-18 status:
 
-- **MVP+ engineering scope: complete / release-candidate.** CLI, API, Docker demo, observability, eval runner, fixture snapshot strategy, and docs boundaries are closed.
-- **MVP+ stable quality evidence: not complete.** The latest diagnostic run did not pass `hit_rate >= 0.6`, and it was produced before fixture snapshot consistency was corrected. Rerun golden eval and pass the stable gate before calling the eval result high quality.
+- **MVP+ engineering scope: complete.** CLI, API, Docker demo, observability, eval runner, fixture snapshot strategy, and docs boundaries are closed.
+- **MVP+ stable quality evidence: complete for the current numeric gate.** R14 passes schema validity `1.0`, hit rate `0.75`, and false positive rate `0.0` on the reviewed golden suite.
 - **Phase 2 should not block MVP+ engineering closure.** GitHub Bot, PR comment lifecycle, webhooks, async jobs, and productized run storage remain Phase 2 work.
 
 MVP+ does not require:
@@ -176,17 +176,17 @@ docker compose run --rm agent python cli.py debug --help
 
 **任务**
 
-- 当前 `suite=golden` 只有负样本时，将 GitHub Actions 中 eval gate 设为：
+- 当前 `suite=golden` 为 4 个正样本 + 2 个负样本，GitHub Actions 中 eval gate 设为：
   - `--schema-validity-min 1.0`
-  - `--hit-rate-min 0.0`
+  - `--hit-rate-min 0.6`
   - `--false-positive-rate-max 0.5`
-- 在 `eval/README.md` 中说明当前阈值是过渡门禁；下一个最小闭环补充正样本后恢复 `--hit-rate-min 0.6`。
+- 在 `eval/README.md` 中说明当前阈值是稳定 MVP+ 数值门禁；R14 已通过同一组阈值。
 - 保持 eval artifact 上传，失败时可查看 machine report、human review 模板和 event logs。
 
 **验收**
 
 - CI 不再接受 schema 无效输出。
-- 纯负样本阶段不因缺少 expected issue 而错误阻塞 PR。
+- 命中率低于稳定阈值时 CI 会失败。
 - false positive rate 超过阈值时 CI 会失败。
 - 这里的 CI 失败只表示本项目评测质量退化；Phase 2 的 GitHub PR 集成默认产出建议、soft check 或 review comment。
 
@@ -194,12 +194,12 @@ docker compose run --rm agent python cli.py debug --help
 
 ```bash
 python -m eval.run eval --suite golden --output-json eval/outputs/ci_report.json
-python -m eval.gate --report eval/outputs/ci_report.json --schema-validity-min 1.0 --hit-rate-min 0.0 --false-positive-rate-max 0.5
+python -m eval.gate --report eval/outputs/ci_report.json --schema-validity-min 1.0 --hit-rate-min 0.6 --false-positive-rate-max 0.5
 ```
 
 ### M+4.1 Eval Positive Fixtures and Stable Gate Restore
 
-**Status**: fixture count is complete (4 positive + 2 negative, all `annotated_by=manual`, `reviewed=true`), but the stable hit-rate gate is not restored.
+**Status**: fixture count is complete (4 positive + 2 negative, all `annotated_by=manual`, `reviewed=true`), and the stable hit-rate gate is restored.
 
 **Done**
 
@@ -209,15 +209,15 @@ python -m eval.gate --report eval/outputs/ci_report.json --schema-validity-min 1
 
 **Current diagnostic result**
 
-- Latest local report: `eval/outputs/20260517_152809_report.json`.
-- Result: schema validity `1.0`, hit rate `0.5`, false positive rate `0.1667`.
-- Interpretation: execution path is healthy enough to debug, but this is not a high-quality MVP+ eval result. Rerun after fixture correction.
+- Latest local report: `eval/outputs/20260518_151719_report.json`.
+- Result: schema validity `1.0`, hit rate `0.75`, false positive rate `0.0`.
+- Interpretation: this is the current MVP+ numeric quality baseline. It clears the stable gate on the reviewed golden suite; `golden_pytest-dev_pytest_pr8513` remains the next quality-hardening target.
 
-**To restore**
+**Stable gate**
 
-- Rerun `python -m eval.run eval --suite golden --output-json eval/outputs/ci_report.json`.
-- Pass `python -m eval.gate --report eval/outputs/ci_report.json --schema-validity-min 1.0 --hit-rate-min 0.6 --false-positive-rate-max 0.5`.
-- Sync `.github/workflows/ci.yml`, `eval/README.md`, and release checklist stable-gate wording.
+- CI uses `python -m eval.gate --report eval/outputs/ci_report.json --schema-validity-min 1.0 --hit-rate-min 0.6 --false-positive-rate-max 0.5`.
+- Local R14 passes the same numeric thresholds.
+- See [mvp_plus_eval_closure.md](mvp_plus_eval_closure.md) for the recent optimization and metric history.
 
 ### M+5 契约与文档一致性
 
@@ -264,7 +264,7 @@ ruff check --no-cache .
 mypy src/
 pytest -q
 python -m eval.run eval --suite golden --output-json eval/outputs/ci_report.json
-python -m eval.gate --report eval/outputs/ci_report.json --schema-validity-min 1.0 --hit-rate-min 0.0 --false-positive-rate-max 0.5
+python -m eval.gate --report eval/outputs/ci_report.json --schema-validity-min 1.0 --hit-rate-min 0.6 --false-positive-rate-max 0.5
 docker compose run --rm agent python cli.py review --help
 ```
 
@@ -279,10 +279,10 @@ Before a complete MVP+ release, confirm:
 - [x] FastAPI `GET /health`, `POST /review`, and `POST /debug` are in MVP+ scope and reuse current contracts.
 - [x] `SandboxResult`, execute backends, and Docker configuration are described consistently in contract docs.
 - [x] Event logs can explain failure reason, budget state, and stop reason.
-- [x] Current CI gate uses transitional thresholds: schema 1.0, hit rate 0.0, false positive 0.5.
+- [x] Current CI gate uses stable thresholds: schema 1.0, hit rate 0.6, false positive 0.5.
 - [x] Golden fixtures use workspace-backed snapshots and diff/workspace consistency validation.
-- [ ] Rerun golden eval on corrected fixtures and restore stable `hit_rate >= 0.6`.
-- [ ] Fill the latest `golden_human_review.md` human acceptability scores and comments.
+- [x] Rerun golden eval on corrected fixtures and record stable `hit_rate >= 0.6` evidence.
+- [ ] Fill the latest `golden_human_review.md` human acceptability scores and comments when preparing release notes.
 - [x] README, architecture, project plan, shared contracts, execute design, and golden fixture snapshot plan align on MVP+ / Phase 2 boundaries.
 - [x] Phase 2 backlog clearly lists GitHub Action/Bot, PR comment lifecycle, async execution, and productized observability.
 

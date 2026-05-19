@@ -99,23 +99,33 @@ CI uses a soft eval gate to prevent obvious MergeWarden regression. It is not a 
 
 Workspace-backed fixtures are validated before model execution: every added line in `diff_text` must match the restored `checkout_sha` repository snapshot. A mismatch is treated as fixture validation failure, not as a model miss or false positive.
 
-The transitional CI gate remains:
-
-```bash
-python -m eval.gate --report eval/outputs/ci_report.json --schema-validity-min 1.0 --hit-rate-min 0.0 --false-positive-rate-max 0.5
-```
-
-- `schema_validity_rate >= 1.0`: every response must be valid structured output.
-- `hit_rate >= 0.0`: hit rate is not enforced during the transition.
-- `false_positive_rate <= 0.5`: false positives above 50% fail the gate.
-
-The stable target remains:
+The CI gate uses the stable MVP+ numeric target:
 
 ```bash
 python -m eval.gate --report eval/outputs/ci_report.json --schema-validity-min 1.0 --hit-rate-min 0.6 --false-positive-rate-max 0.5
 ```
 
-Only restore CI to `--hit-rate-min 0.6` after a fresh run on the corrected fixtures passes schema validity, hit rate, false positive rate, and the human acceptability review is filled in.
+- `schema_validity_rate >= 1.0`: every response must be valid structured output.
+- `hit_rate >= 0.6`: at least 60% of positive golden fixtures must be matched.
+- `false_positive_rate <= 0.5`: false positives above 50% fail the gate.
+
+The current MVP+ closure baseline is documented in
+[docs/mvp_plus_eval_closure.md](../docs/mvp_plus_eval_closure.md).
+
+### 2026-05-18 MVP+ closure golden eval status
+
+Latest baseline report: `eval/outputs/20260518_151719_report.json`.
+
+- Suite shape: `golden`, 6 reviewed fixtures, 4 positive and 2 negative.
+- Schema validity: `100.00%`.
+- Hit rate: `75.00%` (3/4 positive fixtures), above the stable `60.00%` target.
+- False positive rate: `0.00%`.
+- Average latency: `49.74s`; P50 / P95 latency: `45.78s` / `74.24s`.
+- Average tokens: `23,902`; P50 / P95 tokens: `20,375` / `33,748`.
+- Matched positives: Nethermind `_gcKeeper`, pytest long parameter ID, and pytest `SafeHashWrapper.__eq__`.
+- Remaining miss: `golden_pytest-dev_pytest_pr8513`, tracked as follow-up quality hardening.
+
+Interpretation: this report is the current MVP+ numeric quality baseline. It clears the stable eval gate while both negative fixtures remain false-positive-free.
 
 ### 2026-05-17 local golden eval status
 

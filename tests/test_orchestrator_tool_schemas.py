@@ -24,6 +24,22 @@ def test_build_submit_tool_schemas_contains_expected_submit_tools() -> None:
     assert names == {"submit_review", "submit_debug"}
 
 
+def test_submit_review_schema_requires_explicit_issues_array() -> None:
+    schemas = build_submit_tool_schemas()
+    review_schema = next(
+        schema for schema in schemas if schema["function"]["name"] == "submit_review"
+    )
+    parameters = review_schema["function"]["parameters"]
+
+    assert parameters["required"] == ["summary", "issues"]
+    assert "summary must not mention" in parameters["properties"]["summary"]["description"]
+    assert "Use [] only when" in parameters["properties"]["issues"]["description"]
+    issue_schema = parameters["properties"]["issues"]["items"]
+    assert (
+        "concrete changed-code bugs" in issue_schema["properties"]["confidence"]["description"]
+    )
+
+
 def test_build_tool_schemas_from_default_registry_is_complete() -> None:
     schemas = build_tool_schemas(create_default_registry().list_specs())
 

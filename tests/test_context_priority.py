@@ -189,6 +189,21 @@ def test_review_messages_do_not_embed_full_direct_diff_text_when_truncated() -> 
     assert payload["truncated"]["any"] is True
 
 
+def test_review_prompt_requires_summary_issue_consistency() -> None:
+    messages = build_review_messages(
+        ReviewRequest(repo_path="."),
+        ContextState(),
+        "diff --git a/src/main.py b/src/main.py\n+ change_behavior()",
+        {},
+    )
+    combined = "\n".join(message.content for message in messages)
+
+    assert "summary must not mention bugs, regressions" in combined
+    assert "corresponding issue in issues[]" in combined
+    assert "user-visible behavior change" in combined
+    assert "use confidence >= 0.85" in combined
+
+
 def test_debug_messages_do_not_embed_full_direct_error_log_text_when_truncated() -> None:
     direct_error_log = "E" * 20_000
     req = DebugRequest(repo_path=".", error_log_text=direct_error_log)
