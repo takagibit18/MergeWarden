@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from uuid import uuid4
 
 from src.analyzer.context_state import ContextState, DecisionStep
@@ -19,6 +20,14 @@ class ResultProcessor:
     """Convert phase outputs into final structured responses."""
     _MIN_CRITICAL_CONFIDENCE = 0.85
     _MIN_WARNING_CONFIDENCE = 0.85
+    _MIN_RISK_WARNING_CONFIDENCE = 0.70
+    _RISK_WARNING_PATTERN = re.compile(
+        r"\b("
+        r"NullReferenceException|exception|regression|breaking|behavior(?:al)? change|"
+        r"user-visible|incorrect|error|fail(?:ure)?|throws?|crash"
+        r")\b",
+        re.IGNORECASE,
+    )
 
     def __init__(self, token_budget: int = 12000, token_hard_budget: int | None = None) -> None:
         self._token_budget = token_budget
@@ -111,8 +120,21 @@ class ResultProcessor:
                 and has_specific_code_evidence(issue.evidence)
             )
         if issue.severity == Severity.WARNING:
-            return issue.confidence >= ResultProcessor._MIN_WARNING_CONFIDENCE
+            return (
+                issue.confidence >= ResultProcessor._MIN_WARNING_CONFIDENCE
+                or ResultProcessor._is_specific_risk_warning(issue)
+            )
         return True
+
+    @staticmethod
+    def _is_specific_risk_warning(issue: ReviewIssue) -> bool:
+        if issue.confidence < ResultProcessor._MIN_RISK_WARNING_CONFIDENCE:
+            return False
+        combined = f"{issue.evidence}\n{issue.suggestion}"
+        return (
+            has_specific_code_evidence(issue.evidence)
+            and ResultProcessor._RISK_WARNING_PATTERN.search(combined) is not None
+        )
 
     def is_budget_exhausted(self, total_tokens: int) -> bool:
         """Backward-compatible: True when soft cap is reached."""

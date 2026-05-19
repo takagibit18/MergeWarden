@@ -66,7 +66,8 @@ _DIFF_HUNK_PATTERN = re.compile(r"(?m)^@@ .+ @@")
 _DIFF_CHANGE_LINE_PATTERN = re.compile(r"(?m)^(?:\+|-)(?!\+\+|--).+\S")
 _CODE_EVIDENCE_PATTERN = re.compile(
     r"(?m)^\s*(?:def |class |if |elif |else:|try:|except |return |"
-    r"raise |with |using |[A-Za-z_][\w.]*\s*=|[A-Za-z_][\w.]*\()"
+    r"raise |with |using |(?:private|public|protected|internal)\s+|"
+    r"[A-Za-z_][\w.]*\s*=|[A-Za-z_][\w.]*\()"
 )
 _INLINE_CODE_SPAN_PATTERN = re.compile(r"`([^`\n]+)`")
 _INLINE_CODE_EVIDENCE_PATTERN = re.compile(

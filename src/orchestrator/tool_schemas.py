@@ -35,9 +35,22 @@ def build_submit_tool_schemas() -> list[dict[str, Any]]:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "summary": {"type": "string"},
+                        "summary": {
+                            "type": "string",
+                            "description": (
+                                "High-level result. The summary must not mention bugs, "
+                                "regressions, breaking changes, compatibility risks, or "
+                                "user-visible behavior changes unless the same finding is "
+                                "present in issues."
+                            ),
+                        },
                         "issues": {
                             "type": "array",
+                            "description": (
+                                "Structured findings. Use [] only when there are no "
+                                "supported bugs, regressions, breaking changes, "
+                                "compatibility risks, or actionable review findings."
+                            ),
                             "items": {
                                 "type": "object",
                                 "properties": {
@@ -52,7 +65,15 @@ def build_submit_tool_schemas() -> list[dict[str, Any]]:
                                     },
                                     "evidence": {"type": "string"},
                                     "suggestion": {"type": "string"},
-                                    "confidence": {"type": "number"},
+                                    "confidence": {
+                                        "type": "number",
+                                        "description": (
+                                            "Use >= 0.85 for concrete changed-code bugs, "
+                                            "regressions, compatibility breaks, or user-visible "
+                                            "behavior changes; use lower values for speculative "
+                                            "or non-blocking concerns."
+                                        ),
+                                    },
                                 },
                                 "required": [
                                     "severity",
@@ -63,7 +84,7 @@ def build_submit_tool_schemas() -> list[dict[str, Any]]:
                             },
                         },
                     },
-                    "required": ["summary"],
+                    "required": ["summary", "issues"],
                 },
             },
         },

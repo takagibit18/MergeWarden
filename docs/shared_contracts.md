@@ -235,3 +235,4 @@ CLI、FastAPI 与 CI 校验应只依赖上述稳定字段；**增删字段** 需
 | 2026-05-08 | PR review 产品边界对齐：Review 输出为建议/soft check，硬合并阻断交给 CI；inline finding 约束为 changed line / changed hunk |
 | 2026-05-10 | docs-audit：对齐文档与代码现状 — golden 样本分布（4正/2负）、FastAPI 已实现、load_diff 用 `git diff HEAD`、eval gate 仍处于过渡期 |
 | 2026-05-16 | 恢复 MVP+ 真实 eval gate：`schema_validity_rate >= 1.0`、`hit_rate >= 0.6`、`false_positive_rate <= 0.5` |
+| 2026-05-18 | MVP+ eval closure baseline：`eval/outputs/20260518_151719_report.json` 达到 schema validity `1.0`、hit rate `0.75`、false positive rate `0.0`；详见 `docs/mvp_plus_eval_closure.md`。 |

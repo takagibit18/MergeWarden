@@ -453,6 +453,10 @@ def test_force_submit_review_forces_submit_tool_and_disables_deepseek_thinking(m
     }
     assert config.extra_body == {"thinking": {"type": "disabled"}}
     assert [tool["function"]["name"] for tool in client.tools[-1]] == ["submit_review"]
+    assert any(
+        "summary must not mention bugs, regressions" in str(message.content)
+        for message in client.calls[-1]
+    )
 
 
 def test_force_submit_review_disables_qwen_dashscope_thinking(monkeypatch) -> None:
@@ -585,6 +589,27 @@ def test_invalid_submit_review_arguments_do_not_create_empty_draft() -> None:
 
     assert plan.draft_review is None
     assert "Invalid JSON" in parse_meta["submit_review_validation_error"]
+
+
+def test_submit_review_arguments_allow_unescaped_control_characters() -> None:
+    client = RecordingFakeModelClient()
+    engine = InferenceEngine(model_client=client)  # type: ignore[arg-type]
+
+    arguments = (
+        '{"summary": "ok", "issues": [{"severity": "warning", '
+        '"location": "src/a.py:1", '
+        '"evidence": "if value:\n    return value", '
+        '"suggestion": "Keep the branch safe.", "confidence": 0.9}]}'
+    )
+    plan, parse_meta = engine._parse_tool_calls(  # noqa: SLF001
+        [{"function": {"name": "submit_review", "arguments": arguments}}],
+        ReviewRequest(repo_path="."),
+        force_submit=True,
+    )
+
+    assert parse_meta["submit_review_validation_error"] == ""
+    assert plan.draft_review is not None
+    assert plan.draft_review.issues[0].evidence == "if value:\n    return value"
 
 
 def test_invalid_submit_review_payload_gets_repair_retry(monkeypatch) -> None:
