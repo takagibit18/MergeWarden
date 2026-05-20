@@ -4,7 +4,9 @@ Provides ``review`` and ``debug`` subcommands via Click.
 """
 
 import asyncio
+import json
 from collections.abc import Coroutine
+from pathlib import Path
 from typing import Any, TypeVar
 
 import click
@@ -12,6 +14,7 @@ import click
 from src.analyzer.output_formatter import ReviewIssue, triage_review_report
 from src import __version__
 from src.analyzer.schemas import DebugRequest, DebugResponse, ReviewRequest, ReviewResponse
+from src.integrations.github_adapter import build_github_advisory_payload
 from src.orchestrator.agent_loop import AgentOrchestrator
 
 T = TypeVar("T")
@@ -144,6 +147,63 @@ def debug(ctx: click.Context, path: str, error_log: str | None) -> None:
     orchestrator = AgentOrchestrator(permission_mode=ctx.obj["permission_mode"])
     response = _run_async_command(orchestrator.run_debug(request), "debug")
     _render_debug_response(response, ctx.obj["verbose"])
+
+
+@main.command("advisory-export")
+@click.option(
+    "--response-json",
+    required=True,
+    type=click.Path(exists=True),
+    help="Path to a ReviewResponse JSON file.",
+)
+@click.option(
+    "--changed-lines-json",
+    required=True,
+    type=click.Path(exists=True),
+    help="JSON object mapping repo-relative paths to changed line numbers.",
+)
+@click.option(
+    "--output-json",
+    default=None,
+    type=click.Path(exists=False),
+    help="Optional output path. Defaults to stdout.",
+)
+def advisory_export(
+    response_json: str,
+    changed_lines_json: str,
+    output_json: str | None,
+) -> None:
+    """Convert a review response into local GitHub advisory payload JSON."""
+    response = ReviewResponse.model_validate_json(
+        Path(response_json).read_text(encoding="utf-8")
+    )
+    changed_lines = _load_changed_lines(Path(changed_lines_json))
+    payload = build_github_advisory_payload(response, changed_lines)
+    output = payload.model_dump_json(indent=2)
+    if output_json:
+        Path(output_json).write_text(output + "\n", encoding="utf-8")
+        click.echo(f"Advisory payload saved to: {Path(output_json).as_posix()}")
+        return
+    click.echo(output)
+
+
+def _load_changed_lines(path: Path) -> dict[str, set[int]]:
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise click.ClickException("changed-lines JSON must be an object.")
+    changed: dict[str, set[int]] = {}
+    for key, value in raw.items():
+        if not isinstance(value, list):
+            raise click.ClickException(
+                "changed-lines JSON values must be arrays of line numbers."
+            )
+        try:
+            changed[str(key)] = {int(item) for item in value}
+        except (TypeError, ValueError) as exc:
+            raise click.ClickException(
+                "changed-lines JSON values must contain only line numbers."
+            ) from exc
+    return changed
 
 
 if __name__ == "__main__":

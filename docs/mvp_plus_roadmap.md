@@ -75,11 +75,11 @@ Phase 2 prerequisites:
 
 Recommended Phase 2 order:
 
-1. **Restore eval quality**: rerun the corrected workspace-backed golden suite, restore `hit_rate >= 0.6`, then add pass@k and provider matrix sampling.
-2. **GitHub PR integration**: start with advisory check or draft review comments, not hard blocks; restrict inline comments to changed lines / changed hunks.
-3. **Comment lifecycle**: add dedupe, update, stale-comment folding, and run_id tracking.
-4. **Async execution and storage**: introduce job queue, durable state, and webhook callbacks only when GitHub integration needs long-running work.
-5. **Productized observability**: summarize event logs, budget state, provider/model, schema failure, hit/miss, and FP causes into queryable run summaries.
+1. **Eval stability and diagnostics**: keep R14 as the current numeric baseline, then add multi-report trends, per-fixture diagnostics, pass@k/provider sampling, and focused `golden_pytest-dev_pytest_pr8513` analysis.
+2. **Productized observability**: summarize event logs, budget state, provider/model, schema failure, hit/miss, and FP causes into local run summaries and eval sidecar artifacts.
+3. **GitHub PR integration**: start with local advisory payload export and soft checks, not hard blocks; restrict inline comments to changed lines / changed hunks.
+4. **Comment lifecycle**: add fingerprint-based dedupe, update, stale-comment folding, and run_id tracking.
+5. **Async execution and storage**: introduce job queue, durable state, and webhook callbacks only when GitHub integration needs long-running work.
 
 ---
 ## 4. MVP+ 里程碑

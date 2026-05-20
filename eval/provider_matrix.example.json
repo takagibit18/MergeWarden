@@ -1,0 +1,20 @@
+{
+  "providers": [
+    {
+      "name": "openai-default",
+      "base_url_label": "openai",
+      "model": "gpt-4o",
+      "temperature": 0.0,
+      "samples": 1,
+      "notes": "Default CI-compatible baseline."
+    },
+    {
+      "name": "compatible-provider",
+      "base_url_label": "openai-compatible",
+      "model": "provider-model-name",
+      "temperature": 0.0,
+      "samples": 1,
+      "notes": "Fill with local provider settings before live runs."
+    }
+  ]
+}
