@@ -91,7 +91,11 @@ def build_github_advisory_payload(
 def fingerprint_issue(issue: ReviewIssue) -> str:
     """Stable fingerprint for comment lifecycle dedupe/update decisions."""
     parsed = normalize_location(issue.location)
-    path = parsed.path if parsed.valid else issue.location.replace("\\", "/")
+    path = (
+        parsed.path
+        if parsed.valid and parsed.path is not None
+        else issue.location.replace("\\", "/")
+    )
     line = str(parsed.line or "")
     payload = "\n".join(
         [

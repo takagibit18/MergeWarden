@@ -56,3 +56,11 @@ def test_fingerprint_is_stable_for_equivalent_issue_text() -> None:
     )
 
     assert fingerprint_issue(issue) == fingerprint_issue(same)
+
+
+def test_fingerprint_accepts_unparseable_location() -> None:
+    issue = _response().report.issues[0].model_copy(
+        update={"location": "see discussion thread"}
+    )
+
+    assert len(fingerprint_issue(issue)) == 16
