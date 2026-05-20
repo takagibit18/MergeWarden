@@ -1,5 +1,8 @@
 """Smoke tests for the CLI entry point."""
 
+import json
+from pathlib import Path
+
 from click.testing import CliRunner
 
 import cli
@@ -117,6 +120,49 @@ def test_review_command_passes_model_override(cli_runner: CliRunner, monkeypatch
     result = cli_runner.invoke(main, ["--model", "gpt-test", "review", "."])
     assert result.exit_code == 0
     assert "Run ID: run-review-model" in result.output
+
+
+def test_advisory_export_writes_payload(cli_runner: CliRunner, tmp_path: Path) -> None:
+    response_path = tmp_path / "response.json"
+    changed_lines_path = tmp_path / "changed.json"
+    output_path = tmp_path / "advisory.json"
+    response = ReviewResponse(
+        run_id="run-advisory",
+        report=ReviewReport(
+            summary="summary",
+            issues=[
+                ReviewIssue(
+                    severity=Severity.WARNING,
+                    location="src/app.py:10",
+                    evidence="+ risky_call()",
+                    suggestion="Guard the call.",
+                    confidence=0.9,
+                )
+            ],
+        ),
+        context=ContextState(),
+    )
+    response_path.write_text(response.model_dump_json(), encoding="utf-8")
+    changed_lines_path.write_text(json.dumps({"src/app.py": [10]}), encoding="utf-8")
+
+    result = cli_runner.invoke(
+        main,
+        [
+            "advisory-export",
+            "--response-json",
+            str(response_path),
+            "--changed-lines-json",
+            str(changed_lines_path),
+            "--output-json",
+            str(output_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["run_id"] == "run-advisory"
+    assert payload["inline_comments"][0]["path"] == "src/app.py"
+    assert payload["summary_only_issues"] == []
 
 
 def test_review_command_renders_triaged_sections(cli_runner: CliRunner, monkeypatch) -> None:

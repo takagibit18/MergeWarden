@@ -97,6 +97,15 @@ stable eval gate are in place. The current golden baseline is
 `hit_rate >= 0.6` target. Details are recorded in
 [docs/mvp_plus_eval_closure.md](docs/mvp_plus_eval_closure.md).
 
+Phase 2 readiness adds local diagnostics and advisory export commands without
+publishing GitHub comments:
+
+```bash
+python -m eval.run diagnose --input eval/outputs/20260518_151719_report.json
+python -m eval.run trend --inputs "eval/outputs/*_report.json"
+python cli.py advisory-export --response-json review_response.json --changed-lines-json changed_lines.json
+```
+
 ## 项目结构
 
 ```

@@ -127,6 +127,24 @@ Latest baseline report: `eval/outputs/20260518_151719_report.json`.
 
 Interpretation: this report is the current MVP+ numeric quality baseline. It clears the stable eval gate while both negative fixtures remain false-positive-free.
 
+### Phase 2 readiness diagnostics
+
+Eval now emits local diagnostics artifacts that can be consumed by future GitHub advisory workflows without re-reading raw JSONL logs by hand. A normal eval run writes the machine report plus two sidecar files next to it:
+
+- `<report_stem>_diagnostics.json`: per-fixture reasons such as `hit`, `miss_filtered_issue`, `budget_capped`, `submit_invalid`, or `fp_negative`.
+- `<report_stem>_run_summaries.json`: compact event-log summaries with finish reasons, budget state, submit validation errors, issue counts, model names, and token totals.
+
+Useful local commands:
+
+```bash
+python -m eval.run report --input eval/outputs/20260518_151719_report.json --diagnostics
+python -m eval.run diagnose --input eval/outputs/20260518_151719_report.json
+python -m eval.run summarize-log --input eval/outputs/event_logs/<run>.jsonl
+python -m eval.run trend "eval/outputs/*_report.json"
+```
+
+`trend` is intended for R10-R14 style comparisons. It reports the best run, current baseline, per-fixture hit history, false-positive history, and persistent positive-fixture misses such as `golden_pytest-dev_pytest_pr8513`.
+
 ### 2026-05-17 local golden eval status
 
 Latest diagnostic report: `eval/outputs/20260517_152809_report.json`.

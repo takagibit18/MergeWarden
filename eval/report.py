@@ -8,6 +8,7 @@ from pathlib import Path
 from rich.console import Console
 from rich.table import Table
 
+from eval.diagnostics import build_eval_diagnostics
 from eval.schemas import EvalReport
 
 
@@ -32,7 +33,12 @@ def save_report_json(
     return generated_path
 
 
-def render_report(report: EvalReport, console: Console | None = None) -> None:
+def render_report(
+    report: EvalReport,
+    console: Console | None = None,
+    *,
+    diagnostics: bool = False,
+) -> None:
     """Render summary and detail tables."""
     ui = console or Console()
 
@@ -88,4 +94,22 @@ def render_report(report: EvalReport, console: Console | None = None) -> None:
             item.error or "",
         )
     ui.print(detail)
+
+    if diagnostics:
+        diagnostic_report = build_eval_diagnostics(report)
+        diag = Table(title="Fixture Diagnostics")
+        diag.add_column("fixture_id")
+        diag.add_column("reasons")
+        diag.add_column("budget")
+        diag.add_column("submit_errors")
+        diag.add_column("note")
+        for item in diagnostic_report.fixtures:
+            diag.add_row(
+                item.fixture_id,
+                ", ".join(item.reasons),
+                item.budget_state,
+                "; ".join(item.run_summary.submit_validation_errors),
+                item.note,
+            )
+        ui.print(diag)
 

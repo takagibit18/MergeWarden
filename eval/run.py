@@ -8,11 +8,15 @@ from pathlib import Path
 
 import click
 
+from eval.artifacts import write_eval_artifacts
 from eval.crawler.fixture_generator import FixtureGenerator
+from eval.diagnostics import load_diagnostics_report
 from eval.metrics import build_eval_report, write_human_review_template
+from eval.run_summary import summarize_event_log
 from eval.report import render_report, save_report_json
 from eval.runner import load_fixtures, run_suite
 from eval.schemas import EvalReport, EvalResult
+from eval.trend import build_quality_trend, expand_report_inputs
 from src.config import get_settings
 
 
@@ -163,10 +167,47 @@ def eval_cmd(
 
 @main.command("report")
 @click.option("--input", "input_path", required=True, type=click.Path(exists=True))
-def report_cmd(input_path: str) -> None:
+@click.option(
+    "--diagnostics",
+    is_flag=True,
+    default=False,
+    help="Render per-fixture diagnostics derived from event logs.",
+)
+def report_cmd(input_path: str, diagnostics: bool) -> None:
     """Render report from existing JSON."""
     report = EvalReport.model_validate_json(Path(input_path).read_text(encoding="utf-8"))
-    render_report(report)
+    render_report(report, diagnostics=diagnostics)
+
+
+@main.command("diagnose")
+@click.option("--input", "input_path", required=True, type=click.Path(exists=True))
+def diagnose_cmd(input_path: str) -> None:
+    """Emit JSON diagnostics for an existing eval report."""
+    diagnostics = load_diagnostics_report(input_path)
+    click.echo(diagnostics.model_dump_json(indent=2))
+
+
+@main.command("summarize-log")
+@click.option("--input", "input_path", required=True, type=click.Path(exists=False))
+def summarize_log_cmd(input_path: str) -> None:
+    """Emit a compact JSON summary for one event log."""
+    summary = summarize_event_log(input_path)
+    click.echo(summary.model_dump_json(indent=2))
+
+
+@main.command("trend")
+@click.argument("inputs", nargs=-1, required=True)
+def trend_cmd(inputs: tuple[str, ...]) -> None:
+    """Emit JSON trend data across multiple eval reports.
+
+    INPUTS are report paths or glob patterns, for example
+    eval/outputs/*_report.json
+    """
+    paths = expand_report_inputs(inputs)
+    if not paths:
+        raise click.ClickException("No report files matched the provided inputs.")
+    trend = build_quality_trend(paths)
+    click.echo(trend.model_dump_json(indent=2))
 
 
 async def _crawl(
@@ -254,12 +295,17 @@ async def _evaluate(
         sampled_results=sampled_results,
     )
     report_path = save_report_json(report, output_path=output_json)
+    artifact_paths = write_eval_artifacts(report, report_path)
     review_sheet = write_human_review_template(
         report,
         output_path=Path("eval") / "outputs" / f"{suite}_human_review.md",
     )
     render_report(report)
     click.echo(f"Report saved to: {report_path.as_posix()}")
+    click.echo(f"Diagnostics saved to: {Path(artifact_paths.diagnostics_path).as_posix()}")
+    click.echo(
+        f"Run summaries saved to: {Path(artifact_paths.run_summaries_path).as_posix()}"
+    )
     click.echo(f"Human review sheet: {review_sheet.as_posix()}")
 
 
