@@ -80,7 +80,13 @@ class CheckpointJournal:
                     f"{line_number}: {stable}/{record.status}/attempt-{record.attempt}"
                 )
             exact.add(exact_key)
-            if record.status == "measured" and record.valid:
+            if record.status == "invalid":
+                # An invalidation event may supersede a measured result whose
+                # external artifact was lost or tampered with.  The journal is
+                # still append-only, but a later measured record may replace
+                # that invalidated result for the same stable key.
+                valid_measured.discard(stable)
+            elif record.status == "measured" and record.valid:
                 if stable in valid_measured:
                     raise RuntimeError(
                         f"Duplicate valid measured checkpoint at line {line_number}: {stable}"
@@ -104,14 +110,12 @@ class CheckpointJournal:
         return [record for record in self.records if record.identity() == identity]
 
     def completed(self, key: StableRunKey) -> CheckpointRecord | None:
-        return next(
-            (
-                record
-                for record in reversed(self.matching(key))
-                if record.status == "measured" and record.valid
-            ),
-            None,
-        )
+        for record in reversed(self.matching(key)):
+            if record.status == "invalid":
+                return None
+            if record.status == "measured" and record.valid:
+                return record
+        return None
 
     def latest_failure(self, key: StableRunKey) -> CheckpointRecord | None:
         return next(

@@ -164,6 +164,105 @@ def test_checkpoint_sanitizer_removes_prompt_code_keys_and_paths() -> None:
     assert "C:/private" not in serialized
 
 
+def test_result_artifact_round_trip_is_sanitized_and_content_bound(
+    tmp_path: Path,
+) -> None:
+    record = _run_record()
+    record.result.raw_output = {
+        "report": {
+            "summary": "A source-backed finding",
+            "issues": [
+                {
+                    "severity": "warning",
+                    "location": "src/module.py:4",
+                    "evidence": "secret source line",
+                    "suggestion": "private repair text",
+                    "finding_id": "finding-1",
+                }
+            ],
+        }
+    }
+
+    artifact_id, artifact_sha, artifact_ref = pilot._write_result_artifact(
+        record, tmp_path
+    )
+    checkpoint_record = record.model_copy(
+        update={
+            "result_artifact_id": artifact_id,
+            "result_artifact_sha256": artifact_sha,
+            "result_artifact_ref": artifact_ref,
+        }
+    )
+
+    restored = pilot._record_from_checkpoint(
+        checkpoint_record.model_dump(mode="json"),
+        artifact_root=tmp_path,
+        require_artifact=True,
+    )
+
+    restored_raw = restored.result.raw_output
+    assert restored_raw["schema_version"] == "sanitized-result-v1"
+    assert restored_raw["report"]["issue_count"] == 1
+    assert restored_raw["report"]["summary_present"] is True
+    assert "secret source line" not in str(restored_raw)
+    assert "private repair text" not in str(restored_raw)
+    assert restored.result.event_log_path is None
+
+
+def test_tampered_result_artifact_cannot_be_restored(tmp_path: Path) -> None:
+    record = _run_record()
+    artifact_id, artifact_sha, artifact_ref = pilot._write_result_artifact(
+        record, tmp_path
+    )
+    checkpoint_record = record.model_copy(
+        update={
+            "result_artifact_id": artifact_id,
+            "result_artifact_sha256": artifact_sha,
+            "result_artifact_ref": artifact_ref,
+        }
+    )
+    target = tmp_path / artifact_ref
+    target.write_text(target.read_text(encoding="utf-8") + "tampered\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="hash mismatch"):
+        pilot._record_from_checkpoint(
+            checkpoint_record.model_dump(mode="json"),
+            artifact_root=tmp_path,
+            require_artifact=True,
+        )
+
+
+def test_invalidation_allows_one_remeasured_checkpoint(tmp_path: Path) -> None:
+    journal = CheckpointJournal(tmp_path / "checkpoint.jsonl")
+    key = _key()
+    first = _run_record()
+    second = _run_record().model_copy(update={"run_id": "run-2"})
+    journal.append(
+        key=key,
+        status="measured",
+        valid=True,
+        run_record=first.model_dump(mode="json"),
+    )
+    journal.append(
+        key=key,
+        status="invalid",
+        valid=False,
+        run_record=first.model_dump(mode="json"),
+    )
+    journal.append(
+        key=key,
+        status="measured",
+        valid=True,
+        run_record=second.model_dump(mode="json"),
+    )
+
+    restored = CheckpointJournal(tmp_path / "checkpoint.jsonl")
+    completed = restored.completed(key)
+    assert completed is not None
+    assert completed.run_record is not None
+    assert completed.run_record["run_id"] == "run-2"
+
+
 def _pilot_harness(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

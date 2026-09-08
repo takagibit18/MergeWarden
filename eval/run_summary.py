@@ -83,6 +83,35 @@ def extract_review_process_metrics(
             metrics.pre_budget_submit_triggered = True
         if event_type == "finding_funnel_completed":
             metrics.finding_funnel = FindingFunnel.model_validate(payload)
+            for field_name in (
+                "logical_candidate_count",
+                "submitted_finding_count",
+                "submitted_attempt_count",
+                "provider_attempt_count",
+                "no_finding_run_count",
+                "non_risk_not_routed_count",
+                "pre_verifier_rejected_count",
+                "policy_passed_count",
+                "policy_rejected_count",
+                "risk_candidate_count",
+                "integrity_checked_count",
+                "integrity_verified_count",
+                "integrity_needs_repair_count",
+                "integrity_invalid_count",
+                "deterministic_rejected_count",
+                "repair_attempted_count",
+                "repair_succeeded_count",
+                "final_published_count",
+                "final_risk_finding_count",
+                "evidence_validated_count",
+            ):
+                if field_name in payload:
+                    setattr(metrics, field_name, _non_negative_int(payload[field_name]))
+            if "evidence_complete_count" in payload:
+                metrics.evidence_complete_count = _non_negative_int(
+                    payload["evidence_complete_count"]
+                )
+            metrics.finding_run_status = str(payload.get("run_status", "complete"))
         elif event_type == "finding_candidates_built":
             metrics.model_raw_issue_count = _non_negative_int(
                 payload.get("model_raw_issue_count")
@@ -108,6 +137,18 @@ def extract_review_process_metrics(
             )
             metrics.verifier_rejected_count = _non_negative_int(
                 payload.get("rejected_count")
+            )
+            metrics.integrity_checked_count = _non_negative_int(
+                payload.get("candidate_count", metrics.integrity_checked_count)
+            )
+            metrics.integrity_verified_count = _non_negative_int(
+                payload.get("verified_count", payload.get("accepted_count"))
+            )
+            metrics.integrity_needs_repair_count = _non_negative_int(
+                payload.get("needs_repair_count")
+            )
+            metrics.integrity_invalid_count = _non_negative_int(
+                payload.get("invalid_count")
             )
             metrics.deterministic_evidence_checked_count = _non_negative_int(
                 payload.get("deterministic_evidence_checked_count")
@@ -287,6 +328,13 @@ def extract_review_process_metrics(
             )
             if isinstance(payload.get("natural_completion"), bool):
                 metrics.natural_completion = payload["natural_completion"]
+            for status_name in (
+                "investigation_ready",
+                "submission_received",
+                "review_complete",
+            ):
+                if isinstance(payload.get(status_name), bool):
+                    setattr(metrics, status_name, payload[status_name])
             if isinstance(payload.get("iteration_guard_hit"), bool):
                 metrics.iteration_guard_hit = payload["iteration_guard_hit"]
             if isinstance(payload.get("pre_budget_submit_triggered"), bool):
@@ -304,6 +352,25 @@ def extract_review_process_metrics(
             metrics.draft_findings_created = _non_negative_int(
                 payload.get("draft_findings_created")
             )
+            metrics.draft_state_transition_count = _non_negative_int(
+                payload.get("draft_state_transition_count")
+            )
+            raw_draft_status_counts = payload.get("draft_status_counts")
+            if isinstance(raw_draft_status_counts, dict):
+                metrics.draft_status_counts = {
+                    str(status): _non_negative_int(count)
+                    for status, count in raw_draft_status_counts.items()
+                }
+            metrics.draft_stagnation_streak = _non_negative_int(
+                payload.get("draft_stagnation_streak")
+            )
+            raw_incomplete_reasons = payload.get("incomplete_reasons")
+            if isinstance(raw_incomplete_reasons, list):
+                metrics.incomplete_reasons = [
+                    str(reason)
+                    for reason in raw_incomplete_reasons
+                    if str(reason).strip()
+                ]
             metrics.length_recoveries_attempted = _non_negative_int(
                 payload.get("length_recoveries_attempted")
             )
@@ -312,6 +379,24 @@ def extract_review_process_metrics(
             )
             metrics.length_recoveries_failed = _non_negative_int(
                 payload.get("length_recoveries_failed")
+            )
+            metrics.repair_budget_total = _non_negative_int(
+                payload.get("repair_budget_total")
+            )
+            metrics.repair_budget_remaining = _non_negative_int(
+                payload.get("repair_budget_remaining")
+            )
+            metrics.repair_format_attempt_count = _non_negative_int(
+                payload.get("repair_format_attempt_count")
+            )
+            metrics.repair_contract_attempt_count = _non_negative_int(
+                payload.get("repair_contract_attempt_count")
+            )
+            metrics.repair_evidence_attempt_count = _non_negative_int(
+                payload.get("repair_evidence_attempt_count")
+            )
+            metrics.final_submit_attempt_count = _non_negative_int(
+                payload.get("final_submit_attempt_count")
             )
             metrics.grep_calls = _non_negative_int(payload.get("grep_calls"))
             metrics.read_file_calls = _non_negative_int(payload.get("read_file_calls"))
@@ -337,6 +422,70 @@ def extract_review_process_metrics(
                 payload.get("completion_tokens")
             )
             metrics.total_tokens = _non_negative_int(payload.get("total_tokens"))
+            for field_name in (
+                "logical_candidate_count",
+                "submitted_finding_count",
+                "submitted_attempt_count",
+                "provider_attempt_count",
+                "no_finding_run_count",
+                "non_risk_not_routed_count",
+                "pre_verifier_rejected_count",
+                "policy_passed_count",
+                "policy_rejected_count",
+                "risk_candidate_count",
+                "integrity_checked_count",
+                "integrity_verified_count",
+                "integrity_needs_repair_count",
+                "integrity_invalid_count",
+                "deterministic_rejected_count",
+                "repair_attempted_count",
+                "repair_succeeded_count",
+                "final_published_count",
+                "final_risk_finding_count",
+                "evidence_complete_count",
+                "evidence_validated_count",
+            ):
+                if field_name in payload:
+                    setattr(
+                        metrics,
+                        field_name,
+                        _non_negative_int(payload.get(field_name)),
+                    )
+            phase_end_funnel_updates = {
+                field_name: getattr(metrics, field_name)
+                for field_name in (
+                    "logical_candidate_count",
+                    "submitted_finding_count",
+                    "submitted_attempt_count",
+                    "provider_attempt_count",
+                    "no_finding_run_count",
+                    "non_risk_not_routed_count",
+                    "pre_verifier_rejected_count",
+                    "policy_passed_count",
+                    "policy_rejected_count",
+                    "risk_candidate_count",
+                    "integrity_checked_count",
+                    "integrity_verified_count",
+                    "integrity_needs_repair_count",
+                    "integrity_invalid_count",
+                    "deterministic_rejected_count",
+                    "repair_attempted_count",
+                    "repair_succeeded_count",
+                    "final_published_count",
+                    "final_risk_finding_count",
+                    "evidence_complete_count",
+                    "evidence_validated_count",
+                )
+                if field_name in payload
+            }
+            if phase_end_funnel_updates:
+                metrics.finding_funnel = metrics.finding_funnel.model_copy(
+                    update=phase_end_funnel_updates
+                )
+            if "finding_run_status" in payload:
+                metrics.finding_run_status = str(
+                    payload.get("finding_run_status") or metrics.finding_run_status
+                )
             for field_name in (
                 "provider_attempt_count",
                 "successful_prompt_tokens",

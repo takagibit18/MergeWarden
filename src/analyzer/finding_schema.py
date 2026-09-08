@@ -115,6 +115,20 @@ class EvidenceProvenance(BaseModel):
         default="",
         description="System-owned delivered-source artifact identity.",
     )
+    reference_id: str = Field(
+        default="",
+        description=(
+            "Model-selected evidence reference retained for unresolved or aliased "
+            "catalog lookups; it is not a trusted artifact identity."
+        ),
+    )
+    resolution_status: str = Field(
+        default="resolved",
+        description=(
+            "Evidence reference resolution state: resolved, unresolved, "
+            "ambiguous, or undelivered."
+        ),
+    )
     snapshot_id: str = Field(
         default="",
         description="System-owned repository snapshot identity.",

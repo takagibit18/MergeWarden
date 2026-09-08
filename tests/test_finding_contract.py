@@ -6,7 +6,11 @@ import asyncio
 from pathlib import Path
 from typing import cast
 
-from src.analyzer.finding_contract import canonical_contract_gaps
+from src.analyzer.finding_contract import (
+    ModelFindingInput,
+    canonical_contract_gaps,
+    normalize_model_finding_payload,
+)
 from src.analyzer.finding_schema import EvidenceProvenance
 from src.analyzer.inference_engine import InferenceEngine
 from src.analyzer.output_formatter import ReviewIssue, ReviewReport
@@ -193,3 +197,171 @@ def test_location_support_ref_survives_runtime_bound_evidence_identity() -> None
     }
     parsed = ReviewIssue.model_validate(full_issue)
     assert not canonical_contract_gaps(parsed, strict=True)
+
+
+def test_model_input_derives_one_location_and_binds_exact_catalog_references() -> None:
+    payload = {
+        "severity": "warning",
+        "finding_id": "F-model",
+        "primary_anchor": {"file": "src/app.py", "line": 2},
+        "evidence": "The changed return value reaches callers.",
+        "suggestion": "Preserve the established caller contract.",
+        "confidence": 0.95,
+        "observed_behavior": "The returned value changes.",
+        "causal_mechanism": "The producer now returns a different value.",
+        "violated_invariant": "Existing callers receive the established value.",
+        "repair_intent": {"action": "Restore the established return value."},
+        "trigger": "A caller invokes the changed branch.",
+        "impact": "The caller observes an incompatible value.",
+        "supports": [
+            {
+                "role": "cause",
+                "statement": "The changed return produces the new value.",
+                "evidence_refs": ["ev-cause"],
+            },
+            {
+                "role": "contract",
+                "statement": "The caller contract expects the old value.",
+                "evidence_refs": ["ev-contract"],
+            },
+            {
+                "role": "trigger",
+                "statement": "A caller invokes the changed branch.",
+                "evidence_refs": ["ev-contract"],
+            },
+            {
+                "role": "impact",
+                "statement": "The caller observes the incompatible value.",
+                "evidence_refs": ["ev-contract"],
+            },
+        ],
+    }
+    catalog = [
+        {
+            "artifact_id": "ev-cause",
+            "path": "src/app.py",
+            "start_line": 2,
+            "end_line": 2,
+            "source_type": "git_diff",
+            "snapshot_id": "snapshot-a",
+            "revision": "revision-a",
+        },
+        {
+            "artifact_id": "ev-contract",
+            "path": "src/caller.py",
+            "start_line": 8,
+            "end_line": 8,
+            "source_type": "read_file",
+            "snapshot_id": "snapshot-a",
+            "revision": "revision-a",
+        },
+    ]
+
+    model_input = ModelFindingInput.model_validate(payload)
+    normalized = normalize_model_finding_payload(
+        model_input.model_dump(mode="json"), evidence_catalog=catalog
+    )
+    issue = ReviewIssue.model_validate(normalized)
+
+    assert normalized["location"] == "src/app.py:2"
+    assert normalized["primary_anchor"] == {"file": "src/app.py", "line": 2, "end_line": None, "symbol_id": ""}
+    assert issue.cause_evidence[0].artifact_id == "ev-cause"
+    assert issue.cause_evidence[0].snapshot_id == "snapshot-a"
+    assert issue.contract_evidence[0].file == "src/caller.py"
+    assert not canonical_contract_gaps(issue, strict=True)
+
+
+def test_model_input_unknown_reference_is_not_replaced_by_nearest_catalog_span() -> None:
+    payload = {
+        "severity": "warning",
+        "primary_anchor": {"file": "src/app.py", "line": 2},
+        "evidence": "The changed return value reaches callers.",
+        "suggestion": "Preserve the established caller contract.",
+        "confidence": 0.95,
+        "supports": [
+            {
+                "role": "cause",
+                "statement": "The changed return produces the new value.",
+                "evidence_refs": ["missing-evidence-id"],
+            }
+        ],
+    }
+
+    normalized = normalize_model_finding_payload(
+        payload,
+        evidence_catalog=[
+            {
+                "artifact_id": "nearest-but-wrong",
+                "path": "src/app.py",
+                "start_line": 2,
+                "end_line": 2,
+                "source_type": "git_diff",
+            }
+        ],
+    )
+
+    evidence = normalized["cause_evidence"][0]
+    assert evidence["artifact_id"] == "missing-evidence-id"
+    assert evidence["reference_id"] == "missing-evidence-id"
+    assert evidence["resolution_status"] == "unresolved"
+    assert evidence.get("file", "") == ""
+    assert evidence.get("line") is None
+
+
+def test_model_input_cannot_supply_runtime_identity_or_bind_selected_evidence() -> None:
+    payload = {
+        "severity": "warning",
+        "primary_anchor": {"file": "src/app.py", "line": 2},
+        "evidence": "The changed return value reaches callers.",
+        "suggestion": "Preserve the established caller contract.",
+        "confidence": 0.95,
+        "candidate_id": "forged-candidate",
+        "snapshot_id": "forged-snapshot",
+        "supports": [
+            {
+                "role": "cause",
+                "statement": "The changed return produces the new value.",
+                "evidence_refs": ["selected-only"],
+            }
+        ],
+    }
+
+    normalized = normalize_model_finding_payload(
+        payload,
+        evidence_catalog=[
+            {
+                "artifact_id": "selected-only",
+                "path": "src/app.py",
+                "start_line": 2,
+                "end_line": 2,
+                "source_type": "read_file",
+                "lifecycle": "selected",
+            }
+        ],
+    )
+
+    assert "candidate_id" not in normalized
+    assert "snapshot_id" not in normalized
+    evidence = normalized["cause_evidence"][0]
+    assert evidence["artifact_id"] == "selected-only"
+    assert evidence.get("file", "") == ""
+    assert evidence.get("line") is None
+
+
+def test_model_submit_schema_excludes_program_owned_identity_fields() -> None:
+    from src.orchestrator.tool_schemas import build_model_submit_tool_schemas
+
+    submit = next(
+        item
+        for item in build_model_submit_tool_schemas()
+        if item["function"]["name"] == "submit_review"
+    )
+    issue_schema = submit["function"]["parameters"]["properties"]["issues"]["items"]
+    properties = issue_schema["properties"]
+
+    assert "primary_anchor" in properties
+    assert "location" not in properties
+    assert "candidate_id" not in properties
+    assert "snapshot_id" not in properties
+    assert "revision" not in properties
+    assert "context_hash" not in properties

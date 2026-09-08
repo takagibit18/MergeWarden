@@ -170,3 +170,35 @@ The platform queue uses an atomic SQLite claim with `lease_owner`, `lease_expire
 Warning/Critical review hypotheses now pass through two distinct gates: a per-finding evidence verifier before consolidation and a cluster-level consolidation verifier after conservative blocking and complete-link grouping. A change-centered relation graph and exact Candidate Context Manifest constrain what the Reviewer and verifier may cite. The graph answers which code to inspect; it never defines root-cause clusters.
 
 The local static graph uses qualified symbol identities, evidence-aware edges, field read/write relations and an optional resolver interface. A versioned SQLite index supports hash-based incremental rebuilds and safe corruption/schema fallback. See [v023_v025_root_cause_relation_graph.md](./v023_v025_root_cause_relation_graph.md) for schemas, provenance rules, migrations and diagrams.
+
+### Finding generation repair (2026-09-07)
+
+风险 finding 的生成链路现在把“模型提出了什么”“实际提交了什么”“验证后发布了什么”分开记录：
+
+```text
+model output
+  -> producer/schema normalization
+  -> canonical v2 contract gaps
+  -> policy routing (risk / non-risk)
+  -> exact request assembly
+  -> delivered evidence ledger (only complete wire bodies)
+  -> integrity binding (artifact + range + side + snapshot + revision)
+  -> bounded shared repair budget
+  -> final published findings
+```
+
+`FindingContract` 负责结构化 finding 的字段与角色完整性；`EvidenceLedger` 负责
+请求可见的 source identity。图索引、候选 manifest、模型自填的 evidence identity
+都不能单独成为 verifier 证据。`RequestAssembler` 对消息、历史、工具 schema 和
+provider 控制做一次统一序列化并执行完整 request cap；被 shorten 的 file/diff/tool
+body 不登记为完整 evidence。
+
+运行结束时 `finding_funnel_completed` 独立输出 logical candidate、submitted
+attempt、provider attempt、policy、risk、integrity、repair、evidence completeness
+和 final publish 计数。schema validation repair 与 integrity guard repair 共享
+报告级 `REVIEW_REPAIR_MAX_ATTEMPTS`，本地 canonical 转换不消耗额度。
+
+评测默认继续使用冻结的 `semantic-v3` 结果口径；`semantic-v4` 是显式 opt-in 的
+分层 matcher，分别报告 display location 与 root-cause roles，并只统计最终
+integrity-verified 风险 finding。Graph 失败时保留审计状态并回退到
+`agent_search`，不扩大上下文预算或改变 gold/threshold。

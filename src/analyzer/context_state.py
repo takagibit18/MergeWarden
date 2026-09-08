@@ -12,6 +12,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from src.analyzer.context_mode import ReviewContextMode
+from src.models.schemas import DraftFindingState
 
 
 class DecisionStep(BaseModel):
@@ -75,6 +76,13 @@ class ContextState(BaseModel):
         description=(
             "Exact source ranges delivered to the reviewer; index-only graph entries "
             "are intentionally excluded."
+        ),
+    )
+    draft_findings: list[DraftFindingState] = Field(
+        default_factory=list,
+        description=(
+            "Explicit investigation checkpoints for durable draft hypotheses. "
+            "A pending draft is not a final finding."
         ),
     )
     relation_graph_summary: dict[str, object] = Field(

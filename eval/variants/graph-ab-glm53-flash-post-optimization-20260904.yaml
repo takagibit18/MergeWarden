@@ -17,11 +17,19 @@ shared:
   final_submit_reserve_tokens: 24000
   final_submit_prompt_token_budget: 8000
   final_submit_feedback_token_budget: 2400
+  final_submit_request_token_budget: 8000
+  assembled_request_token_budget: 36000
+  review_repair_max_attempts: 1
   max_iterations: 3
   tool_budget: 96
   model_request_timeout_seconds: 300.0
   tool_timeout_seconds: 60.0
   run_timeout_seconds: 1200.0
+
+# semantic-v3 remains the historical post-optimization score.  The layered
+# semantic-v4 score is opt-in for the repaired funnel and must be reported
+# separately from this replication.
+matcher_version: semantic-v3
 
 variants:
   - id: A-agent-search

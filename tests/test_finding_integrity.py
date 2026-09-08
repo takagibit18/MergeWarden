@@ -229,6 +229,70 @@ def test_ordinary_changed_code_finding_passes(tmp_path: Path) -> None:
     assert result.passed_count == 1
 
 
+def test_candidate_identity_is_stable_across_mutable_finding_versions() -> None:
+    issue = ReviewIssue(
+        severity=Severity.WARNING,
+        location="pkg/service.py:2",
+        evidence="`current_value = new()` is a concrete changed line.",
+        suggestion="Preserve the established caller behavior.",
+        confidence=0.95,
+    )
+
+    first = build_candidates(ReviewReport(issues=[issue]), iteration=0)[0]
+    revised_issue = issue.model_copy(
+        update={
+            "severity": Severity.CRITICAL,
+            "evidence": "`current_value = new()` changes the returned value.",
+            "suggestion": "Restore the established caller behavior before release.",
+            "finding_id": "model-renamed-finding",
+        }
+    )
+    revised = build_candidates(
+        ReviewReport(issues=[revised_issue]), iteration=1
+    )[0]
+
+    assert revised.candidate_id == first.candidate_id
+    assert revised.logical_identity_hash == first.logical_identity_hash
+    assert revised.content_hash != first.content_hash
+
+
+def test_unresolved_reference_is_one_repairable_gap_without_identity_cascade(
+    tmp_path: Path,
+) -> None:
+    _write_service(tmp_path)
+    request = _request(tmp_path)
+    issue = _issue()
+    issue.cause_evidence = [
+        EvidenceProvenance(
+            artifact_id="model-invented-reference",
+            reference_id="model-invented-reference",
+            resolution_status="unresolved",
+            statement="The changed producer creates the incompatible value.",
+        )
+    ]
+    candidate = _candidate(issue, request)
+    from src.analyzer.evidence_ledger import ledger_from_sources
+
+    ledger = ledger_from_sources(
+        tool_evidence=_read_file_evidence(tmp_path),
+        diff_text=request.diff_text,
+    )
+
+    result = FindingIntegrityGuard(tmp_path).validate(
+        [candidate],
+        request,
+        tool_evidence=_read_file_evidence(tmp_path),
+        evidence_ledger=ledger,
+        context_mode="agent_search",
+    )
+
+    codes = {failure.code for failure in result.results[0].failures}
+    assert result.needs_repair_candidate_ids == frozenset({candidate.candidate_id})
+    assert "support_reference_unresolved" in codes
+    assert "location_invalid" not in codes
+    assert "evidence_identity_mismatch" not in codes
+
+
 def test_default_orchestrator_uses_integrity_guard_without_semantic_verifier(
     tmp_path: Path, monkeypatch
 ) -> None:

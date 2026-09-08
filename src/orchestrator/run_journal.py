@@ -15,15 +15,16 @@ from threading import Lock
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from src.models.schemas import DraftFinding, TokenUsage
+from src.models.schemas import DraftFinding, DraftFindingStatus, TokenUsage
 
 RUN_JOURNAL_SCHEMA_VERSION: Literal["1.0"] = "1.0"
 RunJournalEntryType = Literal[
     "model_response",
     "tool_result",
     "draft_finding",
+    "draft_finding_state",
     "length_recovery",
 ]
 LengthRecoveryStatus = Literal["required", "attempted", "succeeded", "failed"]
@@ -103,6 +104,25 @@ class LengthRecoveryJournalPayload(BaseModel):
     draft_finding_ids: list[str] = Field(default_factory=list)
     submit_response_id: str = ""
     reason: str = ""
+
+
+class DraftFindingStateJournalPayload(BaseModel):
+    """Explicit model-requested transition for a durable draft checkpoint."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    draft_id: str = Field(..., min_length=1)
+    status: DraftFindingStatus
+    reason: str = ""
+    missing_checks: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+    iteration: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def _terminal_states_need_reason(self) -> "DraftFindingStateJournalPayload":
+        if self.status in {"evidence_sufficient", "disproved", "incomplete"} and not self.reason.strip():
+            raise ValueError(f"status={self.status} requires a non-empty reason")
+        return self
 
 
 class PendingRunJournalEntry(BaseModel):
@@ -272,6 +292,7 @@ class RunJournal:
             ModelResponseJournalPayload
             | ToolResultJournalPayload
             | DraftFinding
+            | DraftFindingStateJournalPayload
             | LengthRecoveryJournalPayload
         )
         if entry_type == "model_response":
@@ -280,6 +301,8 @@ class RunJournal:
             model = ToolResultJournalPayload.model_validate(payload)
         elif entry_type == "draft_finding":
             model = DraftFinding.model_validate(payload)
+        elif entry_type == "draft_finding_state":
+            model = DraftFindingStateJournalPayload.model_validate(payload)
         else:
             model = LengthRecoveryJournalPayload.model_validate(payload)
         return model.model_dump(mode="json")

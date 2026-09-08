@@ -115,6 +115,23 @@
 | `suggestion` | `str` | 修复或行动建议 |
 | `confidence` | `float` | `0.0`–`1.0`，模型置信度 |
 
+### 4.2.1 Finding v2 canonical contract
+
+`ReviewIssue` 保留上述 v0 字段，但只要 payload 出现结构化字段，就必须按
+使用 v2 核心字段或显式 `schema_version="2.0"` 时进入 canonical contract；不能通过
+省略版本号或填写 `1.0` 让完整结构化载荷回退到旧路径。仅供 legacy policy 入口
+使用的 `cause_evidence` changed-line 锚点保持兼容。结构化风险 finding 必须同时包含：
+
+- `finding_id`、`primary_anchor`、可选 `related_locations`；`location` 必须与主锚点一致；
+- `observed_behavior`、`causal_mechanism`、`violated_invariant`、`trigger`、`impact`、`repair_intent`；
+- `cause_evidence`、`contract_evidence`、`trigger_evidence`、`impact_evidence` 与逐角色 `supports`；
+- 每个 evidence ref 必须指向同一 finding 的已交付 evidence ledger artifact，且 side、snapshot、revision、context hash 与 ledger 一致。
+
+`src/analyzer/finding_contract.py` 是 producer payload、`ReviewIssue`、
+`FindingDraft` 与 verifier 之间的唯一适配边界。严格 contract gap 与 evidence
+identity gap 都是拒绝/待修复原因；它们不能由置信度、同文件近邻或模型自填的
+provenance 字段绕过。
+
 Review findings are advisory by contract. Downstream GitHub integrations may
 publish them as comments, summaries, or soft checks, but hard merge blocking
 remains the responsibility of GitHub CI / branch protection unless a future
@@ -177,6 +194,9 @@ and automatic file-context caps bounded so large PRs prefer targeted tools such
 as `get_changed_context` / `find_symbol_context` over large preloaded prompts.
 | `MODEL_REQUEST_TIMEOUT_SECONDS` | 单次模型 provider 调用的硬超时 | 默认 `60`，对应 `Settings.model_request_timeout_seconds` |
 | `MODEL_MAX_RETRIES` | 单次逻辑模型调用的最大尝试次数 | 默认 `1`，对应 `Settings.model_max_retries` |
+| `FINAL_SUBMIT_REQUEST_TOKEN_BUDGET` | 完整 finalize/schema-repair provider request（消息、历史、工具 schema 与 provider 控制）的硬上限 | 默认 `8000`；由 RequestAssembler 在实际序列化 payload 上执行 |
+| `ASSEMBLED_REQUEST_TOKEN_BUDGET` | 非 finalize provider request 的完整序列化输入硬上限 | 默认 `36000`；与 final submit 使用同一 envelope 口径 |
+| `REVIEW_REPAIR_MAX_ATTEMPTS` | 单份报告共享的 schema validation repair + integrity guard repair 次数 | 默认 `1`；本地字段转换不计入，schema 与 guard 不能各自重置额度 |
 | `AGENT_RUN_TIMEOUT_SECONDS` | 单次编排运行的总墙钟截止线 | 默认 `170`，对应 `Settings.agent_run_timeout_seconds` |
 | `REVIEW_WORKFLOW_ENFORCEMENT` | Review required-step 门控模式 | `off` / `warn` / `enforce`；v0.2.0 默认 `enforce` |
 | `EVENT_LOG_DIR` | 事件 JSONL 日志目录 | 默认 `.mergewarden/logs`；相对路径时相对于 `repo_path` 解析，见编排层实现 |
@@ -217,6 +237,8 @@ as `get_changed_context` / `find_symbol_context` over large preloaded prompts.
 | Review Workflow | required/completed/missing step、reprompt count 和 enforcement mode 写入 `workflow_summary` |
 | Worker recovery | `review_runs` 保存 lease/heartbeat/attempt；`run_checkpoints` 保存步骤 attempt 和 artifact 路径 |
 | Agent run journal | `.mergewarden/runs/<run_id>/journal.jsonl` 保存 append-only、可恢复的 `model_response`、`tool_result`、`draft_finding` 与 `length_recovery` 事实；它与 EventLog 的 observability 职责严格分离 |
+| Evidence ledger | `ContextState.evidence_ledger` 只登记成功 provider request 中实际出现的完整 diff/file/tool/manifest body；每条记录保留 artifact、path/range、side、snapshot、revision、hash、source tool call 与 lifecycle |
+| Finding funnel | `finding_funnel_completed` 独立记录 logical/submitted/provider/policy/risk/integrity/repair/evidence/final counters；这些计数不可用单一“accepted”字段相加替代 |
 | `RunArtifactSummary` | Artifact-facing CLI/API summary for response JSON, publish result JSON, event log, and related paths |
 
 具体字段若在代码中以 `RunContext` 等模型出现，应在该类型旁或本文档交叉引用。
@@ -247,6 +269,12 @@ visible `content`，不保存 `reasoning_content` 或 CoT；进程内只允许�
 出现这一布尔遥测事实。
 
 避免仅在一侧仓库私密修改导致线上与本地行为分叉。
+
+每次 provider 请求必须先经过 `RequestAssembler`，按实际 wire payload 估算并执行
+输入上限；telemetry 中的 request hash/size 只能来自同一序列化结果。若请求被
+shorten 或丢弃消息，ledger 不得把规划阶段选中的 source 当成已交付证据。schema
+repair 与 finding integrity repair 共用报告级 `REVIEW_REPAIR_MAX_ATTEMPTS`；
+schema-valid 但 evidence identity 不完整的 finding 仍不能发布。
 
 ---
 
@@ -279,3 +307,4 @@ visible `content`，不保存 `reasoning_content` 或 CoT；进程内只允许�
 | 2026-05-16 | 恢复 MVP+ 真实 eval gate：`schema_validity_rate >= 1.0`、`hit_rate >= 0.6`、`false_positive_rate <= 0.5` |
 | 2026-05-18 | MVP+ eval closure baseline：`eval/outputs/20260518_151719_report.json` 达到 schema validity `1.0`、hit rate `0.75`、false positive rate `0.0`；详见 `docs/mvp_plus_eval_closure.md`。 |
 | 2026-07-11 | v0.2.0：增加 Finding 语义 verifier、required-step Review Workflow、worker lease/checkpoint/recovery、Eval 过程指标和 baseline comparison。 |
+| 2026-09-07 | finding 生成链路修复：统一 canonical v2 contract、实际发送 evidence ledger、完整 request envelope、报告级共享 repair cap、独立 finding funnel 与 opt-in semantic-v4 分层评测；保留 semantic-v3 历史口径。 |

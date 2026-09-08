@@ -17,7 +17,7 @@ from src.analyzer.evidence_ledger import ledger_from_sources
 from src.analyzer.event_log import EventType
 from src.analyzer.finding_contract import (
     issue_supports,
-    normalize_producer_issue_payload,
+    normalize_model_finding_payload,
 )
 from src.analyzer.diff_lines import ParsedDiffHunk, parse_unified_diff_hunks
 from src.analyzer.finding_schema import normalize_repo_path
@@ -49,6 +49,8 @@ from src.models.request_assembler import AssembledRequest, RequestAssembler
 from src.models.schemas import (
     DraftFinding,
     DraftFindingInput,
+    DraftFindingState,
+    DraftFindingUpdateInput,
     Message,
     ModelConfig,
     ModelResponse,
@@ -133,10 +135,13 @@ class InferenceEngine:
         skill_selection: SkillSelection | None = None,
         skill_telemetry: dict[str, Any] | None = None,
         repair_attempt_budget: int | None = None,
+        allow_exploration: bool = False,
     ) -> tuple[AnalysisPlan, TokenUsage]:
         file_contents = file_contents or {}
         settings = get_settings()
-        submit_only = force_submit or near_last_iteration or stage == "submit_only"
+        submit_only = force_submit or (
+            near_last_iteration and not allow_exploration
+        ) or stage == "submit_only"
         inferred_stage = (
             "validate"
             if any(
@@ -265,6 +270,8 @@ class InferenceEngine:
                     draft_findings or [],
                     validator_result=validator_result,
                     candidate_context_manifests=state.candidate_context_manifests,
+                    draft_states=state.draft_findings,
+                    evidence_ledger=state.evidence_ledger,
                     token_budget=final_feedback_budget,
                 )
             )
@@ -281,6 +288,22 @@ class InferenceEngine:
             )
             if folded is not None:
                 messages.append(folded)
+            repair_feedback = self._build_repair_feedback_message(validator_result)
+            if repair_feedback is not None:
+                messages.append(repair_feedback)
+            if isinstance(request, ReviewRequest) and (
+                draft_findings or state.draft_findings
+            ):
+                messages.append(
+                    self._build_draft_checkpoint_message(
+                        draft_findings or [], state.draft_findings
+                    )
+                )
+            evidence_catalog_message = self._build_evidence_catalog_message(
+                state.evidence_ledger
+            )
+            if evidence_catalog_message is not None:
+                messages.append(evidence_catalog_message)
         if defer_submit:
             messages.append(
                 Message(
@@ -336,7 +359,11 @@ class InferenceEngine:
             config = self._build_submit_config(request)
         else:
             config = self._model_client.default_config.model_copy(
-                update={"max_tokens": _EXPLORATION_MAX_TOKENS}
+                update={
+                    "max_tokens": int(
+                        getattr(settings, "exploration_max_output_tokens", _EXPLORATION_MAX_TOKENS)
+                    )
+                }
             )
         if request.model_name:
             if config is None:
@@ -399,6 +426,19 @@ class InferenceEngine:
             conversation_history_count,
             max(0, len(messages) - conversation_history_start),
         )
+        if submit_only:
+            context_validation = self._validate_final_submit_request_context(
+                assembled_request,
+                final_evidence_telemetry,
+                budget=request_budget,
+            )
+            context_telemetry["final_submit_context_validation"] = context_validation
+            if not context_validation["valid"]:
+                final_evidence_telemetry["context_insufficient"] = True
+                final_evidence_telemetry["context_insufficient_reason"] = str(
+                    context_validation["reason"]
+                )
+
         self._record_context_telemetry(
             context_telemetry=context_telemetry,
             messages=messages,
@@ -419,6 +459,38 @@ class InferenceEngine:
             assembled_request=assembled_request,
             assembled_request_budget=request_budget,
         )
+        if submit_only and final_evidence_telemetry.get("context_insufficient"):
+            reason = str(
+                final_evidence_telemetry.get(
+                    "context_insufficient_reason",
+                    "final_submit_context_insufficient",
+                )
+            )
+            if self._trace_event_writer is not None:
+                self._trace_event_writer(
+                    EventType.ERROR,
+                    "analyze",
+                    {
+                        "iteration": iteration,
+                        "reason": "final_submit_context_insufficient",
+                        "detail": reason,
+                        "required_catalog_ids": final_evidence_telemetry.get(
+                            "required_catalog_ids", []
+                        ),
+                        "included_catalog_ids": final_evidence_telemetry.get(
+                            "included_catalog_ids", []
+                        ),
+                    },
+                )
+            return (
+                AnalysisPlan(
+                    needs_tools=False,
+                    tool_calls=[],
+                    incomplete_reason="final_submit_context_insufficient",
+                    recovery_required=True,
+                ),
+                TokenUsage(),
+            )
         response = await self._chat_with_telemetry(
             messages=messages,
             config=config,
@@ -438,7 +510,10 @@ class InferenceEngine:
         response_id = self._persist_model_response(response, iteration)
         self._record_length_finish(response, iteration, config)
         plan, parse_meta = self._parse_tool_calls(
-            response.tool_calls, request, force_submit=submit_only
+            response.tool_calls,
+            request,
+            force_submit=submit_only,
+            evidence_catalog=state.evidence_ledger,
         )
         self._complete_invalid_draft_tool_calls(response.tool_calls, parse_meta)
         if plan.draft_finding_calls:
@@ -471,6 +546,7 @@ class InferenceEngine:
                     prior_history_count=conversation_history_count,
                     invalid_tool_calls=response.tool_calls,
                     stage=call_stage,
+                    evidence_catalog=state.evidence_ledger,
                 )
                 self._record_delivered_review_evidence(
                     state,
@@ -508,7 +584,11 @@ class InferenceEngine:
             fallback = self._fallback_extract_json(response.content)
             if fallback:
                 fallback_json_found = True
-                parsed = self._try_parse_submit_payload_from_json(fallback, request)
+                parsed = self._try_parse_submit_payload_from_json(
+                    fallback,
+                    request,
+                    evidence_catalog=state.evidence_ledger,
+                )
                 if parsed:
                     fallback_parse_valid = True
                     parsed.draft_finding_calls = plan.draft_finding_calls
@@ -727,6 +807,7 @@ class InferenceEngine:
         prior_history_count: int,
         invalid_tool_calls: list[dict[str, Any]],
         stage: str = "submit_only",
+        evidence_catalog: list[dict[str, Any]] | None = None,
     ) -> tuple[AnalysisPlan, ModelResponse, dict[str, Any], str, AssembledRequest]:
         for raw_call in invalid_tool_calls:
             call_id = str(raw_call.get("id", "")).strip()
@@ -785,7 +866,10 @@ class InferenceEngine:
         )
         response_id = self._persist_model_response(response, iteration)
         plan, parse_meta = self._parse_tool_calls(
-            response.tool_calls, request, force_submit=True
+            response.tool_calls,
+            request,
+            force_submit=True,
+            evidence_catalog=evidence_catalog,
         )
         parse_meta["tool_choice"] = self._trace_tool_choice(config)
         parse_meta["thinking_disabled"] = True
@@ -801,9 +885,12 @@ class InferenceEngine:
     def _build_submit_config(
         self, request: ReviewRequest | DebugRequest
     ) -> ModelConfig:
+        settings = get_settings()
         return self._model_client.default_config.model_copy(
             update={
-                "max_tokens": _SUBMIT_MAX_TOKENS,
+                "max_tokens": int(
+                    getattr(settings, "submit_max_output_tokens", _SUBMIT_MAX_TOKENS)
+                ),
             }
         )
 
@@ -838,9 +925,11 @@ class InferenceEngine:
         request: ReviewRequest | DebugRequest,
         *,
         force_submit: bool = False,
+        evidence_catalog: list[dict[str, Any]] | None = None,
     ) -> tuple[AnalysisPlan, dict[str, Any]]:
         tool_calls: list[dict[str, Any]] = []
         draft_finding_calls: list[DraftFindingInput] = []
+        draft_finding_updates: list[DraftFindingUpdateInput] = []
         draft_review: ReviewReport | None = None
         draft_debug: DebugResponse | None = None
         parse_meta: dict[str, Any] = {
@@ -850,7 +939,9 @@ class InferenceEngine:
             "submit_review_arguments_normalized": False,
             "submit_debug_validation_error": "",
             "draft_finding_validation_errors": [],
+            "draft_finding_update_validation_errors": [],
             "valid_draft_call_ids": [],
+            "valid_draft_update_call_ids": [],
             "location_warnings": [],
             "force_submit_discarded_count": 0,
         }
@@ -894,6 +985,29 @@ class InferenceEngine:
                     parse_meta["draft_finding_validation_errors"].append(str(exc))
                     logger.warning("Invalid draft finding ignored: %s", exc)
                 continue
+            if name == "update_draft_finding":
+                if force_submit or not isinstance(request, ReviewRequest):
+                    parse_meta["force_submit_discarded_count"] += int(force_submit)
+                    continue
+                if argument_error or not isinstance(payload, dict):
+                    error = argument_error or (
+                        "Invalid update_draft_finding arguments type: "
+                        f"{type(payload).__name__}"
+                    )
+                    parse_meta["draft_finding_update_validation_errors"].append(error)
+                    continue
+                try:
+                    draft_finding_updates.append(
+                        DraftFindingUpdateInput.model_validate(payload)
+                    )
+                    parse_meta["valid_draft_update_call_ids"].append(
+                        str(raw.get("id", "")).strip()
+                    )
+                except ValidationError as exc:
+                    parse_meta["draft_finding_update_validation_errors"].append(
+                        str(exc)
+                    )
+                continue
             if name == "submit_review":
                 parse_meta["submit_review_seen"] = True
                 if argument_error or not isinstance(payload, dict):
@@ -918,7 +1032,10 @@ class InferenceEngine:
                     )
                     parse_meta["submit_review_validation_error"] = payload_error
                     continue
-                normalized_payload, warnings = self._normalize_review_payload(payload)
+                normalized_payload, warnings = self._normalize_review_payload(
+                    payload,
+                    evidence_catalog=evidence_catalog,
+                )
                 parse_meta["location_warnings"] = warnings
                 try:
                     draft_review = self._normalize_structured_report(
@@ -966,6 +1083,7 @@ class InferenceEngine:
                     needs_tools=bool(tool_calls),
                     tool_calls=tool_calls,
                     draft_finding_calls=draft_finding_calls,
+                    draft_finding_updates=draft_finding_updates,
                     draft_review=draft_review,
                 ),
                 parse_meta,
@@ -987,14 +1105,18 @@ class InferenceEngine:
         """Satisfy rejected pseudo-calls so provider replay remains complete."""
 
         valid_ids = set(parse_meta.get("valid_draft_call_ids", []))
+        valid_update_ids = set(parse_meta.get("valid_draft_update_call_ids", []))
         for raw in raw_calls:
             function = raw.get("function") if isinstance(raw, dict) else None
             if not isinstance(function, dict):
                 continue
-            if function.get("name") != "record_draft_finding":
+            if function.get("name") not in {
+                "record_draft_finding",
+                "update_draft_finding",
+            }:
                 continue
             call_id = str(raw.get("id", "")).strip()
-            if not call_id or call_id in valid_ids:
+            if not call_id or call_id in valid_ids or call_id in valid_update_ids:
                 continue
             self._conversation.add_tool_result(
                 call_id,
@@ -1017,14 +1139,21 @@ class InferenceEngine:
             return json.loads(arguments, strict=False)
 
     def _try_parse_submit_payload_from_json(
-        self, payload: dict[str, Any], request: ReviewRequest | DebugRequest
+        self,
+        payload: dict[str, Any],
+        request: ReviewRequest | DebugRequest,
+        *,
+        evidence_catalog: list[dict[str, Any]] | None = None,
     ) -> AnalysisPlan | None:
         if isinstance(request, ReviewRequest):
             payload_error = self._validate_submit_review_payload(payload)
             if payload_error:
                 logger.warning("Invalid fallback review JSON ignored: %s", payload_error)
                 return None
-            normalized_payload, _ = self._normalize_review_payload(payload)
+            normalized_payload, _ = self._normalize_review_payload(
+                payload,
+                evidence_catalog=evidence_catalog,
+            )
             try:
                 report = self._normalize_structured_report(
                     ReviewReport.model_validate(normalized_payload)
@@ -1127,6 +1256,8 @@ class InferenceEngine:
     @staticmethod
     def _normalize_review_payload(
         payload: Any,
+        *,
+        evidence_catalog: list[dict[str, Any]] | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, str]]]:
         if not isinstance(payload, dict):
             return {}, []
@@ -1140,7 +1271,10 @@ class InferenceEngine:
             if not isinstance(issue, dict):
                 normalized_issues.append(issue)
                 continue
-            issue_dict = normalize_producer_issue_payload(issue)
+            issue_dict = normalize_model_finding_payload(
+                issue,
+                evidence_catalog=evidence_catalog,
+            )
             raw_severity = str(issue_dict.get("severity", "")).strip().lower()
             mapped = InferenceEngine._normalize_severity(raw_severity)
             if mapped:
@@ -1178,6 +1312,93 @@ class InferenceEngine:
             "nits": "style",
         }
         return mapping.get(value, value)
+
+    @staticmethod
+    def _build_draft_checkpoint_message(
+        drafts: list[DraftFinding],
+        states: list[DraftFindingState],
+    ) -> Message:
+        """Return the short next-round checkpoint for unresolved hypotheses."""
+
+        states_by_id = {item.draft_id: item for item in states}
+        lines = [
+            "draft_checkpoint:",
+            "Draft recordings are state checkpoints, never completion. Review each "
+            "hypothesis and choose one targeted next action; do not repeat a read "
+            "unless it can answer a stated missing check.",
+        ]
+        for draft in drafts:
+            checkpoint = states_by_id.get(
+                draft.id,
+                DraftFindingState(draft_id=draft.id),
+            )
+            lines.append(
+                f"- {draft.id} status={checkpoint.status} "
+                f"hypothesis={draft.claim} at {draft.file}"
+                + (f":{draft.line}" if draft.line is not None else "")
+            )
+            if checkpoint.reason:
+                lines.append(f"  reason: {checkpoint.reason}")
+            if checkpoint.missing_checks:
+                lines.append(
+                    "  missing_checks: " + "; ".join(checkpoint.missing_checks)
+                )
+            elif checkpoint.status == "pending":
+                lines.append(
+                    "  missing_checks: inspect the cited implementation and its "
+                    "relevant caller or contract, then confirm or disprove the claim"
+                )
+            if checkpoint.evidence_refs:
+                lines.append(
+                    "  selected_evidence_refs: "
+                    + ", ".join(checkpoint.evidence_refs)
+                )
+        return Message(role="user", content="\n".join(lines))
+
+    @staticmethod
+    def _build_evidence_catalog_message(
+        evidence_ledger: list[dict[str, Any]],
+    ) -> Message | None:
+        """Expose exact delivered evidence ids without exposing unobserved spans."""
+
+        records = [
+            item
+            for item in evidence_ledger
+            if isinstance(item, dict)
+            and str(item.get("lifecycle", "delivered")).strip() == "delivered"
+            and not bool(item.get("truncated", False))
+        ]
+        if not records:
+            return None
+        lines = [
+            "delivered_evidence_catalog:",
+            "Select supports.evidence_refs only from these exact ids. Unknown, "
+            "stale, or out-of-scope ids will be rejected; do not guess a nearest span.",
+        ]
+        # Do not hide a relevant delivered span behind an arbitrary first-40
+        # cutoff.  Final-submit context performs relevance ranking and atomic
+        # budget accounting; exploration still exposes the complete catalog so
+        # the model can select an exact id without nearest-span guessing.
+        for record in records:
+            artifact_id = str(record.get("artifact_id", "")).strip()
+            path = str(record.get("path", record.get("file", ""))).strip()
+            start = record.get("start_line", record.get("line", ""))
+            end = record.get("end_line", start)
+            source = str(
+                record.get("source_type", record.get("retrieval_source", ""))
+            ).strip()
+            snapshot = str(record.get("snapshot_id", "")).strip()
+            revision = str(record.get("revision", "")).strip()
+            if not artifact_id or not path:
+                continue
+            range_text = f"{path}:{start}"
+            if end not in (None, "", start):
+                range_text += f"-{end}"
+            lines.append(
+                f"- id={artifact_id} location={range_text} source={source} "
+                f"snapshot={snapshot} revision={revision}"
+            )
+        return Message(role="user", content="\n".join(lines))
 
     @classmethod
     def _build_tool_feedback_messages(
@@ -1268,7 +1489,7 @@ class InferenceEngine:
         return compacted
 
     @staticmethod
-    def _empty_final_evidence_telemetry(token_budget: int) -> dict[str, int]:
+    def _empty_final_evidence_telemetry(token_budget: int) -> dict[str, Any]:
         return {
             "token_budget": max(0, token_budget),
             "available_draft_finding_count": 0,
@@ -1279,6 +1500,20 @@ class InferenceEngine:
             "included_concern_count": 0,
             "validator_result_included": 0,
             "manifest_span_count": 0,
+            "available_catalog_count": 0,
+            "exposed_catalog_count": 0,
+            "historical_ledger_count": 0,
+            "included_catalog_count": 0,
+            "required_catalog_count": 0,
+            "required_catalog_missing_count": 0,
+            "required_catalog_ids": [],
+            "included_catalog_ids": [],
+            "omitted_catalog_ids": [],
+            "catalog_token_count": 0,
+            "graph_token_count": 0,
+            "source_evidence_token_count": 0,
+            "context_insufficient": False,
+            "context_insufficient_reason": "",
             "included_count": 0,
             "deduplicated_count": 0,
             "truncated_count": 0,
@@ -1294,9 +1529,11 @@ class InferenceEngine:
         *,
         validator_result: dict[str, Any] | None = None,
         candidate_context_manifests: list[dict[str, Any]] | None = None,
+        draft_states: list[DraftFindingState] | None = None,
+        evidence_ledger: list[dict[str, Any]] | None = None,
         token_budget: int,
-    ) -> tuple[Message | None, dict[str, int]]:
-        """Build a bounded, deduplicated evidence handoff for submit-only calls."""
+    ) -> tuple[Message | None, dict[str, Any]]:
+        """Build a bounded, atomic, citation-first submit-only evidence handoff."""
 
         telemetry = cls._empty_final_evidence_telemetry(token_budget)
         candidates: list[tuple[str, str]] = []
@@ -1304,6 +1541,14 @@ class InferenceEngine:
 
         for draft in draft_findings:
             telemetry["available_draft_finding_count"] += 1
+            checkpoint = next(
+                (
+                    item
+                    for item in (draft_states or [])
+                    if item.draft_id == draft.id
+                ),
+                DraftFindingState(draft_id=draft.id),
+            )
             location = draft.file
             if draft.line is not None:
                 location += f":{draft.line}"
@@ -1312,7 +1557,19 @@ class InferenceEngine:
             candidates.append(
                 (
                     "draft",
-                    f"- {draft.id}: {location}\n  claim: {draft.claim}",
+                    f"- {draft.id}: {location}\n  status: {checkpoint.status}\n"
+                    f"  claim: {draft.claim}"
+                    + (
+                        f"\n  reason: {checkpoint.reason}"
+                        if checkpoint.reason
+                        else ""
+                    )
+                    + (
+                        "\n  missing_checks: "
+                        + "; ".join(checkpoint.missing_checks)
+                        if checkpoint.missing_checks
+                        else ""
+                    ),
                 )
             )
 
@@ -1393,8 +1650,164 @@ class InferenceEngine:
                 )
             )
 
+        delivered_catalog = [
+            record
+            for record in (evidence_ledger or [])
+            if isinstance(record, dict)
+            and str(record.get("lifecycle", "delivered")).strip() == "delivered"
+            and not bool(record.get("truncated", False))
+        ]
+        telemetry["historical_ledger_count"] = len(evidence_ledger or [])
+
+        # The model may cite only these delivered records. Prefer records tied
+        # to a draft, selected checkpoint reference, or an integrity gap. The
+        # old first-40 slice made a relevant record disappear behind unrelated
+        # history and did not expose the failure to the caller.
+        draft_paths = {
+            normalize_repo_path(draft.file) for draft in draft_findings if draft.file
+        }
+        selected_refs = {
+            str(reference).strip()
+            for state in (draft_states or [])
+            for reference in state.evidence_refs
+            if str(reference).strip()
+        }
+        gap_paths: set[str] = set()
+        gap_refs: set[str] = set()
+
+        def collect_gap_values(value: Any) -> None:
+            if isinstance(value, dict):
+                reference = str(
+                    value.get("reference_id") or value.get("artifact_id") or ""
+                ).strip()
+                if reference:
+                    gap_refs.add(reference)
+                location = str(value.get("location", "")).strip()
+                if location:
+                    gap_paths.add(normalize_location(location).path or "")
+                raw_file = str(value.get("file", "")).strip()
+                if raw_file:
+                    gap_paths.add(normalize_repo_path(raw_file))
+                for item in value.values():
+                    collect_gap_values(item)
+            elif isinstance(value, list):
+                for item in value:
+                    collect_gap_values(item)
+
+        collect_gap_values(validator_result or {})
+
+        catalog_candidates: list[tuple[int, bool, dict[str, Any], str]] = []
+        for record in delivered_catalog:
+            artifact_id = str(record.get("artifact_id", "")).strip()
+            path = str(record.get("path", record.get("file", ""))).strip()
+            start = record.get("start_line", record.get("line", ""))
+            end = record.get("end_line", start)
+            if not artifact_id or not path:
+                continue
+            aliases = {
+                str(item).strip()
+                for item in record.get("aliases", [])
+                if str(item).strip()
+            }
+            ids = {artifact_id, *aliases}
+            normalized_path = normalize_repo_path(path)
+            exact_ref = bool(ids & (selected_refs | gap_refs))
+            path_ref = normalized_path in draft_paths or normalized_path in gap_paths
+            relevant = exact_ref or path_ref
+            # Lower score is higher priority; all relevant records are required
+            # citation options, while unrelated records are optional context.
+            score = 0 if exact_ref else 1 if path_ref else 2
+            catalog_candidates.append((score, relevant, record, artifact_id))
+
+        catalog_candidates.sort(
+            key=lambda item: (item[0], item[2].get("source_type", ""), item[3])
+        )
+        telemetry["available_catalog_count"] = len(catalog_candidates)
+        required_catalog_ids: list[str] = []
+        for score, relevant, record, artifact_id in catalog_candidates:
+            if relevant:
+                required_catalog_ids.append(artifact_id)
+            if score < 2:
+                path = str(record.get("path", record.get("file", ""))).strip()
+                start = record.get("start_line", record.get("line", ""))
+                end = record.get("end_line", start)
+                location = f"{path}:{start}"
+                if end not in (None, "", start):
+                    location += f"-{end}"
+                alias_labels = [
+                    str(item).strip()
+                    for item in record.get("aliases", [])
+                    if str(item).strip() and str(item).strip() != artifact_id
+                ]
+                body = str(record.get("content", "") or "").replace("\n", "\\n")
+                if len(body) > 720:
+                    body = body[:700].rstrip() + "...[body preview]"
+                candidates.append(
+                    (
+                        "catalog_required",
+                        f"- evidence_catalog id={artifact_id}"
+                        + (f" aliases={','.join(alias_labels)}" if alias_labels else "")
+                        + f" location={location} "
+                        f"source={record.get('source_type', '')} "
+                        f"snapshot={record.get('snapshot_id', '')} "
+                        f"revision={record.get('revision', '')}"
+                        + (f" content={body}" if body else ""),
+                    )
+                )
+        telemetry["required_catalog_ids"] = required_catalog_ids
+        telemetry["required_catalog_count"] = len(required_catalog_ids)
+
+        # Optional catalog entries are useful when there is no draft path to
+        # anchor on, but they must never displace a required option.
+        if not required_catalog_ids:
+            for _, _, record, artifact_id in catalog_candidates:
+                path = str(record.get("path", record.get("file", ""))).strip()
+                start = record.get("start_line", record.get("line", ""))
+                end = record.get("end_line", start)
+                location = f"{path}:{start}"
+                if end not in (None, "", start):
+                    location += f"-{end}"
+                candidates.append(
+                    (
+                        "catalog",
+                        f"- evidence_catalog id={artifact_id} location={location} "
+                        f"source={record.get('source_type', '')} "
+                        f"snapshot={record.get('snapshot_id', '')} "
+                        f"revision={record.get('revision', '')}",
+                    )
+                )
+
+        # Citation choices are hard handoff dependencies. Put them ahead of
+        # ordinary draft/graph/tool summaries so a bounded request cannot
+        # spend its entire budget on explanatory context and force the model
+        # to invent an evidence reference.
+        priority = {
+            "catalog_required": 0,
+            "draft": 1,
+            "validator": 2,
+            "manifest": 3,
+            "tool": 4,
+            "catalog": 5,
+        }
+        candidates.sort(key=lambda item: priority.get(item[0], 99))
+        telemetry["exposed_catalog_count"] = sum(
+            kind in {"catalog", "catalog_required"} for kind, _ in candidates
+        )
+
         if token_budget <= 0 or not candidates:
             telemetry["truncated_count"] = len(candidates)
+            if required_catalog_ids:
+                telemetry["required_catalog_missing_count"] = len(
+                    required_catalog_ids
+                )
+                telemetry["omitted_catalog_ids"] = [
+                    {"id": item, "reason": "final_submit_feedback_budget_zero"}
+                    for item in required_catalog_ids
+                ]
+                telemetry["context_insufficient"] = True
+                telemetry["context_insufficient_reason"] = (
+                    "required_delivered_catalog_entries_do_not_fit"
+                )
             return None, telemetry
 
         builder = ContextBuilder()
@@ -1409,23 +1822,47 @@ class InferenceEngine:
             lines.append("Known draft findings:")
         if builder.estimate_tokens("\n".join(lines)) > token_budget:
             telemetry["truncated_count"] = len(candidates)
+            if required_catalog_ids:
+                telemetry["required_catalog_missing_count"] = len(
+                    required_catalog_ids
+                )
+                telemetry["omitted_catalog_ids"] = [
+                    {"id": item, "reason": "summary_header_does_not_fit"}
+                    for item in required_catalog_ids
+                ]
+                telemetry["context_insufficient"] = True
+                telemetry["context_insufficient_reason"] = (
+                    "required_delivered_catalog_entries_do_not_fit"
+                )
             return None, telemetry
 
         full_included = 0
+        omitted = 0
         for kind, candidate in candidates:
             proposed = "\n".join([*lines, candidate])
-            shortened = False
             if builder.estimate_tokens(proposed) <= token_budget:
                 lines.append(candidate)
                 full_included += 1
             else:
-                current_tokens = builder.estimate_tokens("\n".join(lines))
-                remaining = max(0, token_budget - current_tokens)
-                fitted = cls._truncate_text_to_tokens(candidate, remaining, builder)
-                if not fitted:
-                    break
-                lines.append(fitted)
-                shortened = True
+                # Entries are atomic: never cut an id/location/body line in
+                # half. A required catalog item becoming unavailable is an
+                # explicit handoff failure, not a successful partial submit.
+                omitted += 1
+                if kind == "catalog_required":
+                    telemetry["required_catalog_missing_count"] += 1
+                if kind in {"catalog", "catalog_required"}:
+                    omitted_id = candidate.split(" id=", 1)[-1].split(" ", 1)[0]
+                    telemetry["omitted_catalog_ids"].append(
+                        {
+                            "id": omitted_id,
+                            "reason": (
+                                "required_entry_does_not_fit"
+                                if kind == "catalog_required"
+                                else "optional_entry_does_not_fit"
+                            ),
+                        }
+                    )
+                continue
             telemetry["included_count"] += 1
             if kind == "draft":
                 telemetry["included_draft_finding_count"] += 1
@@ -1435,15 +1872,32 @@ class InferenceEngine:
                 telemetry["validator_result_included"] += 1
             elif kind == "manifest":
                 telemetry["manifest_span_count"] += 1
-            else:
-                telemetry["included_concern_count"] += 1
-            if shortened:
-                break
-
-        telemetry["truncated_count"] = len(candidates) - full_included
+            elif kind in {"catalog", "catalog_required"}:
+                # Catalog entries are identity hints; the full tool-result
+                # counters remain reserved for observed tool payloads.
+                telemetry["included_catalog_count"] += 1
+                artifact_id = candidate.split(" id=", 1)[-1].split(" ", 1)[0]
+                telemetry["included_catalog_ids"].append(artifact_id)
+            entry_tokens = builder.estimate_tokens(candidate)
+            if kind in {"catalog", "catalog_required"}:
+                telemetry["catalog_token_count"] += entry_tokens
+            elif kind == "manifest":
+                telemetry["graph_token_count"] += entry_tokens
+            elif kind == "tool":
+                telemetry["source_evidence_token_count"] += entry_tokens
+        telemetry["truncated_count"] = max(omitted, len(candidates) - full_included)
+        missing_required = set(required_catalog_ids) - set(
+            telemetry["included_catalog_ids"]
+        )
+        if missing_required:
+            telemetry["required_catalog_missing_count"] = len(missing_required)
+            telemetry["context_insufficient"] = True
+            telemetry["context_insufficient_reason"] = (
+                "required_delivered_catalog_entries_do_not_fit"
+            )
         content = "\n".join(lines)
         telemetry["estimated_tokens"] = builder.estimate_tokens(content)
-        return Message(role="user", content=content), telemetry
+        return Message(role="user", content=content, preserve_on_trim=True), telemetry
 
     @staticmethod
     def _compact_validator_result(result: dict[str, Any]) -> dict[str, Any]:
@@ -1457,6 +1911,7 @@ class InferenceEngine:
             "submit_allowed",
             "effective_issue_count",
             "unresolved_evidence_gaps",
+            "rejected_candidates",
             "policy_warnings",
             "repair_instruction",
         ):
@@ -1480,6 +1935,41 @@ class InferenceEngine:
                 if isinstance(item, dict)
             ]
         return compact
+
+    @classmethod
+    def _build_repair_feedback_message(
+        cls,
+        result: dict[str, Any] | None,
+    ) -> Message | None:
+        """Return bounded candidate repair feedback for exploration turns."""
+
+        if not isinstance(result, dict):
+            return None
+        compact = cls._compact_validator_result(result)
+        actionable = bool(compact.get("unresolved_evidence_gaps")) or bool(
+            compact.get("rejected_candidates")
+        )
+        if not actionable and result.get("validator_passed") is True:
+            return None
+        if not any(
+            key in compact
+            for key in (
+                "unresolved_evidence_gaps",
+                "rejected_candidates",
+                "issue_results",
+            )
+        ):
+            return None
+        return Message(
+            role="user",
+            content=(
+                "candidate_repair_feedback (this is not completion): "
+                "address the listed candidate-level gaps, then submit again. "
+                "For source gaps, use an exact targeted exploration tool before "
+                "citing the evidence. Do not guess or silently omit a candidate.\n"
+                + cls._json_preview(compact, 3200)
+            ),
+        )
 
     @staticmethod
     def _manifest_evidence_for_drafts(
@@ -1856,6 +2346,14 @@ class InferenceEngine:
                 "draft_finding_validation_errors": parse_meta.get(
                     "draft_finding_validation_errors", []
                 ),
+                "draft_finding_update_count": len(plan.draft_finding_updates),
+                "draft_finding_update_validation_errors": parse_meta.get(
+                    "draft_finding_update_validation_errors", []
+                ),
+                "valid_draft_call_ids": parse_meta.get("valid_draft_call_ids", []),
+                "valid_draft_update_call_ids": parse_meta.get(
+                    "valid_draft_update_call_ids", []
+                ),
                 "submit_review_seen": bool(parse_meta.get("submit_review_seen")),
                 "submit_debug_seen": bool(parse_meta.get("submit_debug_seen")),
                 "submit_review_validation_error": self._trace_recorder.build_text_preview(
@@ -1907,7 +2405,7 @@ class InferenceEngine:
         prompt_input_token_budget: int,
         base_context_token_budget: int,
         final_submit_feedback_token_budget: int,
-        final_evidence_telemetry: dict[str, int],
+        final_evidence_telemetry: dict[str, Any],
         force_submit: bool,
         stage: str = "explore",
         relation_graph_summary: dict[str, Any] | None = None,
@@ -2041,6 +2539,12 @@ class InferenceEngine:
                 "assembled_request_chars": assembled_request_chars,
                 "component_records": component_records,
                 "max_output_tokens": config.max_tokens,
+                "effective_stage_output_token_budget": config.max_tokens,
+                "effective_stage_output_token_budgets": {
+                    "explore": get_settings().exploration_max_output_tokens,
+                    "validate": get_settings().exploration_max_output_tokens,
+                    "submit_only": get_settings().submit_max_output_tokens,
+                },
                 "thinking": policy.thinking,
                 "stage": stage,
                 "forced_tool": policy.forced_tool or "none",
@@ -2051,6 +2555,44 @@ class InferenceEngine:
                 **context_telemetry,
             },
         )
+
+    @staticmethod
+    def _validate_final_submit_request_context(
+        assembled_request: AssembledRequest,
+        telemetry: dict[str, Any],
+        *,
+        budget: int,
+    ) -> dict[str, Any]:
+        """Validate the exact serialized request, not the pre-fit message list."""
+
+        serialized = assembled_request.serialized_payload or ""
+        required = [
+            str(item).strip()
+            for item in telemetry.get("required_catalog_ids", [])
+            if str(item).strip()
+        ]
+        missing = [item for item in required if f"id={item}" not in serialized]
+        if missing:
+            return {
+                "valid": False,
+                "reason": "required_delivered_catalog_entries_missing_from_serialized_request",
+                "missing_catalog_ids": missing,
+                "serialized_request_within_budget": assembled_request.estimated_tokens
+                <= max(1, budget),
+            }
+        if assembled_request.estimated_tokens > max(1, budget):
+            return {
+                "valid": False,
+                "reason": "serialized_submit_request_over_budget",
+                "missing_catalog_ids": [],
+                "serialized_request_within_budget": False,
+            }
+        return {
+            "valid": True,
+            "reason": "",
+            "missing_catalog_ids": [],
+            "serialized_request_within_budget": True,
+        }
 
     @classmethod
     def _record_delivered_review_evidence(

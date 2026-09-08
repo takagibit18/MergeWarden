@@ -54,6 +54,13 @@ class ReviewIssue(BaseModel):
         default="",
         description="Stable runtime candidate identifier for this finding",
     )
+    target_candidate_id: str = Field(
+        default="",
+        description=(
+            "Repair-only selector for an existing runtime candidate. The model may "
+            "not use it to create or rename a candidate."
+        ),
+    )
     schema_version: str = Field(
         default="1.0",
         description="1.0 for legacy issues; 2.0 for structured hypotheses.",

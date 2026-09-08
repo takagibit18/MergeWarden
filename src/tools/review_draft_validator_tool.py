@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field
 
 from src.analyzer.finding_contract import (
     canonical_contract_gaps,
+    ModelFindingInput,
+    normalize_model_finding_payload,
     normalize_producer_issue_payload,
 )
 from src.analyzer.finding_schema import (
@@ -44,7 +46,7 @@ class ReviewDraftIssueInput(BaseModel):
     """Candidate review issue submitted by the model for policy feedback."""
 
     severity: Severity
-    location: str
+    location: str = ""
     evidence: str
     suggestion: str
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
@@ -53,6 +55,13 @@ class ReviewDraftIssueInput(BaseModel):
         description="Use 2.0 for a structured finding hypothesis; omit for legacy policy-only validation.",
     )
     finding_id: str = ""
+    target_candidate_id: str = Field(
+        default="",
+        description=(
+            "Repair-only exact runtime candidate_id from candidate_repair_feedback; "
+            "never use finding_id, text, or position as a repair selector."
+        ),
+    )
     primary_anchor: SourceAnchor | None = None
     related_locations: list[RelatedLocation] = Field(default_factory=list)
     observed_behavior: str = ""
@@ -102,6 +111,16 @@ class ValidateReviewDraftTool(BaseTool):
 
     def spec(self) -> ToolSpec:
         """Return the LLM-facing tool specification."""
+        # Keep this policy-only tool on the same model-facing contract as
+        # submit_review.  Pydantic emits nested ``$ref`` definitions here;
+        # inline them before handing the schema to a provider so the validator
+        # does not accidentally expose a different, partially legacy shape.
+        from src.orchestrator.tool_schemas import _inline_json_schema_refs
+
+        model_issue_schema = _inline_json_schema_refs(
+            ModelFindingInput.model_json_schema()
+        )
+        model_issue_schema["additionalProperties"] = False
         return ToolSpec(
             name="validate_review_draft",
             description=(
@@ -119,7 +138,22 @@ class ValidateReviewDraftTool(BaseTool):
                 "it does not judge whether your analysis is semantically correct and it "
                 "does not replace submit_review."
             ),
-            parameters=ValidateReviewDraftInput.model_json_schema(),
+            parameters={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "summary": {"type": "string"},
+                    "issues": {
+                        "type": "array",
+                        "items": model_issue_schema,
+                    },
+                    "draft_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                },
+                "required": ["issues"],
+            },
             safety=ToolSafety.READONLY,
         )
 
@@ -175,9 +209,10 @@ class ValidateReviewDraftTool(BaseTool):
     def _validate_issue(
         self, index: int, input_issue: ReviewDraftIssueInput
     ) -> dict[str, Any]:
-        issue_payload = normalize_producer_issue_payload(
+        issue_payload = normalize_model_finding_payload(
             input_issue.model_dump(exclude_unset=True)
         )
+        issue_payload = normalize_producer_issue_payload(issue_payload)
         issue_payload.setdefault("schema_version", "1.0")
         issue = ReviewIssue(
             **issue_payload,
@@ -197,7 +232,7 @@ class ValidateReviewDraftTool(BaseTool):
                 evidence.line,
                 evidence.end_line,
             )
-            for evidence in input_issue.cause_evidence
+            for evidence in issue.cause_evidence
         )
         causality_required = issue.severity in {
             Severity.CRITICAL,

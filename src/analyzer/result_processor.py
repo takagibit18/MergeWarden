@@ -27,7 +27,9 @@ class ResultProcessor:
         tool_results: list[ToolResult],
         state: ContextState,
     ) -> tuple[ReviewResponse, bool]:
-        blocking_error = any((not result.ok) for result in tool_results)
+        blocking_error = any(
+            (not result.ok) and not result.recoverable for result in tool_results
+        )
         report = plan.draft_review or ReviewReport(
             summary="Review pipeline completed with placeholder summary."
         )
@@ -50,7 +52,9 @@ class ResultProcessor:
         tool_results: list[ToolResult],
         state: ContextState,
     ) -> tuple[DebugResponse, bool]:
-        blocking_error = any((not result.ok) for result in tool_results)
+        blocking_error = any(
+            (not result.ok) and not result.recoverable for result in tool_results
+        )
         response = plan.draft_debug or DebugResponse(
             run_id="",
             summary="Debug pipeline completed with placeholder summary.",

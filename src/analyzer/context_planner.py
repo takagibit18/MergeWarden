@@ -48,6 +48,9 @@ class IncludedSpan(BaseModel):
     content: str
     context_hash: str
     retrieval_source: str
+    snapshot_id: str = ""
+    revision: str = ""
+    side: str = "new"
     forced: bool = False
     truncated: bool = False
     token_cost: int = Field(default=0, ge=0)
@@ -91,6 +94,8 @@ class CandidateContextManifest(BaseModel):
     """Audit record for exactly the context supplied to one reviewer candidate."""
 
     candidate_id: str
+    snapshot_id: str = ""
+    revision: str = ""
     changed_anchor: ChangedAnchor
     included_spans: list[IncludedSpan] = Field(default_factory=list)
     included_graph_paths: list[IncludedGraphPath] = Field(default_factory=list)

@@ -47,7 +47,7 @@ class DummyEchoTool(BaseTool):
         return {"echo": kwargs.get("value", "")}
 
 
-def test_repair_merge_retains_omitted_candidates_and_matches_by_finding_id() -> None:
+def test_repair_merge_retains_omitted_candidates_and_requires_target_candidate_id() -> None:
     def issue(finding_id: str, suggestion: str) -> ReviewIssue:
         return ReviewIssue(
             severity=Severity.WARNING,
@@ -68,6 +68,7 @@ def test_repair_merge_retains_omitted_candidates_and_matches_by_finding_id() -> 
         ],
     )
     repaired_b = issue("F-B", "Repaired B with delivered evidence")
+    repaired_b.target_candidate_id = "candidate-b"
     preview = SimpleNamespace(
         bound_candidates=[
             SimpleNamespace(source_issue_index=0, candidate_id="candidate-a"),
@@ -91,6 +92,98 @@ def test_repair_merge_retains_omitted_candidates_and_matches_by_finding_id() -> 
     assert merged.issues[0].suggestion == "Repair A"
     assert merged.issues[1].suggestion == "Repaired B with delivered evidence"
     assert merged.issues[2].suggestion == "Keep C"
+
+
+def test_repair_merge_rejects_unknown_and_duplicate_targets_without_guessing() -> None:
+    def issue(finding_id: str, suggestion: str) -> ReviewIssue:
+        return ReviewIssue(
+            severity=Severity.WARNING,
+            location="src/app.py:1",
+            evidence="+ changed = True",
+            suggestion=suggestion,
+            confidence=0.95,
+            finding_id=finding_id,
+        )
+
+    original = ReviewReport(
+        summary="original",
+        issues=[issue("F-A", "Original A"), issue("F-B", "Original B")],
+    )
+    first = issue("", "First repair")
+    first.target_candidate_id = "candidate-a"
+    duplicate = issue("", "Duplicate repair")
+    duplicate.target_candidate_id = "candidate-a"
+    unknown = issue("", "Cross-candidate repair")
+    unknown.target_candidate_id = "candidate-passed"
+    preview = SimpleNamespace(
+        bound_candidates=[
+            SimpleNamespace(source_issue_index=0, candidate_id="candidate-a"),
+            SimpleNamespace(source_issue_index=1, candidate_id="candidate-b"),
+            SimpleNamespace(source_issue_index=2, candidate_id="candidate-passed"),
+        ],
+        results=[
+            SimpleNamespace(status="needs_repair"),
+            SimpleNamespace(status="needs_repair"),
+            SimpleNamespace(status="verified"),
+        ],
+    )
+    diagnostics: list[dict[str, object]] = []
+
+    merged = AgentOrchestrator._merge_repaired_report(
+        original,
+        ReviewReport(summary="repair", issues=[first, duplicate, unknown]),
+        preview,
+        diagnostics=diagnostics,
+    )
+
+    assert [item.suggestion for item in merged.issues] == [
+        "First repair",
+        "Original B",
+    ]
+    assert [item["code"] for item in diagnostics] == [
+        "repair_target_duplicate",
+        "repair_target_unknown",
+    ]
+
+
+def test_repair_target_can_replace_issue_without_finding_id() -> None:
+    original = ReviewReport(
+        summary="original",
+        issues=[
+            ReviewIssue(
+                severity=Severity.WARNING,
+                location="src/app.py:1",
+                evidence="+ changed = True",
+                suggestion="Original suggestion",
+                confidence=0.95,
+                finding_id="F-original",
+            )
+        ],
+    )
+    repaired = ReviewIssue(
+        severity=Severity.WARNING,
+        location="src/app.py:1",
+        evidence="+ changed = True",
+        suggestion="Repaired without a reviewer finding label",
+        confidence=0.95,
+        target_candidate_id="candidate-a",
+    )
+    preview = SimpleNamespace(
+        bound_candidates=[
+            SimpleNamespace(source_issue_index=0, candidate_id="candidate-a")
+        ],
+        results=[SimpleNamespace(status="needs_repair")],
+    )
+
+    merged = AgentOrchestrator._merge_repaired_report(
+        original,
+        ReviewReport(summary="repair", issues=[repaired]),
+        preview,
+    )
+
+    assert merged.issues[0].finding_id == ""
+    assert merged.issues[0].candidate_id == "candidate-a"
+    assert merged.issues[0].suggestion == "Repaired without a reviewer finding label"
 
 
 class DummyWriteTool(BaseTool):
@@ -709,6 +802,10 @@ def test_execute_tools_wraps_readonly_tool_errors() -> None:
 
     assert len(results) == 1
     assert results[0].ok is False
+    assert results[0].recoverable is True
+    assert results[0].error_type == "invalid_path"
+    assert results[0].failure_class == "parameter_error"
+    assert "list_dir" in results[0].recommended_next_step
     assert "Tool execution failed for read_file" in (results[0].error or "")
     assert any(error.category == "runtime" for error in state.errors)
 

@@ -8,6 +8,16 @@ from pydantic import ValidationError
 from src.config import get_settings
 
 
+def test_explicit_process_provider_overrides_dotenv_default(monkeypatch) -> None:
+    monkeypatch.setenv("MODEL_PROVIDER", "zhipu")
+    monkeypatch.setenv("MODEL_NAME", "glm-5.3-flash")
+
+    settings = get_settings()
+
+    assert settings.model_provider == "zhipu"
+    assert settings.model_name == "glm-5.3-flash"
+
+
 def test_public_github_app_only_defaults_to_false(monkeypatch) -> None:
     monkeypatch.delenv("PLATFORM_PUBLIC_GITHUB_APP_ONLY", raising=False)
 

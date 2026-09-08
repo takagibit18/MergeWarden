@@ -153,9 +153,9 @@ def _event_log_paths_for_run(
         return ()
     event_log = summary.get("event_log")
     if isinstance(event_log, dict):
-        path = event_log.get("event_log_path")
-        if isinstance(path, str) and path.strip():
-            return (path,)
+        event_log_path = event_log.get("event_log_path")
+        if isinstance(event_log_path, str) and event_log_path.strip():
+            return (event_log_path,)
     return ()
 
 

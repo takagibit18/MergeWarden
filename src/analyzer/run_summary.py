@@ -39,9 +39,20 @@ class RunSummary(BaseModel):
     tool_call_count: int = 0
     model_response_journal_writes: int = 0
     draft_findings_created: int = 0
+    draft_state_transition_count: int = 0
+    draft_status_counts: dict[str, int] = Field(default_factory=dict)
+    draft_stagnation_streak: int = 0
+    incomplete_reasons: list[str] = Field(default_factory=list)
     length_recoveries_attempted: int = 0
     length_recoveries_succeeded: int = 0
     length_recoveries_failed: int = 0
+    repair_budget_total: int = 0
+    repair_budget_remaining: int = 0
+    repair_format_attempt_count: int = 0
+    repair_contract_attempt_count: int = 0
+    repair_evidence_attempt_count: int = 0
+    final_submit_attempt_count: int = 0
+    finding_run_status: str = ""
     model_names: list[str] = Field(default_factory=list)
     total_tokens: int = 0
     provider_attempt_count: int = 0
@@ -99,7 +110,7 @@ class RunSummary(BaseModel):
     workflow_invalid: bool = False
     finding_funnel: FindingFunnel = Field(default_factory=FindingFunnel)
 
-    @computed_field(return_type=int)
+    @computed_field(return_type=int)  # type: ignore[prop-decorator]
     @property
     def actual_review_iterations(self) -> int:
         """Canonical observability name for the existing review_iterations field."""
@@ -346,6 +357,23 @@ def _update_summary(summary: RunSummary, event: dict[str, Any]) -> None:
         summary.draft_findings_created = int(
             payload.get("draft_findings_created", 0) or 0
         )
+        summary.draft_state_transition_count = _non_negative_int(
+            payload.get("draft_state_transition_count")
+        )
+        raw_draft_status_counts = payload.get("draft_status_counts")
+        if isinstance(raw_draft_status_counts, dict):
+            summary.draft_status_counts = {
+                str(status): _non_negative_int(count)
+                for status, count in raw_draft_status_counts.items()
+            }
+        summary.draft_stagnation_streak = _non_negative_int(
+            payload.get("draft_stagnation_streak")
+        )
+        raw_incomplete_reasons = payload.get("incomplete_reasons")
+        if isinstance(raw_incomplete_reasons, list):
+            summary.incomplete_reasons = [
+                str(reason) for reason in raw_incomplete_reasons if str(reason).strip()
+            ]
         summary.length_recoveries_attempted = int(
             payload.get("length_recoveries_attempted", 0) or 0
         )
@@ -355,6 +383,27 @@ def _update_summary(summary: RunSummary, event: dict[str, Any]) -> None:
         summary.length_recoveries_failed = int(
             payload.get("length_recoveries_failed", 0) or 0
         )
+        summary.repair_budget_total = _non_negative_int(
+            payload.get("repair_budget_total")
+        )
+        summary.repair_budget_remaining = _non_negative_int(
+            payload.get("repair_budget_remaining")
+        )
+        summary.repair_format_attempt_count = _non_negative_int(
+            payload.get("repair_format_attempt_count")
+        )
+        summary.repair_contract_attempt_count = _non_negative_int(
+            payload.get("repair_contract_attempt_count")
+        )
+        summary.repair_evidence_attempt_count = _non_negative_int(
+            payload.get("repair_evidence_attempt_count")
+        )
+        summary.final_submit_attempt_count = _non_negative_int(
+            payload.get("final_submit_attempt_count")
+        )
+        finding_run_status = str(payload.get("finding_run_status", "") or "").strip()
+        if finding_run_status:
+            summary.finding_run_status = finding_run_status
         summary.review_skill_loaded_count = _non_negative_int(
             payload.get("review_skill_loaded_count")
         )
@@ -463,6 +512,8 @@ def _update_summary(summary: RunSummary, event: dict[str, Any]) -> None:
 
 
 def _non_negative_int(value: object) -> int:
+    if not isinstance(value, (int, float, str, bytes, bytearray)):
+        return 0
     try:
         return max(0, int(value or 0))
     except (TypeError, ValueError):
@@ -476,6 +527,8 @@ def _optional_non_negative_int(value: object) -> int | None:
 
 
 def _non_negative_float(value: object) -> float:
+    if not isinstance(value, (int, float, str, bytes, bytearray)):
+        return 0.0
     try:
         return max(0.0, float(value or 0.0))
     except (TypeError, ValueError):

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.analyzer.finding_contract import ModelFindingInput
+from src.models.schemas import DraftFindingInput, DraftFindingUpdateInput
 from src.tools.base import ToolSpec
 
 
@@ -46,6 +48,9 @@ def _llm_facing_schema(value: Any) -> Any:
 def build_draft_finding_tool_schema() -> dict[str, Any]:
     """Return the review-only pseudo-tool for a minimal durable hypothesis."""
 
+    parameters = _llm_facing_schema(
+        _inline_json_schema_refs(DraftFindingInput.model_json_schema())
+    )
     return {
         "type": "function",
         "function": {
@@ -55,37 +60,171 @@ def build_draft_finding_tool_schema() -> dict[str, Any]:
                 "concrete. This is working state, not a final finding; continue "
                 "gathering evidence and eventually call submit_review."
             ),
-            "parameters": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "file": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "Repository-relative suspect file.",
-                    },
-                    "claim": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "Minimal suspected behavior, without severity or attribution.",
-                    },
-                    "line": {
-                        "type": ["integer", "null"],
-                        "minimum": 1,
-                    },
-                    "symbol": {
-                        "type": ["string", "null"],
-                        "minLength": 1,
-                    },
-                },
-                "required": ["file", "claim"],
-            },
+            "parameters": parameters,
         },
     }
 
 
-def build_submit_tool_schemas() -> list[dict[str, Any]]:
-    """Pseudo-tools used for structured final output submission."""
+def build_draft_finding_update_tool_schema() -> dict[str, Any]:
+    """Return the review-only pseudo-tool for a draft state transition."""
+
+    parameters = _llm_facing_schema(
+        _inline_json_schema_refs(DraftFindingUpdateInput.model_json_schema())
+    )
+    return {
+        "type": "function",
+        "function": {
+            "name": "update_draft_finding",
+            "description": (
+                "Update the investigation state of an existing draft hypothesis. "
+                "Use pending while checks remain, evidence_sufficient when it can "
+                "support a final finding, disproved when evidence rules it out, or "
+                "incomplete when the run cannot finish the checks."
+            ),
+            "parameters": parameters,
+        },
+    }
+
+
+def build_submit_tool_schemas(*, model_input: bool = False) -> list[dict[str, Any]]:
+    """Pseudo-tools used for structured final output submission.
+
+    ``model_input=True`` is the current semantic contract.  The default keeps
+    the historical full envelope available to old callers and replay fixtures.
+    """
+
+    if model_input:
+        return _build_model_submit_tool_schemas()
+    return _build_legacy_submit_tool_schemas()
+
+
+def build_model_submit_tool_schemas() -> list[dict[str, Any]]:
+    """Return the current semantic model-input submit contract."""
+
+    return build_submit_tool_schemas(model_input=True)
+
+
+def _build_model_submit_tool_schemas() -> list[dict[str, Any]]:
+    model_issue_schema = _llm_facing_schema(
+        _inline_json_schema_refs(ModelFindingInput.model_json_schema())
+    )
+    # Keep parsing tolerant for the compatibility adapter and bounded repair
+    # path, while making the active provider contract explicit for risk issues.
+    # The integrity guard checks the same semantic fields and role rules.
+    model_issue_schema.setdefault("allOf", []).append(
+        {
+            "if": {
+                "properties": {
+                    "severity": {"enum": ["critical", "warning"]}
+                }
+            },
+            "then": {
+                "required": [
+                    "primary_anchor",
+                    "evidence",
+                    "suggestion",
+                    "confidence",
+                    "observed_behavior",
+                    "causal_mechanism",
+                    "violated_invariant",
+                    "repair_intent",
+                    "trigger",
+                    "impact",
+                    "supports",
+                ]
+            },
+        }
+    )
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "submit_review",
+                "description": (
+                    "Submit semantic review findings. Provide one primary_anchor "
+                    "and choose exact evidence_refs from the delivered evidence "
+                    "catalog. For a bounded repair, set target_candidate_id to one "
+                    "exact runtime candidate_id from candidate_repair_feedback. "
+                    "Runtime identity, location, snapshot, revision, and hash "
+                    "fields are generated and validated by the program."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "summary": {
+                            "type": "string",
+                            "description": (
+                                "High-level result. Do not mention an actionable "
+                                "concern in the summary unless it is in issues."
+                            ),
+                        },
+                        "issues": {
+                            "type": "array",
+                            "description": (
+                                "Semantic findings. Use [] only when no supported "
+                                "issue remains, including after disproving drafts."
+                            ),
+                            "items": model_issue_schema,
+                        },
+                    },
+                    "required": ["summary", "issues"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "submit_debug",
+                "description": "Submit structured debug output.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "summary": {"type": "string"},
+                        "hypotheses": {"type": "array", "items": {"type": "string"}},
+                        "steps": {"type": "array", "items": {"type": "object"}},
+                        "suggested_commands": {"type": "array"},
+                        "suggested_patch": {"type": ["string", "null"]},
+                    },
+                    "required": ["summary"],
+                },
+            },
+        },
+    ]
+
+
+def _inline_json_schema_refs(schema: dict[str, Any]) -> dict[str, Any]:
+    """Inline Pydantic local refs so providers receive one self-contained schema."""
+
+    definitions = schema.get("$defs", {})
+
+    def resolve(value: Any) -> Any:
+        if isinstance(value, list):
+            return [resolve(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        reference = value.get("$ref")
+        if isinstance(reference, str) and reference.startswith("#/$defs/"):
+            name = reference.rsplit("/", 1)[-1]
+            base = resolve(definitions.get(name, {}))
+            overlays = {
+                key: resolve(item) for key, item in value.items() if key != "$ref"
+            }
+            if isinstance(base, dict):
+                return {**base, **overlays}
+            return base
+        return {
+            key: resolve(item) for key, item in value.items() if key != "$defs"
+        }
+
+    resolved = resolve(schema)
+    if not isinstance(resolved, dict):
+        raise TypeError("Inline JSON schema must resolve to an object")
+    return resolved
+
+
+def _build_legacy_submit_tool_schemas() -> list[dict[str, Any]]:
+    """Historical full submit schemas retained for compatibility tests/replay."""
     anchor_schema: dict[str, Any] = {
         "type": "object",
         "properties": {

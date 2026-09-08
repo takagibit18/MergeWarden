@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 from src.analyzer.context_state import ContextState
 from src.analyzer.output_formatter import ReviewIssue, ReviewReport
-from src.models.schemas import DraftFindingInput
+from src.models.schemas import DraftFindingInput, DraftFindingUpdateInput
 
 ReviewOutcome = Literal[
     "no_candidates",
@@ -16,6 +16,19 @@ ReviewOutcome = Literal[
     "partially_rejected",
     "all_candidates_rejected",
 ]
+AnalysisAction = Literal["exploration", "state", "completion"]
+EXPLORATION_TOOL_NAMES = frozenset(
+    {
+        "read_file",
+        "grep_files",
+        "glob_files",
+        "list_dir",
+        "get_changed_context",
+        "changed_context",
+        "find_symbol_context",
+        "symbol_context",
+    }
+)
 
 
 class ReviewRequest(BaseModel):
@@ -103,18 +116,46 @@ class ReviewResponse(BaseModel):
         default_factory=list,
         description="Structured reasons a review could not be completed safely.",
     )
+    investigation_ready: bool = Field(
+        default=False,
+        description="Investigation reached a state where submission was allowed.",
+    )
+    submission_received: bool = Field(
+        default=False,
+        description="A valid submit_review action was actually received.",
+    )
+    review_complete: bool = Field(
+        default=False,
+        description=(
+            "Final review verification ran; this does not assert every finding "
+            "was publishable."
+        ),
+    )
 
     def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         """Keep the complete v0 response envelope compact for old consumers.
 
-        The new completion fields are emitted as soon as a run is incomplete;
-        a normal complete response keeps the historical serialized key set.
+        The new completion fields are emitted when a run has a meaningful
+        lifecycle state. A direct legacy formatter call with all flags false
+        keeps the historical serialized key set, while a completed run keeps
+        its positive readiness/submission/completion evidence for API and eval
+        consumers.
         """
 
         dumped = super().model_dump(*args, **kwargs)
         if self.completion_status == "complete" and not self.incomplete_reasons:
             dumped.pop("completion_status", None)
             dumped.pop("incomplete_reasons", None)
+            if not any(
+                (
+                    self.investigation_ready,
+                    self.submission_received,
+                    self.review_complete,
+                )
+            ):
+                dumped.pop("investigation_ready", None)
+                dumped.pop("submission_received", None)
+                dumped.pop("review_complete", None)
         return dumped
 
 
@@ -229,6 +270,10 @@ class AnalysisPlan(BaseModel):
         default_factory=list,
         description="Validated minimal draft-finding pseudo-tool inputs",
     )
+    draft_finding_updates: list[DraftFindingUpdateInput] = Field(
+        default_factory=list,
+        description="Validated state transitions for already-recorded hypotheses",
+    )
     draft_review: ReviewReport | None = Field(
         default=None,
         description="Optional draft review result produced by model",
@@ -270,11 +315,59 @@ class AnalysisPlan(BaseModel):
         description="Evidence entries omitted or shortened to respect the digest budget.",
     )
 
+    @property
+    def has_explicit_submit(self) -> bool:
+        """Whether the model produced a valid completion action this turn."""
+
+        return self.draft_review is not None or self.draft_debug is not None
+
+    @property
+    def has_state_action(self) -> bool:
+        """Whether this turn changed or recorded durable investigation state."""
+
+        return bool(self.draft_finding_calls or self.draft_finding_updates)
+
+    @property
+    def has_exploration_action(self) -> bool:
+        """Whether this turn requested an ordinary exploratory tool."""
+
+        return any(
+            isinstance(call.get("function"), dict)
+            and str(call["function"].get("name", "")).strip()
+            in EXPLORATION_TOOL_NAMES
+            for call in self.tool_calls
+            if isinstance(call, dict)
+        )
+
+    @property
+    def action_kinds(self) -> tuple[AnalysisAction, ...]:
+        """Return the distinct semantic action kinds present in this plan."""
+
+        kinds: list[AnalysisAction] = []
+        if self.has_exploration_action:
+            kinds.append("exploration")
+        if self.has_state_action:
+            kinds.append("state")
+        if self.has_explicit_submit:
+            kinds.append("completion")
+        return tuple(kinds)
+
 
 class FindingCandidate(BaseModel):
     """One risk finding awaiting objective integrity validation."""
 
     candidate_id: str
+    logical_identity_hash: str = Field(
+        default="",
+        description=(
+            "Stable logical identity metadata; independent from mutable finding text "
+            "and from the runtime candidate id."
+        ),
+    )
+    content_hash: str = Field(
+        default="",
+        description="Version hash of the candidate content at registration time.",
+    )
     issue: ReviewIssue
     claim: str
     evidence_locations: list[str] = Field(default_factory=list)

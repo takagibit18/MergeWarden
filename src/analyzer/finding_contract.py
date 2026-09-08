@@ -10,7 +10,9 @@ has the fields and provenance needed for the later integrity stage.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from src.analyzer.finding_schema import (
     ClaimSupport,
@@ -18,6 +20,10 @@ from src.analyzer.finding_schema import (
     FINDING_SCHEMA_VERSION,
     EvidenceProvenance,
     EvidenceRole,
+    FindingSeverity,
+    RelatedLocation,
+    RepairIntent,
+    SourceAnchor,
 )
 from src.analyzer.location import normalize_location
 from src.analyzer.output_formatter import ReviewIssue
@@ -38,6 +44,20 @@ _STRUCTURED_ISSUE_FIELDS = frozenset(
     }
 )
 
+# One source of truth for the semantic portion of a structured risk finding.
+# The model-facing schema remains parse-tolerant so legacy adapters and the
+# bounded repair loop can return candidate-level gaps instead of losing the
+# entire report at JSON validation time.  The active submit schema adds the
+# same fields as a conditional requirement for critical/warning issues.
+STRUCTURED_RISK_NARRATIVE_FIELDS = (
+    "observed_behavior",
+    "causal_mechanism",
+    "violated_invariant",
+    "trigger",
+    "impact",
+)
+STRUCTURED_RISK_REQUIRED_ROLES = ("cause", "contract")
+
 
 @dataclass(frozen=True)
 class FindingContractGap:
@@ -57,6 +77,57 @@ class FindingContractGap:
         }
 
 
+ModelSupportRole = Literal["cause", "contract", "trigger", "impact"]
+
+
+class ModelClaimSupport(BaseModel):
+    """Model-facing role claim; related locations are not evidence roles."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    role: ModelSupportRole
+    statement: str = Field(..., min_length=1)
+    evidence_refs: list[str] = Field(..., min_length=1)
+
+
+class ModelFindingInput(BaseModel):
+    """Small model-facing finding contract.
+
+    Runtime identity, provenance, and the compatibility ``location`` string
+    deliberately do not appear here.  The adapter below turns this input into
+    the strict internal ``ReviewIssue`` envelope.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    severity: FindingSeverity = Field(
+        ..., description="critical, warning, info, or style"
+    )
+    primary_anchor: SourceAnchor = Field(
+        ...,
+        description="The one authoritative source position for this finding.",
+    )
+    evidence: str = Field(..., min_length=1)
+    suggestion: str = Field(..., min_length=1)
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    finding_id: str = ""
+    target_candidate_id: str = Field(
+        default="",
+        description=(
+            "Repair-only: exact runtime candidate_id from candidate_repair_feedback. "
+            "Omit for an initial submission; never invent or reuse a finding_id here."
+        ),
+    )
+    observed_behavior: str = ""
+    causal_mechanism: str = ""
+    violated_invariant: str = ""
+    repair_intent: RepairIntent = Field(default_factory=RepairIntent)
+    trigger: str = ""
+    impact: str = ""
+    supports: list[ModelClaimSupport] = Field(default_factory=list)
+    related_locations: list[RelatedLocation] = Field(default_factory=list)
+
+
 def is_structured_issue_payload(payload: Any) -> bool:
     """Tell producer boundaries whether a payload uses the v2 field family."""
 
@@ -65,6 +136,233 @@ def is_structured_issue_payload(payload: Any) -> bool:
     if str(payload.get("schema_version", "") or "").strip() == FINDING_SCHEMA_VERSION:
         return True
     return bool(_STRUCTURED_ISSUE_FIELDS.intersection(payload))
+
+
+def is_model_finding_payload(payload: Any) -> bool:
+    """Identify the new input shape by its single-anchor boundary."""
+
+    if not isinstance(payload, dict):
+        return False
+    return "primary_anchor" in payload and "location" not in payload
+
+
+def normalize_model_finding_payload(
+    payload: Any,
+    *,
+    evidence_catalog: list[dict[str, Any]] | None = None,
+) -> Any:
+    """Materialize model input into the strict compatibility envelope.
+
+    The model selects exact ids from ``evidence_catalog``.  A missing id is
+    represented as an unbound evidence item so the integrity guard can reject
+    it with a useful reason; it is never replaced by a nearby span.
+    """
+
+    model_shape = is_model_finding_payload(payload)
+    if not isinstance(payload, dict):
+        return normalize_producer_issue_payload(payload)
+    if not model_shape and "primary_anchor" not in payload:
+        return normalize_producer_issue_payload(payload)
+    if model_shape:
+        try:
+            # Re-validate at the adapter boundary so fields owned by the runtime
+            # (candidate/provenance/location identity) cannot ride along in a
+            # simplified model payload and become trusted downstream.
+            model_input = ModelFindingInput.model_validate(payload)
+        except ValidationError:
+            # Preserve semantic values for the normal report validation error, but
+            # drop every field that is outside the model-facing contract.
+            normalized = {
+                key: value
+                for key, value in payload.items()
+                if key in ModelFindingInput.model_fields
+            }
+        else:
+            normalized = model_input.model_dump(mode="json")
+        normalized["schema_version"] = FINDING_SCHEMA_VERSION
+    else:
+        # Old structured producers may still send both fields.  Keep the
+        # compatibility envelope, but make the anchor the single authority so
+        # a stale duplicate location cannot create two competing truths.
+        normalized = normalize_producer_issue_payload(payload)
+        if not isinstance(normalized, dict):
+            return normalized
+
+    anchor_raw = normalized.get("primary_anchor")
+    try:
+        anchor = SourceAnchor.model_validate(anchor_raw)
+    except Exception:  # noqa: BLE001
+        # Keep the malformed value for the normal validation error, while
+        # making the missing compatibility field explicit if possible.
+        normalized.setdefault("location", "")
+    else:
+        normalized["primary_anchor"] = anchor.model_dump(mode="json")
+        # ``primary_anchor`` is the only location authority for structured
+        # payloads, including the compatibility envelope.
+        normalized["location"] = anchor.location
+
+    if not model_shape:
+        return normalized
+
+    supports = normalized.get("supports")
+    if not isinstance(supports, list):
+        return normalized
+    role_fields = {
+        "cause": "cause_evidence",
+        "contract": "contract_evidence",
+        "trigger": "trigger_evidence",
+        "impact": "impact_evidence",
+    }
+    catalog = _evidence_catalog_by_reference(evidence_catalog or [])
+    catalog_status = _evidence_catalog_reference_status(evidence_catalog or [])
+    for evidence_field in role_fields.values():
+        normalized[evidence_field] = []
+    for support in supports:
+        if not isinstance(support, dict):
+            continue
+        role = str(support.get("role", "")).strip()
+        field = role_fields.get(role)
+        if field is None:
+            continue
+        statement = str(support.get("statement", "")).strip()
+        refs = support.get("evidence_refs", [])
+        if not isinstance(refs, list):
+            continue
+        for raw_ref in refs:
+            reference = str(raw_ref or "").strip()
+            if not reference:
+                continue
+            record = catalog.get(reference)
+            normalized[field].append(
+                _evidence_payload_from_catalog_record(
+                    record,
+                    reference=reference,
+                    statement=statement,
+                    resolution_status=(
+                        "resolved"
+                        if record is not None
+                        else catalog_status.get(reference, "unresolved")
+                    ),
+                )
+            )
+    return normalized
+
+
+def _evidence_catalog_by_reference(
+    catalog: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Index only unambiguous exact artifact/alias ids."""
+
+    candidates: dict[str, list[dict[str, Any]]] = {}
+    for raw in catalog:
+        if not isinstance(raw, dict):
+            continue
+        # The model-facing catalog is a proof boundary.  Indexed/selected
+        # spans and clipped bodies may be useful planner metadata, but they
+        # are not delivered evidence and must not become bindable by alias.
+        if str(raw.get("lifecycle", "delivered")).strip() != "delivered":
+            continue
+        if bool(raw.get("truncated", False)):
+            continue
+        ids = [str(raw.get("artifact_id", "")).strip()]
+        aliases = raw.get("aliases", [])
+        if isinstance(aliases, list):
+            ids.extend(str(item).strip() for item in aliases)
+        for reference in {item for item in ids if item}:
+            candidates.setdefault(reference, []).append(raw)
+    return {
+        reference: records[0]
+        for reference, records in candidates.items()
+        if len(records) == 1
+    }
+
+
+def _evidence_catalog_reference_status(
+    catalog: list[dict[str, Any]],
+) -> dict[str, str]:
+    """Classify exact references without making non-delivered records citable."""
+
+    candidates: dict[str, list[dict[str, Any]]] = {}
+    for raw in catalog:
+        if not isinstance(raw, dict):
+            continue
+        ids = [str(raw.get("artifact_id", "")).strip()]
+        aliases = raw.get("aliases", [])
+        if isinstance(aliases, list):
+            ids.extend(str(item).strip() for item in aliases)
+        for reference in {item for item in ids if item}:
+            candidates.setdefault(reference, []).append(raw)
+    status: dict[str, str] = {}
+    for reference, records in candidates.items():
+        delivered = [
+            item
+            for item in records
+            if str(item.get("lifecycle", "delivered")).strip() == "delivered"
+            and not bool(item.get("truncated", False))
+        ]
+        if len(delivered) == 1 and len(records) == 1:
+            status[reference] = "resolved"
+        elif delivered:
+            status[reference] = "ambiguous"
+        else:
+            status[reference] = "undelivered"
+    return status
+
+
+def _evidence_payload_from_catalog_record(
+    record: dict[str, Any] | None,
+    *,
+    reference: str,
+    statement: str,
+    resolution_status: str = "resolved",
+) -> dict[str, Any]:
+    """Convert a delivered ledger record, or an unknown ref, without guessing."""
+
+    if not isinstance(record, dict):
+        return {
+            # Keep the requested token in the compatibility envelope for old
+            # diagnostics, but resolution_status makes it explicitly
+            # non-trusted and prevents binding/identity validation from using
+            # it as an artifact.
+            "artifact_id": reference,
+            "reference_id": reference,
+            "resolution_status": resolution_status or "unresolved",
+            "retrieval_source": "",
+            "statement": statement,
+        }
+    scope = str(record.get("scope", "")).strip()
+    aliases = record.get("aliases", [])
+    manifest_id = ""
+    if scope == "context_manifest" and isinstance(aliases, list):
+        manifest_id = next(
+            (
+                str(item).strip()
+                for item in aliases
+                if str(item).strip() != str(record.get("artifact_id", "")).strip()
+            ),
+            "",
+        )
+    return {
+        "artifact_id": str(record.get("artifact_id", reference)).strip() or reference,
+        "reference_id": reference,
+        "resolution_status": resolution_status or "resolved",
+        "snapshot_id": str(record.get("snapshot_id", "")).strip(),
+        "revision": str(record.get("revision", "")).strip(),
+        "side": str(record.get("side", "new") or "new"),
+        "context_manifest_id": manifest_id,
+        "retrieval_source": str(
+            record.get("source_type", record.get("retrieval_source", ""))
+        ).strip(),
+        "file": str(record.get("path", record.get("file", ""))).strip(),
+        "line": record.get("start_line", record.get("line")),
+        "end_line": record.get("end_line", record.get("line")),
+        "context_hash": (
+            str(record.get("content_hash", record.get("body_hash", ""))).strip()
+            if scope == "context_manifest"
+            else ""
+        ),
+        "statement": statement,
+    }
 
 
 def normalize_producer_issue_payload(payload: Any) -> Any:
@@ -175,13 +473,7 @@ def canonical_contract_gaps(
                     "Structured risk finding is missing finding_id.",
                 )
             )
-        for field in (
-            "observed_behavior",
-            "causal_mechanism",
-            "violated_invariant",
-            "trigger",
-            "impact",
-        ):
+        for field in STRUCTURED_RISK_NARRATIVE_FIELDS:
             if not getattr(issue, field, "").strip():
                 gaps.append(
                     FindingContractGap(
@@ -202,7 +494,7 @@ def canonical_contract_gaps(
     role_values: dict[str, list[EvidenceProvenance]] = {
         str(role): values for role, values in _role_evidence(issue)
     }
-    required_roles = {"cause", "contract"}
+    required_roles = set(STRUCTURED_RISK_REQUIRED_ROLES)
     if issue.trigger.strip():
         required_roles.add("trigger")
     if issue.impact.strip():
@@ -252,12 +544,29 @@ def canonical_contract_gaps(
         seen_roles.add(support.role)
         allowed_refs = role_refs.get(support.role, set())
         if not set(support.evidence_refs).intersection(allowed_refs):
+            unresolved_refs = {
+                str(item.reference_id).strip()
+                for item in role_values.get(support.role, [])
+                if str(item.reference_id).strip()
+                and str(item.resolution_status).strip()
+                in {"unresolved", "ambiguous", "undelivered"}
+            }
+            unresolved_selected = set(support.evidence_refs).intersection(
+                unresolved_refs
+            )
             gaps.append(
                 FindingContractGap(
-                    "support_reference_missing",
+                    "support_reference_unresolved"
+                    if unresolved_selected
+                    else "support_reference_missing",
                     f"supports[{index}].evidence_refs",
-                    "Support references do not identify a declared evidence item.",
-                    invalid=True,
+                    (
+                        "Support references identify evidence that was not delivered "
+                        "or could not be resolved in this run."
+                        if unresolved_selected
+                        else "Support references do not identify a declared evidence item."
+                    ),
+                    invalid=not bool(unresolved_selected),
                 )
             )
     support_roles = {support.role for support in supports}
@@ -283,6 +592,9 @@ def _evidence_reference_options(evidence: EvidenceProvenance) -> set[str]:
             evidence.context_hash,
             evidence.context_manifest_id,
             evidence.artifact_id,
+            evidence.reference_id
+            if evidence.resolution_status == "resolved"
+            else "",
         )
         if value
     }

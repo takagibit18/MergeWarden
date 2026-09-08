@@ -9,9 +9,11 @@ It intentionally does not decide whether the reported behavior is a bug.
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, cast
+from uuid import uuid4
 
 from src.analyzer.diff_lines import changed_new_lines_by_file
 from src.analyzer.evidence_ledger import EvidenceLedger
@@ -30,6 +32,60 @@ from src.analyzer.verifier_context import (
 )
 
 _RISK_SEVERITIES = {Severity.CRITICAL, Severity.WARNING}
+RepairFailureClass = Literal[
+    "deterministic_normalization",
+    "contract_gap",
+    "source_gap",
+    "reference_error",
+    "untrusted_identity",
+]
+
+
+def classify_integrity_failure(
+    failure: IntegrityFailure | str,
+    *,
+    field: str = "",
+) -> RepairFailureClass:
+    """Map an objective failure to the next safe state transition."""
+
+    code = failure.code if isinstance(failure, IntegrityFailure) else str(failure)
+    failure_field = failure.field if isinstance(failure, IntegrityFailure) else field
+    if code in {"evidence_not_observed", "evidence_incomplete", "verifier_context_budget_exhausted"}:
+        return "source_gap"
+    if code in {
+        "support_reference_missing",
+        "support_reference_unresolved",
+        "support_reference_undelivered",
+        "reference_not_delivered",
+        "evidence_binding_missing",
+    }:
+        if failure_field.endswith(".statement") or failure_field.endswith("statement"):
+            return "contract_gap"
+        return "reference_error"
+    if code in {
+        "finding_contract_incomplete",
+        "support_role_missing",
+        "role_claim_missing",
+        "changed_anchor_missing",
+        "finding_structure_invalid",
+        "finding_contract_invalid",
+    }:
+        return "contract_gap"
+    if code in {"location_invalid", "location_line_missing"} and failure_field == "primary_anchor":
+        return "deterministic_normalization"
+    if code in {
+        "candidate_binding_mismatch",
+        "candidate_binding_missing",
+        "repository_path_invalid",
+        "repository_path_missing",
+        "location_invalid",
+        "location_line_missing",
+        "location_line_out_of_range",
+        "location_unreadable",
+        "evidence_identity_mismatch",
+    }:
+        return "untrusted_identity"
+    return "reference_error"
 
 
 def build_candidates(
@@ -44,20 +100,22 @@ def build_candidates(
     for source_issue_index, issue in enumerate(report.issues):
         if issue.severity not in _RISK_SEVERITIES:
             continue
-        candidate_id = _candidate_id(issue)
-        if candidate_id in seen:
-            continue
+        candidate_id = _runtime_candidate_id(issue, seen)
         seen.add(candidate_id)
+        if not issue.finding_id:
+            issue.finding_id = "F-" + candidate_id[len("cand_") :].upper()
         bound_issue = bind_issue_candidate_id(issue, candidate_id)
         issue.candidate_id = candidate_id
         for evidence in issue.all_evidence():
             evidence.candidate_id = candidate_id
-        if not issue.finding_id:
-            issue.finding_id = "F-" + candidate_id[:12].upper()
         bound_issue.finding_id = issue.finding_id
         candidates.append(
             FindingCandidate(
                 candidate_id=candidate_id,
+                logical_identity_hash=_logical_identity_hash(
+                    issue, candidate_id=candidate_id
+                ),
+                content_hash=_candidate_content_hash(issue),
                 issue=bound_issue,
                 claim=issue.suggestion.strip(),
                 evidence_locations=(
@@ -70,15 +128,76 @@ def build_candidates(
     return candidates
 
 
-def _candidate_id(issue: ReviewIssue) -> str:
-    normalized = "\n".join(
-        (
-            issue.severity.value,
-            issue.location.strip().replace("\\", "/"),
-            issue.evidence.strip(),
-            issue.suggestion.strip(),
+def _runtime_candidate_id(issue: ReviewIssue, seen: set[str]) -> str:
+    """Return the program-owned id created at first candidate registration."""
+
+    existing = str(issue.candidate_id or "").strip()
+    if existing.startswith("cand_") and existing not in seen:
+        return existing
+    while True:
+        candidate_id = "cand_" + uuid4().hex[:20]
+        if candidate_id not in seen:
+            return candidate_id
+
+
+def _logical_identity_hash(issue: ReviewIssue, *, candidate_id: str = "") -> str:
+    """Hash the runtime identity, never mutable finding content.
+
+    The runtime candidate id is created once and carried on the issue before a
+    repair round.  It is therefore the only safe identity input here: severity,
+    anchor text, finding labels, evidence, and suggestions are all mutable
+    versions of the same candidate and must not silently retarget repair.
+    """
+
+    logical = str(candidate_id or issue.candidate_id or "").strip()
+    if not logical:
+        # This fallback is only for standalone callers that have not registered
+        # a candidate yet.  ``build_candidates`` always supplies the runtime id.
+        anchor = (
+            issue.primary_anchor.location
+            if issue.primary_anchor is not None
+            else issue.location
         )
-    )
+        logical = anchor.strip().replace("\\", "/")
+    return hashlib.sha256(logical.encode("utf-8")).hexdigest()[:16]
+
+
+def _candidate_content_hash(issue: ReviewIssue) -> str:
+    """Hash the mutable finding version without runtime provenance fields."""
+
+    payload = issue.model_dump(mode="json")
+    for key in (
+        "candidate_id",
+        "target_candidate_id",
+        "integrity_status",
+        "root_cause_id",
+        "context_manifest_id",
+        "context_hash",
+    ):
+        payload.pop(key, None)
+    for field in (
+        "cause_evidence",
+        "contract_evidence",
+        "trigger_evidence",
+        "impact_evidence",
+    ):
+        items = payload.get(field)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            for key in (
+                "candidate_id",
+                "artifact_id",
+                "snapshot_id",
+                "revision",
+                "context_manifest_id",
+                "retrieval_source",
+                "context_hash",
+            ):
+                item.pop(key, None)
+    normalized = json.dumps(payload, ensure_ascii=True, sort_keys=True, default=str)
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
 
 
@@ -96,6 +215,7 @@ class IntegrityFailure:
     retrieval_source: str = ""
     context_manifest_id: str = ""
     manifest_hash_prefix: str = ""
+    reference_id: str = ""
 
     def as_detail(self) -> dict[str, Any]:
         """Return a stable structured representation for event logs and reports."""
@@ -111,6 +231,7 @@ class IntegrityFailure:
             "retrieval_source": self.retrieval_source,
             "context_manifest_id": self.context_manifest_id,
             "manifest_hash_prefix": self.manifest_hash_prefix,
+            "reference_id": self.reference_id,
         }
 
 
@@ -128,21 +249,12 @@ class FindingIntegrityResult:
 
         if self.passed:
             return "verified"
+        # ``invalid`` is reserved for failures that cannot be repaired without
+        # guessing runtime identity or source scope.  Contract/reference gaps
+        # remain candidates for the bounded repair loop even when an older
+        # implementation would have grouped them under one invalid bucket.
         if any(
-            failure.code
-            in {
-                "candidate_binding_mismatch",
-                "candidate_binding_missing",
-                "repository_path_invalid",
-                "repository_path_missing",
-                "location_invalid",
-                "location_line_missing",
-                "location_line_out_of_range",
-                "location_unreadable",
-                "finding_contract_invalid",
-                "support_reference_missing",
-                "evidence_identity_mismatch",
-            }
+            classify_integrity_failure(failure) == "untrusted_identity"
             for failure in self.failures
         ):
             return "invalid"
@@ -379,6 +491,21 @@ class FindingIntegrityGuard:
                 )
                 if not failures:
                     valid_items.append(evidence_item)
+                elif any(
+                    failure.code
+                    in {
+                        "support_reference_unresolved",
+                        "support_reference_undelivered",
+                    }
+                    for failure in failures
+                ):
+                    # Retain the unresolved reference for one candidate-level
+                    # diagnostic. It is not source evidence and can never pass
+                    # publication, but dropping it would create a misleading
+                    # cascade of empty-role failures.
+                    valid_items.append(evidence_item)
+                    if role in required_roles:
+                        required_failures.extend(failures)
                 elif role in required_roles:
                     required_failures.extend(failures)
             retained[f"{role}_evidence"] = valid_items
@@ -400,6 +527,28 @@ class FindingIntegrityGuard:
         field: str,
     ) -> list[IntegrityFailure]:
         """Validate one evidence role and return failures with full provenance."""
+
+        resolution_status = str(
+            getattr(evidence_item, "resolution_status", "resolved") or "resolved"
+        ).strip().lower()
+        reference_id = str(getattr(evidence_item, "reference_id", "") or "").strip()
+        if resolution_status in {"unresolved", "ambiguous", "undelivered"}:
+            label = {
+                "undelivered": "undelivered",
+                "ambiguous": "ambiguous",
+            }.get(resolution_status, "unresolved")
+            return [
+                IntegrityFailure(
+                    (
+                        "support_reference_undelivered"
+                        if resolution_status == "undelivered"
+                        else "support_reference_unresolved"
+                    ),
+                    f"Evidence reference is {label} in the delivered catalog; choose an exact legal catalog id.",
+                    field=f"{field}.evidence_ref",
+                    reference_id=reference_id,
+                )
+            ]
 
         evidence_location = self._evidence_location(evidence_item)
         failures = _decorate_failures(
@@ -433,10 +582,31 @@ class FindingIntegrityGuard:
                 )
             )
         if evidence_ledger is not None:
+            ledger_records = [
+                record
+                for record in evidence_ledger.records
+                if record.path == evidence_location.path
+                and record.side
+                == cast(
+                    EvidenceSide,
+                    str(getattr(evidence_item, "side", "new") or "new"),
+                )
+                and record.covers(
+                    evidence_location.line or 0,
+                    evidence_location.end_line or evidence_location.line or 0,
+                )
+            ]
             missing_identity = [
                 field_name
                 for field_name in ("artifact_id", "snapshot_id", "revision")
                 if not str(getattr(evidence_item, field_name, "") or "").strip()
+                and (
+                    field_name == "artifact_id"
+                    or any(
+                        str(getattr(record, field_name, "") or "").strip()
+                        for record in ledger_records
+                    )
+                )
             ]
             if missing_identity:
                 failures.append(
@@ -471,6 +641,29 @@ class FindingIntegrityGuard:
         )
         if evidence_location.valid and not observed:
             evidence_role = field.partition("_evidence")[0]
+            base_observed = bool(
+                evidence_ledger is not None
+                and evidence_ledger.covers(
+                    evidence_location.path or "",
+                    evidence_location.line or 0,
+                    evidence_location.end_line or evidence_location.line,
+                    side=cast(
+                        EvidenceSide,
+                        str(getattr(evidence_item, "side", "new") or "new"),
+                    ),
+                )
+            )
+            if base_observed and evidence_ledger is not None:
+                failures.append(
+                    IntegrityFailure(
+                        "evidence_identity_mismatch",
+                        "Evidence path and range were delivered, but its explicit artifact, snapshot, revision, or hash does not match this run.",
+                        field=f"{field}.identity",
+                        location=evidence_item.location,
+                        **metadata,
+                    )
+                )
+                return failures
             budget_exhausted = context_budget_exhausted_for_evidence(
                 context,
                 evidence_item,
@@ -535,10 +728,26 @@ class FindingIntegrityGuard:
             and issue.severity in _RISK_SEVERITIES
             and (evidence_ledger is not None or bool(issue.supports)),
         ):
+            gap_code = gap.code
+            gap_message = gap.message
+            if (
+                gap.code == "evidence_incomplete"
+                and evidence_ledger is not None
+                and _issue_anchor_is_delivered(issue, evidence_ledger)
+            ):
+                # The source is present; what is absent is the role-specific
+                # claim/envelope. Keep this in the contract class so source
+                # retrieval is not requested again for an already delivered
+                # body.
+                gap_code = "role_claim_missing"
+                gap_message = (
+                    "The cited source is already delivered, but the finding is "
+                    f"missing the {gap.field} role claim."
+                )
             failures.append(
                 IntegrityFailure(
-                    gap.code,
-                    gap.message,
+                    gap_code,
+                    gap_message,
                     field=gap.field,
                     location=issue.location,
                 )
@@ -654,10 +863,21 @@ class FindingIntegrityGuard:
                 required_roles.add("impact")
             for role in sorted(required_roles):
                 if not getattr(issue, f"{role}_evidence"):
+                    role_gap_code = (
+                        "role_claim_missing"
+                        if evidence_ledger is not None
+                        and _issue_anchor_is_delivered(issue, evidence_ledger)
+                        else "evidence_incomplete"
+                    )
                     failures.append(
                         IntegrityFailure(
-                            "evidence_incomplete",
-                            f"Structured risk finding is missing {role} evidence.",
+                            role_gap_code,
+                            (
+                                "The cited source is already delivered, but the finding "
+                                f"is missing the {role}_evidence role claim."
+                                if role_gap_code == "role_claim_missing"
+                                else f"Structured risk finding is missing {role} evidence."
+                            ),
                             field=f"{role}_evidence",
                             location=issue.location,
                             **_location_failure_metadata(display),
@@ -676,9 +896,7 @@ class FindingIntegrityGuard:
                     )
                 )
 
-        unique_failures = tuple(
-            dict.fromkeys(failures)
-        )
+        unique_failures = tuple(dict.fromkeys(failures))
         return FindingIntegrityResult(candidate_id, not unique_failures, unique_failures)
 
     @staticmethod
@@ -929,6 +1147,9 @@ def _evidence_failure_metadata(evidence: Any) -> dict[str, Any]:
             getattr(evidence, "context_manifest_id", "") or ""
         ).strip(),
         "manifest_hash_prefix": digest[:12],
+        "reference_id": str(
+            getattr(evidence, "reference_id", "") or ""
+        ).strip(),
     }
 
 
@@ -973,6 +1194,27 @@ def _location_intersects_changed_lines(
         line in changed.get(location.path, set())
         for line in range(location.line, end_line + 1)
     )
+
+
+def _issue_anchor_is_delivered(issue: ReviewIssue, ledger: EvidenceLedger) -> bool:
+    """Tell role/claim omissions apart from genuinely missing source bodies."""
+
+    locations: list[LocationParseResult] = []
+    display = normalize_location(issue.location)
+    if display.valid and display.line is not None:
+        locations.append(display)
+    if issue.primary_anchor is not None:
+        anchor = normalize_location(issue.primary_anchor.location)
+        if anchor.valid and anchor.line is not None:
+            locations.append(anchor)
+    for location in locations:
+        if ledger.covers(
+            location.path or "",
+            location.line or 0,
+            location.end_line or location.line,
+        ):
+            return True
+    return False
 
 
 def _line_count(path: Path) -> int:

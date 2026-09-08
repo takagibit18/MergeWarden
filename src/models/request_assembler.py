@@ -148,7 +148,7 @@ class RequestAssembler:
             removable = [
                 index
                 for index, item in enumerate(selected)
-                if item.role in {"assistant", "tool"}
+                if item.role in {"assistant", "tool"} and not item.preserve_on_trim
             ]
             for index in reversed(removable):
                 if estimate_request(selected) <= budget:
@@ -165,7 +165,11 @@ class RequestAssembler:
                 candidates = [
                     index
                     for index, item in enumerate(selected)
-                    if item.role != "system" and item.content
+                    if (
+                        item.role != "system"
+                        and item.content
+                        and not item.preserve_on_trim
+                    )
                 ]
                 if not candidates:
                     break

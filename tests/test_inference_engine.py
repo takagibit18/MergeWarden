@@ -25,6 +25,38 @@ def _extract_payload_from_user_message(content: str) -> dict[str, Any]:
     return cast(dict[str, Any], json.loads(content.split("\n", 1)[1]))
 
 
+def test_final_submit_context_validation_uses_serialized_wire_payload() -> None:
+    telemetry = {
+        "required_catalog_ids": ["ev-required"],
+    }
+    missing = InferenceEngine._validate_final_submit_request_context(  # noqa: SLF001
+        AssembledRequest(
+            messages=[],
+            estimated_tokens=100,
+            request_hash="hash",
+            serialized_payload='{"messages":[{"role":"user","content":"other"}]}',
+        ),
+        telemetry,
+        budget=200,
+    )
+    present = InferenceEngine._validate_final_submit_request_context(  # noqa: SLF001
+        AssembledRequest(
+            messages=[],
+            estimated_tokens=100,
+            request_hash="hash",
+            serialized_payload=(
+                '{"messages":[{"role":"user","content":"id=ev-required"}]}'
+            ),
+        ),
+        telemetry,
+        budget=200,
+    )
+
+    assert missing["valid"] is False
+    assert missing["missing_catalog_ids"] == ["ev-required"]
+    assert present["valid"] is True
+
+
 class RecordingFakeModelClient:
     """Record model calls and emulate summary/main responses."""
 

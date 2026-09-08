@@ -19,7 +19,11 @@ from src.analyzer.context_state import ContextState, DecisionStep, ErrorDetail
 from src.analyzer.context_strategy import ContextStrategy, build_context_strategy
 from src.analyzer.diff_lines import changed_new_lines_by_file
 from src.analyzer.event_log import EventEntry, EventLog, EventType
-from src.analyzer.finding_integrity import FindingIntegrityGuard, build_candidates
+from src.analyzer.finding_integrity import (
+    FindingIntegrityGuard,
+    build_candidates,
+    classify_integrity_failure,
+)
 from src.analyzer.finding_contract import canonical_contract_gaps
 from src.analyzer.inference_engine import InferenceEngine
 from src.analyzer.output_formatter import ReviewReport
@@ -39,6 +43,7 @@ from src.analyzer.schemas import (
     ReviewRequest,
     ReviewOutcome,
     ReviewResponse,
+    EXPLORATION_TOOL_NAMES,
 )
 from src.analyzer.trace import TraceRecorder
 from src.analyzer.verifier_context import capture_verifier_tool_evidence
@@ -46,12 +51,18 @@ from src.config import get_settings
 from src.models.client import ModelClient
 from src.models.conversation import ModelConversation
 from src.models.exceptions import ModelClientError, ModelTimeoutError
-from src.models.schemas import DraftFinding, DraftFindingInput, ModelResponse
+from src.models.schemas import (
+    DraftFinding,
+    DraftFindingInput,
+    DraftFindingUpdateInput,
+    ModelResponse,
+)
 from src.orchestrator.draft_findings import (
     DraftFindingStore,
     extract_visible_draft_finding,
 )
 from src.orchestrator.run_journal import (
+    DraftFindingStateJournalPayload,
     LengthRecoveryJournalPayload,
     ModelResponseJournalPayload,
     PendingRunJournalEntry,
@@ -63,12 +74,13 @@ from src.orchestrator.run_journal import (
 from src.orchestrator.review_workflow import ReviewWorkflowTracker
 from src.orchestrator.tool_schemas import (
     build_draft_finding_tool_schema,
+    build_draft_finding_update_tool_schema,
     build_submit_tool_schemas,
     build_tool_schemas,
 )
 from src.tools import create_default_registry
 from src.tools.base import BaseTool, ToolRegistry, ToolResult, ToolSafety, ToolSpec
-from src.tools.exceptions import ToolError
+from src.tools.exceptions import ToolError, classify_tool_failure
 from src.tools.path_utils import tool_workspace_root
 from src.tools.review_context import ReviewToolContext
 
@@ -137,6 +149,7 @@ class AgentOrchestrator:
         self._tool_feedback: list[dict[str, Any]] = []
         self._feedback_digest_index: dict[str, dict[str, Any]] = {}
         self._tool_dedup_cache: dict[str, ToolResult] = {}
+        self._recoverable_tool_error_counts: dict[str, int] = {}
         self._submit_review_seen_any = False
         self._submit_iteration: int | None = None
         self._submit_debug_seen_any = False
@@ -189,6 +202,8 @@ class AgentOrchestrator:
         self._final_submit_evidence_included_count = 0
         self._final_submit_evidence_token_count = 0
         self._final_submit_evidence_truncated_count = 0
+        self._investigation_ready = False
+        self._review_finalized = False
         self._pre_budget_submit_attempted = False
         self._temperature = temperature
         self._review_max_iterations_override = review_max_iterations
@@ -255,7 +270,17 @@ class AgentOrchestrator:
         self._tool_result_journal_writes = 0
         self._draft_findings_created = 0
         self._draft_findings_from_visible_content = 0
+        self._draft_state_transition_count = 0
+        self._draft_stagnation_streak = 0
+        self._last_draft_action_fingerprint = ""
+        self._iteration_state_action_applied = False
+        self._iteration_progress = False
+        self._completion_incomplete_reasons: list[str] = []
         self._review_repair_attempt_count = 0
+        self._repair_format_attempt_count = 0
+        self._repair_contract_attempt_count = 0
+        self._repair_evidence_attempt_count = 0
+        self._final_submit_attempt_count = 0
         self._review_repair_succeeded_count = 0
         self._integrity_needs_repair_count = 0
         self._integrity_invalid_count = 0
@@ -295,6 +320,7 @@ class AgentOrchestrator:
                 self._skip_workflow_step("inspect_changed_context", "full_repo_review")
         response: ReviewResponse | DebugResponse | None = None
         while True:
+            self._iteration_progress = False
             tool_specs = (
                 [] if self._permission_mode == "plan" else self._registry.list_specs()
             )
@@ -353,6 +379,8 @@ class AgentOrchestrator:
             0.0, verifier_total - self._consolidation_latency_seconds
         )
         response = self._finalize_review_workflow(response, state)
+        self._review_finalized = True
+        self._apply_completion_state(response, state)
         self._record_finding_funnel(response)
         self._record_review_telemetry(state, response=response)
         self._close_event_log()
@@ -494,9 +522,11 @@ class AgentOrchestrator:
         )
         state.evidence_ledger = ledger_from_sources(
             existing_payload=state.evidence_ledger,
+            tool_evidence=self._verifier_tool_evidence,
             snapshot_id=self._evidence_snapshot_id,
             revision=self._evidence_revision,
         ).to_payload()
+        self._sync_draft_states(state)
         self._deterministic_rejected_count = guard_result.rejected_count
         self._verifier_accepted_count = guard_result.passed_count
         self._verifier_rejected_count = guard_result.rejected_count
@@ -565,34 +595,118 @@ class AgentOrchestrator:
             issues=output_issues,
             schema_version=response.report.schema_version,
         )
-        incomplete_codes = sorted(
-            {
-                failure.code
-                for failures in guard_result.failures.values()
-                for failure in failures
-                if failure.code
-                in {
-                    "evidence_not_observed",
-                    "verifier_context_budget_exhausted",
-                    "evidence_incomplete",
-                    "evidence_binding_missing",
-                    "finding_contract_incomplete",
-                    "finding_contract_invalid",
-                    "support_role_missing",
-                    "support_reference_missing",
-                    "evidence_identity_mismatch",
-                    "location_invalid",
-                    "location_line_missing",
-                    "location_line_out_of_range",
-                    "repository_path_invalid",
-                    "repository_path_missing",
-                }
+        incomplete_code_set = {
+            failure.code
+            for failures in guard_result.failures.values()
+            for failure in failures
+            if failure.code
+            in {
+                "evidence_not_observed",
+                "verifier_context_budget_exhausted",
+                "evidence_incomplete",
+                "evidence_binding_missing",
+                "finding_contract_incomplete",
+                "finding_contract_invalid",
+                "support_role_missing",
+                "support_reference_missing",
+                "evidence_identity_mismatch",
+                "location_invalid",
+                "location_line_missing",
+                "location_line_out_of_range",
+                "repository_path_invalid",
+                "repository_path_missing",
             }
-        )
+        }
+        if guard_result.invalid_candidate_ids:
+            # A candidate rejected for untrusted identity is not a clean
+            # no-issue review; retain that fact in the run-level result even
+            # though the candidate is correctly omitted from publication.
+            incomplete_code_set.add("untrusted_finding_candidates")
+        incomplete_codes = sorted(incomplete_code_set)
         if incomplete_codes:
             response.completion_status = "incomplete"
             response.incomplete_reasons = incomplete_codes
         return response
+
+    @staticmethod
+    def _repair_action_for_failure(failure: Any) -> str:
+        """Describe the smallest safe action for one candidate-level gap."""
+
+        failure_class = classify_integrity_failure(failure)
+        field = str(getattr(failure, "field", "") or "")
+        if failure_class == "source_gap":
+            location = str(getattr(failure, "location", "") or "").strip()
+            return (
+                "read the exact related source range"
+                + (f" ({location})" if location else "")
+                + " and cite it only after it is delivered"
+            )
+        if failure_class == "contract_gap":
+            return f"provide the missing semantic field {field or 'contract field'}"
+        if failure_class == "reference_error":
+            return f"replace the reference in {field or 'evidence_refs'} with an exact delivered evidence id"
+        if failure_class == "deterministic_normalization":
+            return "use the single primary_anchor; the runtime will derive location"
+        return "do not guess identity or bind an untrusted path; leave this candidate unresolved"
+
+    @classmethod
+    def _integrity_result_gap_payload(
+        cls,
+        result: Any,
+        *,
+        candidate: Any | None = None,
+    ) -> dict[str, Any]:
+        """Serialize candidate-level feedback with the original repair target."""
+
+        issue = getattr(candidate, "issue", None)
+        original_contents: dict[str, Any] = {}
+        if issue is not None:
+            repair_intent = getattr(issue, "repair_intent", None)
+            original_contents = {
+                "severity": getattr(getattr(issue, "severity", None), "value", ""),
+                "finding_id": str(getattr(issue, "finding_id", "") or ""),
+                "location": str(getattr(issue, "location", "") or ""),
+                "evidence": str(getattr(issue, "evidence", "") or ""),
+                "suggestion": str(getattr(issue, "suggestion", "") or ""),
+                "observed_behavior": str(
+                    getattr(issue, "observed_behavior", "") or ""
+                ),
+                "causal_mechanism": str(
+                    getattr(issue, "causal_mechanism", "") or ""
+                ),
+                "violated_invariant": str(
+                    getattr(issue, "violated_invariant", "") or ""
+                ),
+                "repair_intent": (
+                    repair_intent.model_dump(mode="json")
+                    if repair_intent is not None
+                    else {}
+                ),
+                "trigger": str(getattr(issue, "trigger", "") or ""),
+                "impact": str(getattr(issue, "impact", "") or ""),
+            }
+        return {
+            "candidate_id": str(getattr(result, "candidate_id", "")),
+            "target_candidate_id": str(getattr(result, "candidate_id", "")),
+            "current_finding_id": str(
+                getattr(issue, "finding_id", "") if issue is not None else ""
+            ),
+            "source_issue_index": getattr(candidate, "source_issue_index", None),
+            "logical_identity_hash": str(
+                getattr(candidate, "logical_identity_hash", "")
+            ),
+            "content_hash": str(getattr(candidate, "content_hash", "")),
+            "original_contents": original_contents,
+            "status": str(getattr(result, "status", "")),
+            "gaps": [
+                {
+                    **failure.as_detail(),
+                    "failure_class": classify_integrity_failure(failure),
+                    "required_action": cls._repair_action_for_failure(failure),
+                }
+                for failure in getattr(result, "failures", ())
+            ],
+        }
 
     async def _maybe_repair_review_findings(
         self,
@@ -602,11 +716,21 @@ class AgentOrchestrator:
     ) -> ReviewResponse:
         """Give one bounded, exact integrity repair opportunity before publish."""
 
-        if not response.report.issues:
+        # ResultProcessor applies the output policy before this stage.  A
+        # policy-filtered response can therefore be empty even though the
+        # submitted model report still contains a candidate with a repairable
+        # integrity gap.  Repair must inspect that submitted report; otherwise
+        # the guard can only reject after the recovery opportunity is gone.
+        submitted_report = (
+            self._last_plan.draft_review
+            if self._last_plan is not None and self._last_plan.draft_review is not None
+            else response.report
+        )
+        if not submitted_report.issues:
             return response
         if self._review_repair_attempt_count >= self._settings.review_repair_max_attempts:
             return response
-        candidates = build_candidates(response.report, iteration=self._iteration)
+        candidates = build_candidates(submitted_report, iteration=self._iteration)
         if not candidates:
             return response
         observed_tool_evidence = self._observed_tool_evidence(state)
@@ -630,6 +754,21 @@ class AgentOrchestrator:
             for result in preview.results
             if result.status == "needs_repair"
         ]
+        if needs and self._budget_state == "hard_capped":
+            self._add_incomplete_reason(state, "repair_budget_exhausted")
+            self._record_event(
+                EventType.DECISION,
+                "finding_repair",
+                {
+                    "iteration": self._iteration,
+                    "stage": "pre_publish_repair_skipped",
+                    "succeeded": False,
+                    "reason": "repair_budget_exhausted",
+                    "remaining_tokens": 0,
+                    "needs_repair_count": len(needs),
+                },
+            )
+            return response
         needs_source_indexes = {
             candidate.source_issue_index
             for candidate, result in zip(
@@ -643,14 +782,49 @@ class AgentOrchestrator:
         self._integrity_invalid_count = sum(
             result.status == "invalid" for result in preview.results
         )
+        invalid_results = [
+            result for result in preview.results if result.status == "invalid"
+        ]
+        candidate_by_id = {
+            candidate.candidate_id: candidate for candidate in preview.bound_candidates
+        }
+        invalid_gaps = [
+            self._integrity_result_gap_payload(
+                result, candidate=candidate_by_id.get(result.candidate_id)
+            )
+            for result in invalid_results
+        ]
         if not needs:
+            if invalid_gaps:
+                self._last_validator_result = {
+                    "validator_passed": False,
+                    "submit_allowed": False,
+                    "unresolved_evidence_gaps": [],
+                    "rejected_candidates": invalid_gaps,
+                    "repair_instruction": (
+                        "The rejected candidates contain untrusted identity or an "
+                        "otherwise non-repairable integrity failure. Preserve the "
+                        "rejection and do not guess a nearby path, snapshot, hash, "
+                        "or source range."
+                    ),
+                }
+                self._record_event(
+                    EventType.DECISION,
+                    "finding_repair",
+                    {
+                        "iteration": self._iteration,
+                        "stage": "pre_publish_invalid_rejection",
+                        "candidate_count": len(candidates),
+                        "needs_repair_count": 0,
+                        "invalid_count": len(invalid_gaps),
+                        "rejected_candidates": invalid_gaps,
+                    },
+                )
             return response
         gaps = [
-            {
-                "candidate_id": result.candidate_id,
-                "status": result.status,
-                "gaps": [failure.as_detail() for failure in result.failures],
-            }
+            self._integrity_result_gap_payload(
+                result, candidate=candidate_by_id.get(result.candidate_id)
+            )
             for result in needs
         ]
         self._review_repair_attempt_count += 1
@@ -658,13 +832,19 @@ class AgentOrchestrator:
             "validator_passed": False,
             "submit_allowed": False,
             "unresolved_evidence_gaps": gaps,
+            "rejected_candidates": invalid_gaps,
             "repair_instruction": (
                 "Repair only the listed candidates. Preserve every candidate that "
                 "already passed. Fill each missing role with a real delivered-source "
                 "reference; never invent evidence, ids, hashes, or locations. "
-                "Preserve each target finding_id so the runtime can match the repair. "
+                "For every repaired issue set target_candidate_id to exactly one "
+                "target_candidate_id from the feedback. Preserve each target's original "
+                "contents unless repairing that same target. Do not use finding_id, "
+                "text, location, position, or a one-candidate assumption as a fallback. "
                 "If a target cannot be repaired, return that finding unchanged instead "
-                "of omitting it."
+                "of omitting it. Source evidence gaps may request one targeted read "
+                "or symbol lookup; after it returns, submit again and let validation "
+                "decide whether the candidate is repaired."
             ),
         }
         self._record_event(
@@ -678,16 +858,88 @@ class AgentOrchestrator:
                 "needs_repair_count": len(needs),
                 "invalid_count": self._integrity_invalid_count,
                 "gaps": gaps,
+                "rejected_candidates": invalid_gaps,
             },
         )
-        repair_plan = await self.analyze(
-            state,
-            request,
-            tool_specs=[],
-            force_submit=True,
+        source_gap_present = any(
+            classify_integrity_failure(failure) == "source_gap"
+            for result in needs
+            for failure in result.failures
         )
-        self._observe_review_submission(repair_plan)
-        self._observe_incomplete_plan(repair_plan, state)
+        if source_gap_present:
+            self._repair_evidence_attempt_count += 1
+            # A missing observed body is an exploration problem, not a generic
+            # invalid JSON problem.  Spend the current bounded repair turn on
+            # the normal read/search tools and only then, if the shared budget
+            # still permits it, request a submit-only recheck.
+            repair_plan = await self.analyze(
+                state,
+                request,
+                tool_specs=self._registry.list_specs(),
+                force_submit=False,
+                allow_exploration=True,
+            )
+            self._account_latest_model_usage()
+            self._observe_review_submission(repair_plan)
+            self._observe_incomplete_plan(repair_plan, state)
+            repair_results = await self.execute_tools(
+                repair_plan,
+                self._registry,
+                state,
+            )
+            self._observe_workflow_tools(repair_plan, repair_results)
+            self._refresh_evidence_ledger(state)
+            if self._budget_state == "hard_capped":
+                self._add_incomplete_reason(state, "repair_budget_exhausted")
+                self._record_event(
+                    EventType.DECISION,
+                    "finding_repair",
+                    {
+                        "iteration": self._iteration,
+                        "stage": "source_gap_submit_recheck_skipped",
+                        "repair_attempt": self._review_repair_attempt_count,
+                        "succeeded": False,
+                        "reason": "repair_budget_exhausted",
+                        "remaining_tokens": 0,
+                    },
+                )
+            if (
+                repair_plan.draft_review is None
+                and self._review_repair_attempt_count
+                < self._settings.review_repair_max_attempts
+                and self._budget_state != "hard_capped"
+            ):
+                self._review_repair_attempt_count += 1
+                self._record_event(
+                    EventType.DECISION,
+                    "finding_repair",
+                    {
+                        "iteration": self._iteration,
+                        "stage": "source_gap_submit_recheck",
+                        "repair_attempt": self._review_repair_attempt_count,
+                        "source_gap_exploration_tools": len(repair_plan.tool_calls),
+                    },
+                )
+                repair_plan = await self.analyze(
+                    state,
+                    request,
+                    tool_specs=[],
+                    force_submit=True,
+                )
+                self._account_latest_model_usage()
+                self._observe_review_submission(repair_plan)
+                self._observe_incomplete_plan(repair_plan, state)
+        else:
+            self._repair_contract_attempt_count += 1
+            repair_plan = await self.analyze(
+                state,
+                request,
+                tool_specs=[],
+                force_submit=True,
+            )
+            self._account_latest_model_usage()
+            self._observe_review_submission(repair_plan)
+            self._observe_incomplete_plan(repair_plan, state)
         if repair_plan.draft_review is None:
             self._record_event(
                 EventType.DECISION,
@@ -701,13 +953,47 @@ class AgentOrchestrator:
                 },
             )
             return response
+        if not repair_plan.draft_review.issues:
+            # An empty repair response is not evidence that any target was
+            # repaired. Preserve the original candidates for the full guard.
+            self._add_incomplete_reason(state, "empty_repair_submission")
+            self._record_event(
+                EventType.DECISION,
+                "finding_repair",
+                {
+                    "iteration": self._iteration,
+                    "stage": "pre_publish_empty_repair",
+                    "repair_attempt": self._review_repair_attempt_count,
+                    "succeeded": False,
+                    "reason": "empty_repair_submission",
+                    "target_candidate_count": len(needs),
+                },
+            )
+            return response
+        merge_diagnostics: list[dict[str, Any]] = []
         merged = self._merge_repaired_report(
-            response.report,
+            submitted_report,
             repair_plan.draft_review,
             preview,
+            diagnostics=merge_diagnostics,
+        )
+        if merge_diagnostics:
+            self._add_incomplete_reason(state, "repair_target_unmatched")
+            self._record_event(
+                EventType.DECISION,
+                "finding_repair",
+                {
+                    "iteration": self._iteration,
+                    "stage": "repair_target_rejected",
+                    "diagnostics": merge_diagnostics,
+                },
         )
         self._last_plan = repair_plan.model_copy(update={"draft_review": merged})
-        response.report = merged
+        # Reapply the deterministic output policy to the repaired report for
+        # publication.  The unfiltered merged report remains in _last_plan so
+        # the final integrity guard sees every original candidate and can
+        # preserve unresolved failures truthfully.
+        response.report = ResultProcessor.merge_review_reports([merged])
         repaired_candidates = build_candidates(merged, iteration=self._iteration)
         repaired_tool_evidence = self._observed_tool_evidence(state)
         repaired_result = FindingIntegrityGuard(self._workspace_root).validate(
@@ -724,8 +1010,27 @@ class AgentOrchestrator:
             snapshot_id=self._evidence_snapshot_id,
             revision=self._evidence_revision,
         )
-        succeeded = bool(repaired_result.verified_candidate_ids) and not bool(
-            repaired_result.needs_repair_candidate_ids
+        target_source_indexes = {
+            candidate.source_issue_index
+            for candidate, result in zip(
+                preview.bound_candidates,
+                preview.results,
+                strict=False,
+            )
+            if result.status == "needs_repair"
+        }
+        repaired_by_source_index = {
+            candidate.source_issue_index: result
+            for candidate, result in zip(
+                repaired_result.bound_candidates,
+                repaired_result.results,
+                strict=False,
+            )
+        }
+        succeeded = bool(target_source_indexes) and all(
+            repaired_by_source_index.get(source_index) is not None
+            and repaired_by_source_index[source_index].status == "verified"
+            for source_index in target_source_indexes
         )
         repaired_verified_count = sum(
             result.status == "verified"
@@ -758,40 +1063,75 @@ class AgentOrchestrator:
         original: ReviewReport,
         repaired: ReviewReport,
         preview: Any,
+        *,
+        diagnostics: list[dict[str, Any]] | None = None,
     ) -> ReviewReport:
-        """Replace repairable issues by stable identity and retain omissions."""
+        """Replace only explicit runtime targets and retain every other issue."""
 
         repairable_candidates = {
             candidate.source_issue_index: candidate
             for candidate, result in zip(preview.bound_candidates, preview.results, strict=False)
             if result.status == "needs_repair"
         }
-        targets_by_finding_id: dict[str, list[int]] = {}
         targets_by_candidate_id: dict[str, list[int]] = {}
         for index, candidate in repairable_candidates.items():
-            finding_id = original.issues[index].finding_id.strip()
-            if finding_id:
-                targets_by_finding_id.setdefault(finding_id, []).append(index)
             candidate_id = candidate.candidate_id.strip()
             if candidate_id:
                 targets_by_candidate_id.setdefault(candidate_id, []).append(index)
 
         replacements: dict[int, Any] = {}
         for repaired_issue in repaired.issues:
-            target_index: int | None = None
-            finding_id = repaired_issue.finding_id.strip()
-            for index in targets_by_finding_id.get(finding_id, []):
-                if index not in replacements:
-                    target_index = index
-                    break
-            if target_index is None:
-                candidate_id = repaired_issue.candidate_id.strip()
-                for index in targets_by_candidate_id.get(candidate_id, []):
-                    if index not in replacements:
-                        target_index = index
-                        break
-            if target_index is not None:
-                replacements[target_index] = repaired_issue
+            target_id = repaired_issue.target_candidate_id.strip()
+            if not target_id:
+                if diagnostics is not None:
+                    diagnostics.append(
+                        {
+                            "code": "repair_target_missing",
+                            "message": "Repair issue omitted required target_candidate_id.",
+                            "finding_id": repaired_issue.finding_id.strip(),
+                        }
+                    )
+                continue
+            matching = targets_by_candidate_id.get(target_id, [])
+            if not matching:
+                if diagnostics is not None:
+                    diagnostics.append(
+                        {
+                            "code": "repair_target_unknown",
+                            "target_candidate_id": target_id,
+                            "message": (
+                                "Repair target is unknown, passed, duplicated, or belongs "
+                                "to another candidate set."
+                            ),
+                        }
+                    )
+                continue
+            if len(matching) != 1:
+                if diagnostics is not None:
+                    diagnostics.append(
+                        {
+                            "code": "repair_target_duplicate",
+                            "target_candidate_id": target_id,
+                            "message": "Repair target_candidate_id maps to more than one candidate.",
+                        }
+                    )
+                continue
+            target_index = matching[0]
+            if target_index in replacements:
+                if diagnostics is not None:
+                    diagnostics.append(
+                        {
+                            "code": "repair_target_duplicate",
+                            "target_candidate_id": target_id,
+                            "message": "The same repair target was submitted more than once.",
+                        }
+                    )
+                continue
+            # The runtime rebinds the exact target and clears the selector
+            # before the next full integrity validation.
+            replacements[target_index] = repaired_issue.model_copy(
+                update={"candidate_id": target_id, "target_candidate_id": ""}
+            )
 
         merged: list[Any] = []
         for index, issue in enumerate(original.issues):
@@ -801,8 +1141,6 @@ class AgentOrchestrator:
                 # A missing repair response must remain visible to the final
                 # integrity guard; omission is not an implicit withdrawal.
                 merged.append(issue)
-        if not original.issues:
-            merged = list(repaired.issues)
         return ReviewReport(
             summary=repaired.summary or original.summary,
             issues=merged,
@@ -861,9 +1199,7 @@ class AgentOrchestrator:
             request,
             self._registry.list_specs(),
         )
-        self._total_tokens += self._latest_tokens
-        self._budget_state = self._result_processor.budget_state(self._total_tokens)
-        self._budget_exhausted = self._budget_state != "none"
+        self._account_latest_model_usage()
         recovery_results = await self.execute_tools(
             recovery_plan,
             self._registry,
@@ -969,7 +1305,7 @@ class AgentOrchestrator:
                 validator_result,
                 all_tools_succeeded=(
                     len(results) == len(plan.tool_calls)
-                    and all(result.ok for result in results)
+                    and all(result.ok or result.recoverable for result in results)
                 ),
             )
         if self._workflow_enforcement == "off":
@@ -1080,6 +1416,7 @@ class AgentOrchestrator:
         self._validator_passed = passed
         if passed:
             self._review_stage = "submit_ready"
+            self._investigation_ready = True
         else:
             self._review_stage = "explore"
         self._record_event(
@@ -1149,6 +1486,7 @@ class AgentOrchestrator:
         state = self.prepare_context(request)
         response: ReviewResponse | DebugResponse | None = None
         while True:
+            self._iteration_progress = False
             tool_specs = (
                 [] if self._permission_mode == "plan" else self._registry.list_specs()
             )
@@ -1195,8 +1533,23 @@ class AgentOrchestrator:
             return response
         if self._length_recovery_required:
             return await self._recover_review_after_length(state, request, response)
+        if self._draft_finding_store.has_pending():
+            self._add_incomplete_reason(state, "unresolved_draft_findings")
+            self._record_finalize_skipped("unresolved_draft_findings")
+            self._apply_completion_state(response, state)
+            return response
         skip_reason = self._finalize_skip_reason()
         if skip_reason:
+            if not self._has_review_business_output(plan.draft_review):
+                incomplete_reason = {
+                    "model_timeout": "provider_timeout",
+                    "budget_hard_capped": "token_budget_exhausted",
+                    "pre_budget_submit_attempted": "no_valid_submit",
+                    "model_incomplete": "model_incomplete",
+                    "run_timeout": "run_timeout",
+                }.get(skip_reason, skip_reason)
+                self._add_incomplete_reason(state, incomplete_reason)
+                self._apply_completion_state(response, state)
             self._record_finalize_skipped(skip_reason)
             return response
         finalize_plan = await self.analyze(
@@ -1208,6 +1561,12 @@ class AgentOrchestrator:
         formatted = self.format_result(state, tool_results=[])
         assert isinstance(formatted, ReviewResponse)
         response = formatted
+        if finalize_plan.draft_review is None:
+            self._add_incomplete_reason(
+                state,
+                finalize_plan.incomplete_reason or "no_valid_submit",
+            )
+            self._apply_completion_state(response, state)
         self._record_event(
             EventType.DECISION,
             "finalize",
@@ -1384,12 +1743,24 @@ class AgentOrchestrator:
         tool_specs: list[ToolSpec],
         *,
         force_submit: bool = False,
+        allow_exploration: bool = False,
     ) -> AnalysisPlan:
         """Run model analysis and return structured plan."""
         start = perf_counter()
         self._last_actual_reasoning_effort = "unknown"
+        self._iteration_state_action_applied = False
+        pending_draft_exploration = (
+            isinstance(request, ReviewRequest)
+            and self._draft_finding_store.has_pending()
+            and (
+                allow_exploration
+                or self._can_explore_pending_draft()
+            )
+        )
+        explicit_exploration_allowed = allow_exploration or pending_draft_exploration
         submit_only_call = force_submit or (
             self._iteration + 1 >= self._max_iterations
+            and not explicit_exploration_allowed
         )
         logical_stage = (
             "submit_only"
@@ -1442,6 +1813,7 @@ class AgentOrchestrator:
         # survives assembly and receives a provider response.
         state.evidence_ledger = ledger_from_sources(
             existing_payload=state.evidence_ledger,
+            tool_evidence=self._verifier_tool_evidence,
             snapshot_id=self._evidence_snapshot_id,
             revision=self._evidence_revision,
         ).to_payload()
@@ -1471,7 +1843,10 @@ class AgentOrchestrator:
                     request=request,
                     defer_submit=defer_review_submit,
                 )
-                near_last_iteration = (self._iteration + 1) >= self._max_iterations
+                near_last_iteration = (
+                    self._iteration + 1 >= self._max_iterations
+                    and not explicit_exploration_allowed
+                )
                 submit_only_call = force_submit or near_last_iteration
                 call_stage = (
                     "submit_only"
@@ -1485,7 +1860,7 @@ class AgentOrchestrator:
                 # registry but intentionally removes it before serialization.
                 logical_stage = call_stage
                 if force_submit:
-                    serialized_tools = build_submit_tool_schemas()
+                    serialized_tools = build_submit_tool_schemas(model_input=True)
                 else:
                     serialized_tools = build_tool_schemas(active_tool_specs)
                     if (
@@ -1493,9 +1868,11 @@ class AgentOrchestrator:
                         and self._permission_mode != "plan"
                     ):
                         serialized_tools.append(build_draft_finding_tool_schema())
+                        serialized_tools.append(build_draft_finding_update_tool_schema())
                     if not defer_review_submit:
-                        serialized_tools += build_submit_tool_schemas()
+                        serialized_tools += build_submit_tool_schemas(model_input=True)
                 wire_tool_schema_count = len(serialized_tools)
+                self._final_submit_attempt_count += int(submit_only_call)
                 result, usage = await engine.analyze(
                     state=state,
                     request=request,
@@ -1526,9 +1903,13 @@ class AgentOrchestrator:
                         if isinstance(request, ReviewRequest)
                         else None
                     ),
+                    allow_exploration=explicit_exploration_allowed,
                 )
                 self._latest_tokens = usage.total_tokens
                 if result.schema_repair_attempted_count:
+                    self._repair_format_attempt_count += (
+                        result.schema_repair_attempted_count
+                    )
                     self._review_repair_attempt_count += (
                         result.schema_repair_attempted_count
                     )
@@ -1540,10 +1921,12 @@ class AgentOrchestrator:
                             "stage": "schema_validation_repair",
                             "repair_attempt": self._review_repair_attempt_count,
                             "schema_repair_attempted_count": result.schema_repair_attempted_count,
+                            "repair_format_attempt_count": self._repair_format_attempt_count,
                             "shared_repair_budget": self._settings.review_repair_max_attempts,
                         },
                     )
-                self._persist_draft_finding_calls(result)
+                self._persist_draft_finding_calls(result, state=state)
+                self._sync_draft_states(state)
                 if result.draft_review is not None:
                     self._submit_review_seen_any = True
                 if result.draft_debug is not None:
@@ -1768,6 +2151,23 @@ class AgentOrchestrator:
             return tool_specs
         return [spec for spec in tool_specs if spec.name != "validate_review_draft"]
 
+    def _can_explore_pending_draft(self) -> bool:
+        """Allow a pending checkpoint to use tools at the nominal last round.
+
+        A draft-only round gets one genuine follow-up opportunity.  If the
+        preceding round already used exploration and the run is at its ceiling,
+        the existing bounded submit path remains the safe terminal fallback.
+        """
+
+        plan = self._last_plan
+        if plan is None or not plan.tool_calls:
+            return True
+        for raw_call in plan.tool_calls:
+            function = raw_call.get("function") if isinstance(raw_call, dict) else {}
+            if isinstance(function, dict) and str(function.get("name", "")) in EXPLORATION_TOOL_NAMES:
+                return True
+        return False
+
     async def execute_tools(
         self,
         plan: AnalysisPlan,
@@ -1846,7 +2246,19 @@ class AgentOrchestrator:
                 state.errors.append(
                     ErrorDetail(file="", message=err, category="runtime")
                 )
-                results.append(ToolResult(ok=False, error=err, data=structured))
+                results.append(
+                    ToolResult(
+                        ok=False,
+                        error=err,
+                        data=structured,
+                        error_type="tool_not_found",
+                        failure_class="parameter_error",
+                        recoverable=True,
+                        recommended_next_step=str(
+                            structured["recommended_next_step"]
+                        ),
+                    )
+                )
                 self._journal_tool_result(plan, raw_call, results[-1])
                 executed_feedback.append(
                     {
@@ -1865,7 +2277,18 @@ class AgentOrchestrator:
                     state.errors.append(
                         ErrorDetail(file="", message=err, category="security")
                     )
-                    results.append(ToolResult(ok=False, error=err))
+                    results.append(
+                        ToolResult(
+                            ok=False,
+                            error=err,
+                            error_type="confirmation_required",
+                            failure_class="permission_policy",
+                            recoverable=False,
+                            recommended_next_step=(
+                                "Wait for explicit confirmation before using this write or execute tool."
+                            ),
+                        )
+                    )
                     self._journal_tool_result(plan, raw_call, results[-1])
                     self._record_event(
                         EventType.ERROR,
@@ -2072,9 +2495,7 @@ class AgentOrchestrator:
     ) -> ReviewResponse | DebugResponse:
         """Build final response according to run mode."""
         plan = self._last_plan or AnalysisPlan(needs_tools=False, tool_calls=[])
-        self._total_tokens += self._latest_tokens
-        self._budget_state = self._result_processor.budget_state(self._total_tokens)
-        self._budget_exhausted = self._budget_state != "none"
+        self._account_latest_model_usage()
 
         response: ReviewResponse | DebugResponse
         blocking_error: bool
@@ -2089,6 +2510,7 @@ class AgentOrchestrator:
         self._blocking_error = blocking_error
         response.context = state
         response.run_id = self._run_id or str(uuid4())
+        self._apply_completion_state(response, state)
         self._record_event(
             EventType.PHASE_END,
             "format",
@@ -2125,26 +2547,191 @@ class AgentOrchestrator:
         )
         return response
 
+    def _account_latest_model_usage(self) -> None:
+        """Charge every completed model call, including repair-only calls."""
+
+        self._total_tokens += max(0, int(self._latest_tokens or 0))
+        self._budget_state = self._result_processor.budget_state(self._total_tokens)
+        self._budget_exhausted = self._budget_state != "none"
+
+    def _sync_draft_states(self, state: ContextState) -> None:
+        """Copy the durable store's explicit checkpoint view into shared state."""
+
+        state.draft_findings = [item.model_copy(deep=True) for item in self._draft_finding_store.states()]
+
+    def _mark_pending_drafts_incomplete(
+        self,
+        state: ContextState,
+        reason: str,
+    ) -> None:
+        """Close open hypotheses with a truthful bounded-run reason."""
+
+        changed_ids: list[str] = []
+        for checkpoint in self._draft_finding_store.states():
+            if checkpoint.status != "pending":
+                continue
+            update = DraftFindingUpdateInput(
+                draft_id=checkpoint.draft_id,
+                status="incomplete",
+                reason=reason,
+                missing_checks=list(checkpoint.missing_checks),
+                evidence_refs=list(checkpoint.evidence_refs),
+            )
+            transition = self._draft_finding_store.update(
+                update,
+                iteration=self._iteration,
+            )
+            if transition is not None and transition[1]:
+                changed_ids.append(checkpoint.draft_id)
+                next_state = transition[0]
+                if self._run_journal is not None:
+                    self._run_journal.append(
+                        PendingRunJournalEntry(
+                            type="draft_finding_state",
+                            payload=DraftFindingStateJournalPayload(
+                                draft_id=next_state.draft_id,
+                                status=next_state.status,
+                                reason=next_state.reason,
+                                missing_checks=next_state.missing_checks,
+                                evidence_refs=next_state.evidence_refs,
+                                iteration=self._iteration,
+                            ).model_dump(mode="json"),
+                        )
+                    )
+        if changed_ids:
+            self._draft_state_transition_count += len(changed_ids)
+            self._record_event(
+                EventType.DECISION,
+                "draft_finding_state",
+                {
+                    "iteration": self._iteration,
+                    "status": "incomplete",
+                    "draft_ids": changed_ids,
+                    "reason": reason,
+                    "origin": "runtime_termination",
+                },
+            )
+        self._sync_draft_states(state)
+
+    def _add_incomplete_reason(self, state: ContextState, reason: str) -> None:
+        """Record one stable response-level incomplete reason."""
+
+        normalized = str(reason or "").strip()
+        if not normalized:
+            return
+        if normalized not in self._completion_incomplete_reasons:
+            self._completion_incomplete_reasons.append(normalized)
+        self._mark_pending_drafts_incomplete(state, normalized)
+
+    def _apply_completion_state(
+        self,
+        response: ReviewResponse | DebugResponse,
+        state: ContextState,
+    ) -> None:
+        """Expose incomplete run semantics without changing legacy complete payloads."""
+
+        if not isinstance(response, ReviewResponse):
+            return
+        reasons = list(
+            dict.fromkeys(
+                [
+                    *getattr(response, "incomplete_reasons", []),
+                    *self._completion_incomplete_reasons,
+                ]
+            )
+        )
+        if self._model_incomplete_seen and self._last_plan is not None:
+            if self._last_plan.incomplete_reason:
+                reasons.append(self._last_plan.incomplete_reason)
+        if self._draft_finding_store.has_incomplete():
+            reasons.append("incomplete_draft_findings")
+        for reason in reasons:
+            if reason and reason not in self._completion_incomplete_reasons:
+                self._completion_incomplete_reasons.append(reason)
+        if reasons:
+            response.completion_status = "incomplete"
+            response.incomplete_reasons = list(dict.fromkeys(reasons))
+        self._sync_draft_states(state)
+        response.investigation_ready = bool(
+            self._investigation_ready
+            or (
+                not self._draft_finding_store.has_pending()
+                and not self._blocking_error
+                and not self._model_incomplete_seen
+            )
+        )
+        response.submission_received = bool(self._submit_review_seen_any)
+        response.review_complete = bool(
+            self._review_finalized
+            and self._submit_review_seen_any
+            and not self._blocking_error
+            and (
+                not self._provider_error_seen or self._model_timeout_recovered
+            )
+        )
+
     def should_continue(
         self, state: ContextState, response: ReviewResponse | DebugResponse
     ) -> bool:
         """Decide whether another loop iteration should run."""
+        plan = self._last_plan
+        is_review = self._is_review_mode(state)
         has_pending_tools = (
             False
             if self._permission_mode == "plan"
-            else bool(self._last_plan and self._last_plan.needs_tools)
+            else bool(plan and plan.needs_tools and plan.tool_calls)
         )
+        has_explicit_submit = bool(plan and plan.has_explicit_submit)
+        has_state_action = bool(plan and plan.has_state_action)
+        has_valid_state_action = bool(
+            has_state_action and self._iteration_state_action_applied
+        )
+        has_effective_action = bool(
+            has_pending_tools or has_valid_state_action or has_explicit_submit
+        )
+        has_pending_drafts = is_review and self._draft_finding_store.has_pending()
         defer_review_submit = (
-            self._is_review_mode(state)
+            is_review
             and self._iteration < self._review_min_tool_iterations
             and not self._blocking_error
             and self._permission_mode != "plan"
         )
+
+        # A newly recorded hypothesis is progress but not completion.  A
+        # repeated state action without new evidence is tracked separately so
+        # the run can close with a bounded, truthful reason.
+        if has_pending_drafts:
+            fingerprint = self._plan_action_fingerprint(plan)
+            if not self._iteration_progress:
+                if fingerprint and fingerprint == self._last_draft_action_fingerprint:
+                    self._draft_stagnation_streak += 1
+                else:
+                    self._draft_stagnation_streak = 1
+            else:
+                self._draft_stagnation_streak = 0
+            self._last_draft_action_fingerprint = fingerprint
+
+        terminal_reason = ""
+        if not has_effective_action and not defer_review_submit:
+            terminal_reason = "no_effective_action"
+            if has_pending_drafts or self._permission_mode == "plan":
+                self._add_incomplete_reason(state, terminal_reason)
+        elif (
+            has_pending_drafts
+            and not has_explicit_submit
+            and self._draft_stagnation_streak
+            >= self._settings.draft_stagnation_max_rounds
+        ):
+            terminal_reason = "draft_stagnation"
+            self._add_incomplete_reason(state, terminal_reason)
+
         self._model_completed = (
             not has_pending_tools
             and not self._blocking_error
             and not defer_review_submit
             and not self._model_incomplete_seen
+            and not has_pending_drafts
+            and has_effective_action
         )
         submit_ready = self._review_stage == "submit_ready"
         reached_limit = (self._iteration + 1) >= self._max_iterations
@@ -2153,6 +2740,26 @@ class AgentOrchestrator:
         submit_recovery_allowed = (
             self._submit_only_retry_pending and not reached_limit
         )
+
+        if self._budget_exhausted:
+            terminal_reason = terminal_reason or "token_budget_exhausted"
+            if has_pending_drafts:
+                self._add_incomplete_reason(state, terminal_reason)
+        elif run_timed_out:
+            terminal_reason = terminal_reason or "run_timeout"
+            self._add_incomplete_reason(state, terminal_reason)
+        elif self._model_incomplete_seen and not self._length_recovery_required:
+            terminal_reason = terminal_reason or "model_incomplete"
+            self._add_incomplete_reason(state, terminal_reason)
+        elif self._blocking_error:
+            terminal_reason = terminal_reason or "unrecoverable_error"
+            self._add_incomplete_reason(state, terminal_reason)
+        elif has_explicit_submit and has_pending_drafts:
+            terminal_reason = terminal_reason or "unresolved_draft_findings"
+            self._add_incomplete_reason(state, terminal_reason)
+        elif reached_limit and has_pending_drafts:
+            terminal_reason = terminal_reason or "max_iterations"
+            self._add_incomplete_reason(state, terminal_reason)
 
         stop = (
             self._model_incomplete_seen
@@ -2164,6 +2771,7 @@ class AgentOrchestrator:
             or (reached_limit and not submit_ready and not submit_recovery_allowed)
             or self._budget_exhausted
             or run_timed_out
+            or bool(terminal_reason)
         )
         if self._budget_exhausted:
             state.errors.append(
@@ -2190,6 +2798,10 @@ class AgentOrchestrator:
             reason = "model_incomplete"
         elif run_timed_out:
             reason = "run_timeout"
+        elif terminal_reason and not (
+            terminal_reason == "no_effective_action" and reached_limit
+        ):
+            reason = terminal_reason
         elif self._model_completed and not submit_ready and not submit_recovery_allowed:
             reason = "model_completed"
         elif submit_ready:
@@ -2221,6 +2833,20 @@ class AgentOrchestrator:
                 "iteration": self._iteration,
                 "max_iterations": self._max_iterations,
                 "has_pending_tools": has_pending_tools,
+                "has_explicit_submit": has_explicit_submit,
+                "has_state_action": has_state_action,
+                "has_valid_state_action": has_valid_state_action,
+                "action_kinds": list(plan.action_kinds) if plan is not None else [],
+                "has_effective_action": has_effective_action,
+                "pending_draft_count": int(
+                    sum(
+                        item.status == "pending"
+                        for item in self._draft_finding_store.states()
+                    )
+                ),
+                "draft_status_counts": self._draft_finding_store.status_counts(),
+                "draft_stagnation_streak": self._draft_stagnation_streak,
+                "iteration_progress": self._iteration_progress,
                 "model_completed": self._model_completed,
                 "model_incomplete": self._model_incomplete_seen,
                 "reached_limit": reached_limit,
@@ -2276,6 +2902,7 @@ class AgentOrchestrator:
         self._tool_feedback = []
         self._feedback_digest_index = {}
         self._tool_dedup_cache = {}
+        self._recoverable_tool_error_counts = {}
         self._submit_review_seen_any = False
         self._submit_iteration = None
         self._submit_debug_seen_any = False
@@ -2319,6 +2946,8 @@ class AgentOrchestrator:
         self._final_submit_evidence_included_count = 0
         self._final_submit_evidence_token_count = 0
         self._final_submit_evidence_truncated_count = 0
+        self._investigation_ready = False
+        self._review_finalized = False
         self._pre_budget_submit_attempted = False
         self._review_workflow = ReviewWorkflowTracker()
         self._review_stage = "explore"
@@ -2357,7 +2986,17 @@ class AgentOrchestrator:
         self._tool_result_journal_writes = 0
         self._draft_findings_created = 0
         self._draft_findings_from_visible_content = 0
+        self._draft_state_transition_count = 0
+        self._draft_stagnation_streak = 0
+        self._last_draft_action_fingerprint = ""
+        self._iteration_state_action_applied = False
+        self._iteration_progress = False
+        self._completion_incomplete_reasons = []
         self._review_repair_attempt_count = 0
+        self._repair_format_attempt_count = 0
+        self._repair_contract_attempt_count = 0
+        self._repair_evidence_attempt_count = 0
+        self._final_submit_attempt_count = 0
         self._review_repair_succeeded_count = 0
         self._integrity_needs_repair_count = 0
         self._integrity_invalid_count = 0
@@ -2382,7 +3021,19 @@ class AgentOrchestrator:
                 "agent_run_timeout_seconds": self._agent_run_timeout_seconds,
                 "agent_tool_timeout_seconds": self._settings.agent_tool_timeout_seconds,
                 "agent_max_tool_calls": self._settings.agent_max_tool_calls,
+                "agent_max_recoverable_tool_errors": (
+                    self._settings.agent_max_recoverable_tool_errors
+                ),
                 "model_max_tokens": self._settings.model_max_tokens,
+                "exploration_max_output_tokens": (
+                    self._settings.exploration_max_output_tokens
+                ),
+                "submit_max_output_tokens": self._settings.submit_max_output_tokens,
+                "effective_stage_output_token_budgets": {
+                    "explore": self._settings.exploration_max_output_tokens,
+                    "validate": self._settings.exploration_max_output_tokens,
+                    "submit_only": self._settings.submit_max_output_tokens,
+                },
                 "pre_budget_submit_token_ratio": self._settings.pre_budget_submit_token_ratio,
                 "review_diff_first_changed_files": self._review_diff_first_changed_files,
                 "review_diff_first_changed_files_max": self._settings.review_diff_first_changed_files_max,
@@ -2425,6 +3076,11 @@ class AgentOrchestrator:
         if self._budget_state == "hard_capped":
             return False
         if self._model_timeout_seen:
+            return False
+        if self._draft_finding_store.has_pending():
+            # Evidence gathering must get the next available turn; spending
+            # the reserve on an automatic submit would recreate the old
+            # draft-only -> forced-submit path.
             return False
         plan = self._last_plan
         if plan is not None and (
@@ -2514,6 +3170,16 @@ class AgentOrchestrator:
             return "budget_hard_capped"
         if self._run_timeout_exceeded():
             return "run_timeout"
+        for reason in self._completion_incomplete_reasons:
+            if reason in {
+                "max_iterations",
+                "draft_stagnation",
+                "no_effective_action",
+                "unresolved_draft_findings",
+                "token_budget_exhausted",
+                "unrecoverable_error",
+            }:
+                return reason
         return ""
 
     def _length_recovery_block_reason(self) -> str:
@@ -2601,6 +3267,7 @@ class AgentOrchestrator:
                 category="runtime",
             )
         )
+        self._add_incomplete_reason(state, reason)
 
     def _observe_incomplete_plan(
         self,
@@ -2779,6 +3446,55 @@ class AgentOrchestrator:
         args: dict[str, Any],
     ) -> tuple[ToolResult, ErrorDetail | None, int]:
         started = perf_counter()
+
+        def bound_failure(result: ToolResult) -> ToolResult:
+            """Keep correctable failures recoverable, but bound repeated retries."""
+
+            if result.ok or not result.recoverable:
+                return result
+            failure_key = self._tool_dedup_key(
+                f"{tool_name}:{result.error_type or result.failure_class}", args
+            )
+            count = self._recoverable_tool_error_counts.get(failure_key, 0) + 1
+            self._recoverable_tool_error_counts[failure_key] = count
+            data = result.data if isinstance(result.data, dict) else {}
+            data = {
+                **data,
+                "recoverable": True,
+                "recoverable_error_count": count,
+                "recoverable_error_limit": self._settings.agent_max_recoverable_tool_errors,
+            }
+            if count <= self._settings.agent_max_recoverable_tool_errors:
+                return result.model_copy(update={"data": data})
+            bounded_message = (
+                f"Repeated recoverable failure for {tool_name} exceeded the "
+                f"limit of {self._settings.agent_max_recoverable_tool_errors}."
+            )
+            data.update(
+                {
+                    "ok": False,
+                    "error_type": "repeated_recoverable_tool_error",
+                    "failure_class": "repeat_bound",
+                    "recoverable": False,
+                    "message": bounded_message,
+                    "recommended_next_step": (
+                        "Stop retrying this call and preserve the remaining evidence gap."
+                    ),
+                }
+            )
+            return result.model_copy(
+                update={
+                    "data": data,
+                    "error": bounded_message,
+                    "error_type": "repeated_recoverable_tool_error",
+                    "failure_class": "repeat_bound",
+                    "recoverable": False,
+                    "recommended_next_step": (
+                        "Stop retrying this call and preserve the remaining evidence gap."
+                    ),
+                }
+            )
+
         dedup_key = None
         if tool.spec().safety == ToolSafety.READONLY:
             dedup_key = self._tool_dedup_key(tool_name, args)
@@ -2828,22 +3544,63 @@ class AgentOrchestrator:
                     "message": err,
                 }
                 return (
-                    ToolResult(ok=False, error=err, data=data),
+                    bound_failure(
+                        ToolResult(
+                            ok=False,
+                            error=err,
+                            data=data,
+                            error_type="tool_timeout",
+                            failure_class="timeout",
+                            recoverable=True,
+                            recommended_next_step=(
+                                "Retry with a narrower, bounded request; repeated timeouts stop the run."
+                            ),
+                        )
+                    ),
                     ErrorDetail(file="", message=err, category="runtime"),
                     elapsed_ms,
                 )
             except ToolError as exc:
                 err = f"Tool execution failed for {tool_name}: {exc}"
-                hint = self._tool_error_hint(tool_name=tool_name, message=str(exc))
+                classification = classify_tool_failure(
+                    exc, tool_name=tool_name, message=str(exc)
+                )
+                hint = {
+                    **self._tool_error_hint(tool_name=tool_name, message=str(exc)),
+                    **classification,
+                }
                 return (
-                    ToolResult(ok=False, error=err, data=hint),
+                    bound_failure(
+                        ToolResult(
+                            ok=False,
+                            error=err,
+                            data=hint,
+                            error_type=str(classification["error_type"]),
+                            failure_class=str(classification["failure_class"]),
+                            recoverable=bool(classification["recoverable"]),
+                            recommended_next_step=str(
+                                classification["recommended_next_step"]
+                            ),
+                        )
+                    ),
                     ErrorDetail(file=exc.path, message=err, category="runtime"),
                     int((perf_counter() - started) * 1000),
                 )
             except Exception as exc:  # noqa: BLE001
                 err = f"Tool execution failed for {tool_name}: {exc}"
                 return (
-                    ToolResult(ok=False, error=err),
+                    bound_failure(
+                        ToolResult(
+                            ok=False,
+                            error=err,
+                            error_type="tool_execution_failed",
+                            failure_class="execution_error",
+                            recoverable=False,
+                            recommended_next_step=(
+                                "Preserve the failure and return a partial result; no automatic bypass is allowed."
+                            ),
+                        )
+                    ),
                     ErrorDetail(file="", message=err, category="runtime"),
                     int((perf_counter() - started) * 1000),
                 )
@@ -2891,6 +3648,14 @@ class AgentOrchestrator:
             error_type = str(result.data.get("error_type", "")).strip()
             if error_type:
                 payload["error_type"] = error_type
+        if not result.ok:
+            if result.error_type:
+                payload["error_type"] = result.error_type
+            if result.failure_class:
+                payload["failure_class"] = result.failure_class
+            payload["recoverable"] = bool(result.recoverable)
+            if result.recommended_next_step:
+                payload["recommended_next_step"] = result.recommended_next_step
         return payload
 
     def _observe_review_submission(self, plan: AnalysisPlan) -> None:
@@ -2901,6 +3666,44 @@ class AgentOrchestrator:
         if plan.draft_review is not None:
             self._submitted_attempt_count += 1
             self._review_stage = "complete"
+
+    @staticmethod
+    def _plan_action_fingerprint(plan: AnalysisPlan | None) -> str:
+        """Create a stable action signature for the draft anti-spin guard."""
+
+        if plan is None:
+            return ""
+        actions: list[dict[str, Any]] = []
+        for draft_call in plan.draft_finding_calls:
+            actions.append({"kind": "record_draft", "value": draft_call.model_dump(mode="json")})
+        for draft_update in plan.draft_finding_updates:
+            actions.append({"kind": "update_draft", "value": draft_update.model_dump(mode="json")})
+        for raw_call in plan.tool_calls:
+            function = raw_call.get("function") if isinstance(raw_call, dict) else {}
+            if not isinstance(function, dict):
+                continue
+            arguments = function.get("arguments", {})
+            if isinstance(arguments, str):
+                try:
+                    arguments = _json.loads(arguments)
+                except (TypeError, ValueError):
+                    arguments = str(arguments)
+            actions.append(
+                {
+                    "kind": "explore",
+                    "name": str(function.get("name", "")),
+                    "arguments": arguments,
+                }
+            )
+        if plan.has_explicit_submit:
+            actions.append({"kind": "submit"})
+        if not actions:
+            return "none"
+        try:
+            encoded = _json.dumps(actions, ensure_ascii=True, sort_keys=True, default=str)
+        except Exception:  # noqa: BLE001
+            encoded = str(actions)
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:20]
 
     def _recover_model_timeout_after_valid_review(self, state: ContextState) -> None:
         """Keep a recovered timeout diagnostic from invalidating a valid review."""
@@ -2955,6 +3758,27 @@ class AgentOrchestrator:
             self._provider_error_seen and not self._model_timeout_recovered
         ):
             return "blocking_error"
+        for reason in (
+            "draft_stagnation",
+            "unresolved_draft_findings",
+            "no_effective_action",
+            "unrecoverable_error",
+            "model_incomplete",
+            "untrusted_finding_candidates",
+            "finding_contract_incomplete",
+            "finding_contract_invalid",
+            "support_role_missing",
+            "support_reference_missing",
+            "support_reference_unresolved",
+            "support_reference_undelivered",
+            "evidence_not_observed",
+            "evidence_incomplete",
+            "evidence_identity_mismatch",
+            "role_claim_missing",
+            "repair_target_unmatched",
+        ):
+            if self._last_decision_reason == reason or reason in self._completion_incomplete_reasons:
+                return reason
         if self._last_decision_reason == "model_completed" or self._model_completed:
             return "natural_model_stop"
         return "other"
@@ -2977,7 +3801,10 @@ class AgentOrchestrator:
             "tool_call_count": self._tool_call_count,
             "tool_bearing_iterations": len(self._tool_bearing_iterations),
             "submit_iteration": self._submit_iteration,
-            "natural_completion": termination_reason == "natural_model_stop",
+            "natural_completion": (
+                termination_reason == "natural_model_stop"
+                and (response is None or response.completion_status == "complete")
+            ),
             "iteration_guard_hit": self._iteration_guard_hit,
             "pre_budget_submit_triggered": self._pre_budget_submit_attempted,
             "termination_reason": termination_reason,
@@ -2987,10 +3814,29 @@ class AgentOrchestrator:
             "draft_findings_from_visible_content": (
                 self._draft_findings_from_visible_content
             ),
+            "draft_state_transition_count": self._draft_state_transition_count,
+            "draft_status_counts": self._draft_finding_store.status_counts(),
+            "draft_stagnation_streak": self._draft_stagnation_streak,
+            "incomplete_reasons": list(self._completion_incomplete_reasons),
             "length_recoveries_attempted": self._length_recovery_attempted,
             "length_recoveries_succeeded": self._length_recovery_succeeded,
             "length_recoveries_failed": self._length_recovery_failed,
             "submit_review_seen_any": self._submit_review_seen_any,
+            "investigation_ready": bool(
+                response.investigation_ready
+                if response is not None
+                else self._investigation_ready
+            ),
+            "submission_received": bool(
+                response.submission_received
+                if response is not None
+                else self._submit_review_seen_any
+            ),
+            "review_complete": bool(
+                response.review_complete
+                if response is not None
+                else self._review_finalized
+            ),
             "provider_timeout_recovered": self._model_timeout_recovered,
             "budget_exhausted": self._budget_exhausted,
             "budget_state": self._budget_state,
@@ -3039,6 +3885,16 @@ class AgentOrchestrator:
             "integrity_invalid_count": self._integrity_invalid_count,
             "deterministic_rejected_count": self._deterministic_rejected_count,
             "repair_attempted_count": self._review_repair_attempt_count,
+            "repair_budget_total": self._settings.review_repair_max_attempts,
+            "repair_budget_remaining": max(
+                0,
+                self._settings.review_repair_max_attempts
+                - self._review_repair_attempt_count,
+            ),
+            "repair_format_attempt_count": self._repair_format_attempt_count,
+            "repair_contract_attempt_count": self._repair_contract_attempt_count,
+            "repair_evidence_attempt_count": self._repair_evidence_attempt_count,
+            "final_submit_attempt_count": self._final_submit_attempt_count,
             "repair_succeeded_count": self._review_repair_succeeded_count,
             "final_published_count": self._final_published_count,
             "final_risk_finding_count": sum(
@@ -3172,6 +4028,9 @@ class AgentOrchestrator:
             "final_risk_finding_count": final_risk_count,
             "final_effective_issue_count": len(response.report.issues),
             "run_status": response.completion_status,
+            "investigation_ready": bool(response.investigation_ready),
+            "submission_received": bool(response.submission_received),
+            "review_complete": bool(response.review_complete),
         }
         self._record_event(
             EventType.FINDING_FUNNEL_COMPLETED,
@@ -3193,6 +4052,9 @@ class AgentOrchestrator:
                     "evidence_incomplete",
                     "evidence_binding_missing",
                     "support_reference_missing",
+                    "support_reference_unresolved",
+                    "support_reference_undelivered",
+                    "role_claim_missing",
                 }
                 for gap in gaps
             )
@@ -3214,6 +4076,7 @@ class AgentOrchestrator:
             "tool_name": tool_name,
             "message": message,
             "recommended_next_step": recommendation,
+            "recoverable": True,
         }
 
     @staticmethod
@@ -3242,6 +4105,33 @@ class AgentOrchestrator:
         for entry in entries:
             tool_call = entry.get("tool_call", {})
             result = entry.get("result")
+            function = tool_call.get("function") if isinstance(tool_call, dict) else {}
+            tool_name = (
+                str(function.get("name", "")).strip()
+                if isinstance(function, dict)
+                else ""
+            )
+            if (
+                isinstance(result, ToolResult)
+                and result.ok
+                and tool_name
+                and tool_name
+                in {
+                    "read_file",
+                    "grep_files",
+                    "glob_files",
+                    "list_dir",
+                    "get_changed_context",
+                    "changed_context",
+                    "find_symbol_context",
+                    "symbol_context",
+                }
+                and not (
+                    isinstance(result.data, dict)
+                    and result.data.get("dedup_hit") is True
+                )
+            ):
+                self._iteration_progress = True
             enriched = {
                 "iteration": self._iteration,
                 "tool_call": tool_call,
@@ -3281,6 +4171,16 @@ class AgentOrchestrator:
             for entry in self._verifier_tool_evidence
             if str(entry.get("tool_call_id", "")).strip() in delivered_call_ids
         ]
+
+    def _refresh_evidence_ledger(self, state: ContextState) -> None:
+        """Rebuild the catalog after an exploration repair turn delivers tools."""
+
+        state.evidence_ledger = ledger_from_sources(
+            existing_payload=state.evidence_ledger,
+            tool_evidence=self._verifier_tool_evidence,
+            snapshot_id=self._evidence_snapshot_id,
+            revision=self._evidence_revision,
+        ).to_payload()
 
     @staticmethod
     def _compute_feedback_digest(tool_call: dict[str, Any]) -> str:
@@ -3412,10 +4312,16 @@ class AgentOrchestrator:
         self._model_response_journal_writes += 1
         return entry.id
 
-    def _persist_draft_finding_calls(self, plan: AnalysisPlan) -> None:
+    def _persist_draft_finding_calls(
+        self,
+        plan: AnalysisPlan,
+        *,
+        state: ContextState | None = None,
+    ) -> None:
         """Journal runtime-bound drafts before making them available in memory."""
 
         for draft_input in plan.draft_finding_calls:
+            created_before = self._draft_findings_created
             draft = self._persist_one_draft_finding(
                 draft_input,
                 source_response_id=(
@@ -3427,8 +4333,102 @@ class AgentOrchestrator:
                 "record_draft_finding",
                 {
                     "ok": True,
-                    "recorded": True,
+                    "recorded": self._draft_findings_created > created_before,
                     "draft_id": draft.id,
+                },
+            )
+        for update in plan.draft_finding_updates:
+            unknown_evidence_refs = self._unknown_draft_evidence_refs(update, state)
+            if unknown_evidence_refs:
+                self._model_conversation.add_tool_result_for_name(
+                    "update_draft_finding",
+                    {
+                        "ok": False,
+                        "updated": False,
+                        "error_type": "reference_not_delivered",
+                        "draft_id": update.draft_id,
+                        "unknown_evidence_refs": unknown_evidence_refs,
+                    },
+                )
+                self._record_event(
+                    EventType.DECISION,
+                    "draft_finding_state",
+                    {
+                        "iteration": self._iteration,
+                        "draft_id": update.draft_id,
+                        "status": update.status,
+                        "changed": False,
+                        "reason": "reference_not_delivered",
+                        "unknown_evidence_refs": unknown_evidence_refs,
+                    },
+                )
+                continue
+            transition = self._draft_finding_store.update(
+                update,
+                iteration=self._iteration,
+            )
+            if transition is None:
+                self._model_conversation.add_tool_result_for_name(
+                    "update_draft_finding",
+                    {
+                        "ok": False,
+                        "updated": False,
+                        "error_type": "unknown_draft_id",
+                        "draft_id": update.draft_id,
+                    },
+                )
+                self._record_event(
+                    EventType.DECISION,
+                    "draft_finding_state",
+                    {
+                        "iteration": self._iteration,
+                        "draft_id": update.draft_id,
+                        "status": update.status,
+                        "changed": False,
+                        "reason": "unknown_draft_id",
+                    },
+                )
+                continue
+            transition_state, changed = transition
+            if changed:
+                self._draft_state_transition_count += 1
+                self._iteration_progress = True
+                self._iteration_state_action_applied = True
+            if self._run_journal is not None:
+                self._run_journal.append(
+                    PendingRunJournalEntry(
+                        type="draft_finding_state",
+                        payload=DraftFindingStateJournalPayload(
+                            draft_id=transition_state.draft_id,
+                            status=transition_state.status,
+                            reason=transition_state.reason,
+                            missing_checks=transition_state.missing_checks,
+                            evidence_refs=transition_state.evidence_refs,
+                            iteration=self._iteration,
+                        ).model_dump(mode="json"),
+                    )
+                )
+            self._record_event(
+                EventType.DECISION,
+                "draft_finding_state",
+                {
+                    "iteration": self._iteration,
+                    "draft_id": transition_state.draft_id,
+                    "status": transition_state.status,
+                    "changed": changed,
+                    "reason": transition_state.reason,
+                    "missing_checks": list(transition_state.missing_checks),
+                    "evidence_refs": list(transition_state.evidence_refs),
+                },
+            )
+            self._model_conversation.add_tool_result_for_name(
+                "update_draft_finding",
+                {
+                    "ok": True,
+                    "updated": True,
+                    "changed": changed,
+                    "draft_id": transition_state.draft_id,
+                    "status": transition_state.status,
                 },
             )
         if (
@@ -3449,6 +4449,37 @@ class AgentOrchestrator:
             origin="visible_content_recovery",
         )
         self._draft_findings_from_visible_content += 1
+
+    def _unknown_draft_evidence_refs(
+        self,
+        update: DraftFindingUpdateInput,
+        state: ContextState | None,
+    ) -> list[str]:
+        """Return draft refs that are not exact ids in delivered evidence."""
+
+        if state is None or not update.evidence_refs:
+            return []
+        available: set[str] = set()
+        for record in state.evidence_ledger:
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("lifecycle", "delivered")).strip() != "delivered":
+                continue
+            if bool(record.get("truncated", False)):
+                continue
+            artifact_id = str(record.get("artifact_id", "")).strip()
+            if artifact_id:
+                available.add(artifact_id)
+            aliases = record.get("aliases", [])
+            if isinstance(aliases, list):
+                available.update(
+                    str(alias).strip() for alias in aliases if str(alias).strip()
+                )
+        return [
+            reference
+            for reference in update.evidence_refs
+            if reference.strip() not in available
+        ]
 
     def _persist_one_draft_finding(
         self,
@@ -3471,6 +4502,26 @@ class AgentOrchestrator:
             draft_input,
             source_response_id=source_response_id,
         )
+        duplicate = self._draft_finding_store.find_duplicate(draft)
+        if duplicate is not None:
+            state = self._draft_finding_store.get_state(duplicate.id)
+            if state is not None:
+                self._draft_finding_store.add_if_new(draft)
+            self._record_event(
+                EventType.DECISION,
+                "draft_finding",
+                {
+                    "iteration": self._iteration,
+                    "draft_id": duplicate.id,
+                    "source_response_id": duplicate.source_response_id,
+                    "file": duplicate.file,
+                    "line": duplicate.line,
+                    "symbol": duplicate.symbol,
+                    "origin": origin,
+                    "duplicate": True,
+                },
+            )
+            return duplicate
         self._run_journal.append(
             PendingRunJournalEntry(
                 type="draft_finding",
@@ -3479,6 +4530,8 @@ class AgentOrchestrator:
         )
         self._draft_finding_store.add(draft)
         self._draft_findings_created += 1
+        self._iteration_state_action_applied = True
+        self._iteration_progress = True
         self._record_event(
             EventType.DECISION,
             "draft_finding",

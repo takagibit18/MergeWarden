@@ -9,7 +9,7 @@ import random
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 import httpx
 from pydantic import BaseModel, Field, model_validator
@@ -195,7 +195,7 @@ class GitHubApiClient:
         )
         self._max_attempts = max_attempts
         self._sleep = sleep
-        self._random_source = random_source
+        self._random_source: Callable[[], float] = random_source
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -338,7 +338,8 @@ class GitHubApiClient:
         raise RuntimeError(f"GitHub API {normalized_method} {path} exhausted retries")
 
     def _backoff_seconds(self, attempt: int) -> float:
-        return min(4.0, 0.5 * (2**attempt)) + (0.1 * self._random_source())
+        jitter = cast(float, self._random_source())
+        return min(4.0, 0.5 * (2.0**attempt)) + (0.1 * jitter)
 
     @staticmethod
     def _raise_api_error(resp: httpx.Response, path: str) -> None:

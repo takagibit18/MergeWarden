@@ -236,6 +236,19 @@ def _select_binding(
 
     declared_manifest = evidence.context_manifest_id.strip()
     declared_hash = evidence.context_hash.strip()
+    declared_artifact = evidence.artifact_id.strip()
+    if declared_artifact:
+        artifact_matches = [
+            item
+            for item in matches
+            if declared_artifact in {
+                item.artifact_id,
+                item.context_manifest_id,
+                item.context_hash,
+            }
+        ]
+        # An artifact id is an exact identity, never a location hint.
+        return artifact_matches[0] if len(artifact_matches) == 1 else None
     if declared_hash and not declared_manifest:
         return None
     if declared_manifest:
@@ -433,8 +446,14 @@ def _ledger_bindings_for_evidence(
     matches: set[TrustedEvidenceBinding] = set()
     declared_manifest = evidence.context_manifest_id.strip()
     declared_hash = evidence.context_hash.strip()
+    declared_artifact = evidence.artifact_id.strip()
     for record in ledger.records:
         if record.path != file or not record.covers(line, end_line):
+            continue
+        if declared_artifact and declared_artifact not in {
+            record.artifact_id,
+            *record.aliases,
+        }:
             continue
         if snapshot_id and record.snapshot_id != snapshot_id:
             continue
