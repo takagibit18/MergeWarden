@@ -113,6 +113,21 @@ catalog entry 全部保留，每个 entry 原子裁剪，不再使用任意前 4
 必需精确 ID；缺失时记录 `final_submit_context_insufficient`，不调用 provider。
 这项交付可靠性与 Graph 选择/语义质量分开统计。
 
+### 2.7 阶段契约表（实现与验收裁判）
+
+下面这张表是本轮实现的最小共享契约。`ready`、`validated`、`submitted`、
+`published` 只表示对应阶段真实完成；草稿、预检或 provider 返回都不能越级
+替代后续阶段。所有阶段都沿用同一 candidate/version、evidence identity、
+snapshot/revision 和 serialized-request 记录。
+
+| 阶段 | 权威输入 | 允许输出 | 完成条件 | 失败时的明确结果 | 预算边界 |
+| --- | --- | --- | --- | --- | --- |
+| 探索 / source | 当前 candidate、工具返回的完整 wire body、ledger | 新 evidence artifact、candidate checkpoint、待验证草稿 | 证据已落 ledger 且身份/范围可回溯 | `context_insufficient` 或 `source_exploration_failed`；不伪装成提交 | 受统一调用、token、时间上限；必须为后续 submit 保留预算 |
+| Preflight / validator | 当前 candidate/version、同一 canonical contract、完整证据目录 | 每候选 gap、版本化 validation result | 当前候选已按 canonical rule 检查 | `not_checked`、`contract_gap` 或 `evidence_gap`；不等于 ready | 只消费 preflight 配额，不借用 submit 结果 |
+| Final submit | preflight 结果、精确证据依赖、实际序列化 request | provider submit response 或显式未提交状态 | serialized request 未超限且每个必需精确 ref 可见，provider 成功返回提交 | `final_submit_context_insufficient`、`submit_failed` 或 `incomplete` | 原子保留候选/协议；预算不足时减少候选数量，不截断单个协议 |
+| Repair | 目标 candidate_id/version、原 finding、完整 gap、修复动作 | 每个目标候选 `repaired` / `unchanged` / `incomplete` | 目标精确、无重复/未知/跨候选覆盖，且重新通过同一 canonical rule | 保留原 finding，记录 repair transaction 与失败原因 | 先预留完整序列（source→submit 或 contract→submit），不足则不启动 |
+| Publish | 已验证的最终 candidate、serialized delivered evidence、最终 guard | publisher payload、发布审计记录 | integrity=`verified` 且全部交付字段可回放 | `publish_blocked`；不得以 draft/preflight/review_complete 替代 | 与探索/修复共用总预算和审计 journal |
+
 ## 3. 评测口径
 
 历史 semantic-v2 和已使用的 semantic-v3 行为保持不变。新的 `semantic-v4` 只显式 opt-in：
