@@ -143,6 +143,7 @@ def test_repair_merge_rejects_unknown_and_duplicate_targets_without_guessing() -
     assert [item["code"] for item in diagnostics] == [
         "repair_target_duplicate",
         "repair_target_unknown",
+        "repair_target_not_returned",
     ]
 
 
@@ -184,6 +185,27 @@ def test_repair_target_can_replace_issue_without_finding_id() -> None:
     assert merged.issues[0].finding_id == ""
     assert merged.issues[0].candidate_id == "candidate-a"
     assert merged.issues[0].suggestion == "Repaired without a reviewer finding label"
+
+
+def test_repair_sequence_preflight_requires_source_then_submit_budget() -> None:
+    orchestrator = AgentOrchestrator.__new__(AgentOrchestrator)
+    orchestrator._settings = SimpleNamespace(
+        review_repair_max_attempts=1,
+        token_hard_budget=36_000,
+        final_submit_request_token_budget=8_000,
+        submit_max_output_tokens=4_096,
+        model_request_timeout_seconds=90.0,
+    )
+    orchestrator._review_repair_attempt_count = 0
+    orchestrator._total_tokens = 0
+    orchestrator._budget_state = "none"
+    orchestrator._run_timeout_seconds = 170.0
+    orchestrator._run_started_at = 0.0
+
+    capacity = orchestrator._repair_sequence_capacity(2)  # noqa: SLF001
+
+    assert capacity["allowed"] is False
+    assert capacity["reason"] == "repair_sequence_attempt_budget_insufficient"
 
 
 class DummyWriteTool(BaseTool):

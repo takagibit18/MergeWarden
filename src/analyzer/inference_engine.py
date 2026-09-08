@@ -288,7 +288,14 @@ class InferenceEngine:
             )
             if folded is not None:
                 messages.append(folded)
-            repair_feedback = self._build_repair_feedback_message(validator_result)
+            repair_feedback = self._build_repair_feedback_message(
+                validator_result,
+                token_budget=(
+                    max(512, settings.final_submit_feedback_token_budget)
+                    if settings.final_submit_feedback_token_budget > 0
+                    else max(512, budget // 4)
+                ),
+            )
             if repair_feedback is not None:
                 messages.append(repair_feedback)
             if isinstance(request, ReviewRequest) and (
@@ -438,6 +445,13 @@ class InferenceEngine:
                 final_evidence_telemetry["context_insufficient_reason"] = str(
                     context_validation["reason"]
                 )
+        if assembled_request.estimated_tokens > max(1, request_budget):
+            context_telemetry["assembled_request_over_budget"] = True
+            context_telemetry["assembled_request_over_budget_reason"] = (
+                "serialized_submit_request_over_budget"
+                if submit_only
+                else "assembled_request_over_budget"
+            )
 
         self._record_context_telemetry(
             context_telemetry=context_telemetry,
@@ -487,6 +501,28 @@ class InferenceEngine:
                     needs_tools=False,
                     tool_calls=[],
                     incomplete_reason="final_submit_context_insufficient",
+                    recovery_required=True,
+                ),
+                TokenUsage(),
+            )
+        if not submit_only and assembled_request.estimated_tokens > max(1, request_budget):
+            reason = "assembled_request_over_budget"
+            if self._trace_event_writer is not None:
+                self._trace_event_writer(
+                    EventType.ERROR,
+                    "analyze",
+                    {
+                        "iteration": iteration,
+                        "reason": reason,
+                        "assembled_request_tokens": assembled_request.estimated_tokens,
+                        "assembled_request_budget": request_budget,
+                    },
+                )
+            return (
+                AnalysisPlan(
+                    needs_tools=False,
+                    tool_calls=[],
+                    incomplete_reason=reason,
                     recovery_required=True,
                 ),
                 TokenUsage(),
@@ -1507,6 +1543,8 @@ class InferenceEngine:
             "required_catalog_count": 0,
             "required_catalog_missing_count": 0,
             "required_catalog_ids": [],
+            "candidate_evidence_dependencies": {},
+            "unresolved_required_catalog_refs": [],
             "included_catalog_ids": [],
             "omitted_catalog_ids": [],
             "catalog_token_count": 0,
@@ -1574,13 +1612,20 @@ class InferenceEngine:
             )
 
         if validator_result:
+            repair_feedback = cls._build_repair_feedback_message(
+                validator_result,
+                token_budget=max(1, token_budget),
+            )
+            validator_text = (
+                repair_feedback.content
+                if repair_feedback is not None
+                else "validator_result="
+                + serialize_json(cls._compact_validator_result(validator_result))
+            )
             candidates.append(
                 (
                     "validator",
-                    "- validator_result: "
-                    + cls._json_preview(
-                        cls._compact_validator_result(validator_result), 1800
-                    ),
+                    validator_text,
                 )
             )
 
@@ -1659,10 +1704,11 @@ class InferenceEngine:
         ]
         telemetry["historical_ledger_count"] = len(evidence_ledger or [])
 
-        # The model may cite only these delivered records. Prefer records tied
-        # to a draft, selected checkpoint reference, or an integrity gap. The
-        # old first-40 slice made a relevant record disappear behind unrelated
-        # history and did not expose the failure to the caller.
+        # The model may cite only these delivered records. Exact refs are hard
+        # dependencies; same-file records are merely optional background. The
+        # old path-based rule made every record in the draft file a required
+        # dependency, which inflated the final handoff and was equivalent to
+        # nearest-evidence filling.
         draft_paths = {
             normalize_repo_path(draft.file) for draft in draft_findings if draft.file
         }
@@ -1674,14 +1720,33 @@ class InferenceEngine:
         }
         gap_paths: set[str] = set()
         gap_refs: set[str] = set()
+        candidate_dependencies: dict[str, set[str]] = {}
+        for state in draft_states or []:
+            refs = {
+                str(reference).strip()
+                for reference in state.evidence_refs
+                if str(reference).strip()
+            }
+            if refs:
+                candidate_dependencies.setdefault(state.draft_id, set()).update(refs)
 
-        def collect_gap_values(value: Any) -> None:
+        def collect_gap_values(value: Any, candidate_id: str = "") -> None:
             if isinstance(value, dict):
+                local_candidate_id = str(
+                    value.get("candidate_id")
+                    or value.get("target_candidate_id")
+                    or value.get("draft_id")
+                    or candidate_id
+                ).strip()
                 reference = str(
                     value.get("reference_id") or value.get("artifact_id") or ""
                 ).strip()
                 if reference:
                     gap_refs.add(reference)
+                    if local_candidate_id:
+                        candidate_dependencies.setdefault(
+                            local_candidate_id, set()
+                        ).add(reference)
                 location = str(value.get("location", "")).strip()
                 if location:
                     gap_paths.add(normalize_location(location).path or "")
@@ -1689,14 +1754,16 @@ class InferenceEngine:
                 if raw_file:
                     gap_paths.add(normalize_repo_path(raw_file))
                 for item in value.values():
-                    collect_gap_values(item)
+                    collect_gap_values(item, local_candidate_id)
             elif isinstance(value, list):
                 for item in value:
-                    collect_gap_values(item)
+                    collect_gap_values(item, candidate_id)
 
         collect_gap_values(validator_result or {})
+        exact_refs = selected_refs | gap_refs
 
-        catalog_candidates: list[tuple[int, bool, dict[str, Any], str]] = []
+        catalog_candidates: list[tuple[int, bool, bool, dict[str, Any], str]] = []
+        reference_to_artifact: dict[str, str] = {}
         for record in delivered_catalog:
             artifact_id = str(record.get("artifact_id", "")).strip()
             path = str(record.get("path", record.get("file", ""))).strip()
@@ -1711,23 +1778,25 @@ class InferenceEngine:
             }
             ids = {artifact_id, *aliases}
             normalized_path = normalize_repo_path(path)
-            exact_ref = bool(ids & (selected_refs | gap_refs))
+            for reference_id in ids:
+                reference_to_artifact[reference_id] = artifact_id
+            exact_ref = bool(ids & exact_refs)
             path_ref = normalized_path in draft_paths or normalized_path in gap_paths
-            relevant = exact_ref or path_ref
-            # Lower score is higher priority; all relevant records are required
-            # citation options, while unrelated records are optional context.
+            # Lower score is higher priority. Only an explicit id/reference is
+            # required; a same-file record is optional context and never a
+            # substitute for an unresolved or missing exact reference.
             score = 0 if exact_ref else 1 if path_ref else 2
-            catalog_candidates.append((score, relevant, record, artifact_id))
+            catalog_candidates.append((score, exact_ref, path_ref, record, artifact_id))
 
         catalog_candidates.sort(
-            key=lambda item: (item[0], item[2].get("source_type", ""), item[3])
+            key=lambda item: (item[0], item[3].get("source_type", ""), item[4])
         )
         telemetry["available_catalog_count"] = len(catalog_candidates)
         required_catalog_ids: list[str] = []
-        for score, relevant, record, artifact_id in catalog_candidates:
-            if relevant:
+        for score, exact_ref, path_ref, record, artifact_id in catalog_candidates:
+            if exact_ref:
                 required_catalog_ids.append(artifact_id)
-            if score < 2:
+            if exact_ref:
                 path = str(record.get("path", record.get("file", ""))).strip()
                 start = record.get("start_line", record.get("line", ""))
                 end = record.get("end_line", start)
@@ -1754,13 +1823,7 @@ class InferenceEngine:
                         + (f" content={body}" if body else ""),
                     )
                 )
-        telemetry["required_catalog_ids"] = required_catalog_ids
-        telemetry["required_catalog_count"] = len(required_catalog_ids)
-
-        # Optional catalog entries are useful when there is no draft path to
-        # anchor on, but they must never displace a required option.
-        if not required_catalog_ids:
-            for _, _, record, artifact_id in catalog_candidates:
+            elif path_ref:
                 path = str(record.get("path", record.get("file", ""))).strip()
                 start = record.get("start_line", record.get("line", ""))
                 end = record.get("end_line", start)
@@ -1769,13 +1832,57 @@ class InferenceEngine:
                     location += f"-{end}"
                 candidates.append(
                     (
-                        "catalog",
-                        f"- evidence_catalog id={artifact_id} location={location} "
-                        f"source={record.get('source_type', '')} "
+                        "catalog_optional",
+                        f"- optional_evidence_catalog id={artifact_id} "
+                        f"location={location} source={record.get('source_type', '')} "
                         f"snapshot={record.get('snapshot_id', '')} "
                         f"revision={record.get('revision', '')}",
                     )
                 )
+
+        # If no candidate path is known, expose the catalog as optional choices
+        # only. This lets the model select an exact id without turning any
+        # nearby record into a hidden dependency.
+        if not draft_paths and not gap_paths:
+            for _, exact_ref, _, record, artifact_id in catalog_candidates:
+                if exact_ref:
+                    continue
+                path = str(record.get("path", record.get("file", ""))).strip()
+                start = record.get("start_line", record.get("line", ""))
+                end = record.get("end_line", start)
+                location = f"{path}:{start}"
+                if end not in (None, "", start):
+                    location += f"-{end}"
+                candidates.append(
+                    (
+                        "catalog_optional",
+                        f"- optional_evidence_catalog id={artifact_id} "
+                        f"location={location} source={record.get('source_type', '')} "
+                        f"snapshot={record.get('snapshot_id', '')} "
+                        f"revision={record.get('revision', '')}",
+                    )
+                )
+        telemetry["required_catalog_ids"] = required_catalog_ids
+        telemetry["required_catalog_count"] = len(required_catalog_ids)
+        telemetry["candidate_evidence_dependencies"] = {
+            candidate_id: sorted(refs)
+            for candidate_id, refs in sorted(candidate_dependencies.items())
+            if refs
+        }
+        telemetry["unresolved_required_catalog_refs"] = sorted(
+            reference for reference in exact_refs if reference not in reference_to_artifact
+        )
+        unresolved_refs = telemetry["unresolved_required_catalog_refs"]
+        if unresolved_refs:
+            candidates.append(
+                (
+                    "validator",
+                    "- unresolved_required_evidence_refs="
+                    + ",".join(unresolved_refs)
+                    + " action=select a delivered exact catalog id or keep the "
+                    "candidate unresolved; never substitute by path",
+                )
+            )
 
         # Citation choices are hard handoff dependencies. Put them ahead of
         # ordinary draft/graph/tool summaries so a bounded request cannot
@@ -1787,11 +1894,11 @@ class InferenceEngine:
             "validator": 2,
             "manifest": 3,
             "tool": 4,
-            "catalog": 5,
+            "catalog_optional": 5,
         }
         candidates.sort(key=lambda item: priority.get(item[0], 99))
         telemetry["exposed_catalog_count"] = sum(
-            kind in {"catalog", "catalog_required"} for kind, _ in candidates
+            kind in {"catalog_optional", "catalog_required"} for kind, _ in candidates
         )
 
         if token_budget <= 0 or not candidates:
@@ -1850,7 +1957,7 @@ class InferenceEngine:
                 omitted += 1
                 if kind == "catalog_required":
                     telemetry["required_catalog_missing_count"] += 1
-                if kind in {"catalog", "catalog_required"}:
+                if kind in {"catalog_optional", "catalog_required"}:
                     omitted_id = candidate.split(" id=", 1)[-1].split(" ", 1)[0]
                     telemetry["omitted_catalog_ids"].append(
                         {
@@ -1872,14 +1979,14 @@ class InferenceEngine:
                 telemetry["validator_result_included"] += 1
             elif kind == "manifest":
                 telemetry["manifest_span_count"] += 1
-            elif kind in {"catalog", "catalog_required"}:
+            elif kind in {"catalog_optional", "catalog_required"}:
                 # Catalog entries are identity hints; the full tool-result
                 # counters remain reserved for observed tool payloads.
                 telemetry["included_catalog_count"] += 1
                 artifact_id = candidate.split(" id=", 1)[-1].split(" ", 1)[0]
                 telemetry["included_catalog_ids"].append(artifact_id)
             entry_tokens = builder.estimate_tokens(candidate)
-            if kind in {"catalog", "catalog_required"}:
+            if kind in {"catalog_optional", "catalog_required"}:
                 telemetry["catalog_token_count"] += entry_tokens
             elif kind == "manifest":
                 telemetry["graph_token_count"] += entry_tokens
@@ -1940,35 +2047,105 @@ class InferenceEngine:
     def _build_repair_feedback_message(
         cls,
         result: dict[str, Any] | None,
+        *,
+        token_budget: int | None = None,
     ) -> Message | None:
-        """Return bounded candidate repair feedback for exploration turns."""
+        """Return atomic candidate repair protocols for exploration turns.
+
+        A repair protocol is never JSON-previewed or character-truncated.  If
+        the feedback budget cannot carry every target, complete protocols are
+        selected in order and the remaining target ids are explicitly deferred;
+        the runtime keeps their original findings unchanged.
+        """
 
         if not isinstance(result, dict):
             return None
-        compact = cls._compact_validator_result(result)
-        actionable = bool(compact.get("unresolved_evidence_gaps")) or bool(
-            compact.get("rejected_candidates")
-        )
+        gap_items = result.get("unresolved_evidence_gaps")
+        rejected_items = result.get("rejected_candidates")
+        actionable = bool(gap_items) or bool(rejected_items)
         if not actionable and result.get("validator_passed") is True:
             return None
-        if not any(
-            key in compact
-            for key in (
-                "unresolved_evidence_gaps",
-                "rejected_candidates",
-                "issue_results",
-            )
-        ):
+        if not isinstance(gap_items, list) and not isinstance(rejected_items, list):
             return None
+        raw_items = [
+            item
+            for source in (gap_items, rejected_items)
+            if isinstance(source, list)
+            for item in source
+            if isinstance(item, dict)
+        ]
+        if not raw_items:
+            return None
+
+        protocols: list[tuple[str, str]] = []
+        seen_targets: set[str] = set()
+        for index, item in enumerate(raw_items):
+            target = str(
+                item.get("target_candidate_id") or item.get("candidate_id") or ""
+            ).strip()
+            dedupe_target = target or f"<missing-target-{index}>"
+            if dedupe_target in seen_targets:
+                continue
+            seen_targets.add(dedupe_target)
+            display_target = dedupe_target
+            original_finding = item.get("original_contents", {})
+            gaps = item.get("gaps", [])
+            action_lines = [
+                str(gap.get("required_action", "")).strip()
+                for gap in gaps
+                if isinstance(gap, dict) and str(gap.get("required_action", "")).strip()
+            ]
+            action = " ".join(dict.fromkeys(action_lines)) or (
+                "Preserve the original finding if this target cannot be repaired."
+            )
+            protocol = "\n".join(
+                [
+                    "candidate_repair_protocol:",
+                    f"target_candidate_id={display_target}",
+                    f"current_finding_id={str(item.get('current_finding_id', '')).strip()}",
+                    f"candidate_content_version={str(item.get('candidate_content_version', item.get('content_hash', ''))).strip()}",
+                    f"integrity_status={str(item.get('status', '')).strip()}",
+                    "original_finding=" + serialize_json(original_finding),
+                    "gaps=" + serialize_json(gaps),
+                    "required_action=" + action,
+                ]
+            )
+            protocols.append((display_target, protocol))
+
+        if not protocols:
+            return None
+        prefix = (
+            "candidate_repair_feedback (this is not completion): address only the "
+            "listed exact runtime targets, then submit again. Each returned issue "
+            "must carry the exact target_candidate_id and repair_status. Use "
+            "repair_status=repaired only after the same canonical integrity rules "
+            "can pass; otherwise return the target with unchanged or incomplete. "
+            "Never guess an evidence id, path, snapshot, hash, or range.\n"
+        )
+        builder = ContextBuilder()
+        selected: list[str] = []
+        deferred: list[str] = []
+        limit = None if token_budget is None else max(1, int(token_budget))
+        for target, protocol in protocols:
+            proposed = prefix + "\n".join([*selected, protocol])
+            if selected and limit is not None and builder.estimate_tokens(proposed) > limit:
+                deferred.append(target)
+                continue
+            # Keep one complete candidate protocol even when it alone exceeds
+            # the advisory feedback slice; RequestAssembler will then make the
+            # whole request incomplete rather than cutting this protocol.
+            selected.append(protocol)
+        if deferred:
+            selected.append(
+                "deferred_target_candidate_ids=" + ",".join(deferred) + "\n"
+                "These targets were not included in this repair transaction; "
+                "the runtime preserves their original findings and does not count "
+                "them as repaired."
+            )
         return Message(
             role="user",
-            content=(
-                "candidate_repair_feedback (this is not completion): "
-                "address the listed candidate-level gaps, then submit again. "
-                "For source gaps, use an exact targeted exploration tool before "
-                "citing the evidence. Do not guess or silently omit a candidate.\n"
-                + cls._json_preview(compact, 3200)
-            ),
+            content=prefix + "\n".join(selected),
+            preserve_on_trim=True,
         )
 
     @staticmethod
@@ -2571,7 +2748,15 @@ class InferenceEngine:
             for item in telemetry.get("required_catalog_ids", [])
             if str(item).strip()
         ]
-        missing = [item for item in required if f"id={item}" not in serialized]
+        missing = [
+            item
+            for item in required
+            if re.search(
+                rf"(?<![A-Za-z0-9_])id={re.escape(item)}(?![A-Za-z0-9_])",
+                serialized,
+            )
+            is None
+        ]
         if missing:
             return {
                 "valid": False,

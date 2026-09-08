@@ -7,8 +7,10 @@ retries, and token-usage tracking.
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import Any
 
+import httpx
 from openai import (
     APIConnectionError,
     APIStatusError,
@@ -55,6 +57,7 @@ class ModelClient:
         self._client = AsyncOpenAI(
             api_key=self._settings.openai_api_key,
             base_url=str(self._settings.openai_base_url),
+            http_client=self._build_http_client(),
         )
         default_config_kwargs: dict[str, Any] = {
             "model": self._settings.model_name,
@@ -73,6 +76,29 @@ class ModelClient:
         self._last_call_attempts: list[dict[str, Any]] = []
         self._last_request_text = ""
         self._request_telemetry: dict[str, Any] = {}
+
+    @staticmethod
+    def _build_http_client() -> httpx.AsyncClient:
+        """Build an SDK client without inheriting an unusable SOCKS aggregate proxy.
+
+        ``httpx`` reads proxy settings from the process environment while the
+        client is constructed.  Some managed environments expose a SOCKS
+        ``ALL_PROXY`` without installing ``socksio``; that makes the OpenAI
+        SDK fail before the first request and gets misclassified as an absent
+        model client.  Remove only the aggregate proxy while constructing the
+        client, so normal HTTP/HTTPS proxy routing and ``NO_PROXY`` remain
+        active.  Restore the process environment immediately afterwards.
+        """
+
+        removed: dict[str, str] = {}
+        for name in ("ALL_PROXY", "all_proxy"):
+            value = os.environ.pop(name, None)
+            if value is not None:
+                removed[name] = value
+        try:
+            return httpx.AsyncClient(trust_env=True)
+        finally:
+            os.environ.update(removed)
 
     @property
     def default_config(self) -> ModelConfig:

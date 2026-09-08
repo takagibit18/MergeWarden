@@ -118,6 +118,16 @@ class ModelFindingInput(BaseModel):
             "Omit for an initial submission; never invent or reuse a finding_id here."
         ),
     )
+    repair_status: Literal["", "repaired", "unchanged", "incomplete"] = Field(
+        default="",
+        description=(
+            "Repair-only: repaired, unchanged, or incomplete for the exact target."
+        ),
+    )
+    candidate_content_version: str = Field(
+        default="",
+        description="Repair-only exact content version from candidate_repair_feedback.",
+    )
     observed_behavior: str = ""
     causal_mechanism: str = ""
     violated_invariant: str = ""

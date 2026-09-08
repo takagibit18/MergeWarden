@@ -84,6 +84,31 @@ def test_validate_review_draft_uses_current_filter_thresholds(
     assert result["effective_issue_count"] == 1
 
 
+def test_validator_does_not_claim_unchecked_drafts_or_candidates() -> None:
+    tool = ValidateReviewDraftTool(_context(Path(".")))
+    result = asyncio.run(
+        tool.execute(
+            summary="A regression needs repair.",
+            draft_ids=["draft-bad", "draft-not-present"],
+            issues=[
+                {
+                    "severity": "warning",
+                    "location": "not-a-repo-path:0",
+                    "evidence": "looks risky",
+                    "suggestion": "Investigate the changed behavior.",
+                    "confidence": 0.8,
+                }
+            ],
+        )
+    )
+
+    assert result["validated_draft_ids"] == []
+    assert result["not_checked_draft_ids"] == ["draft-bad", "draft-not-present"]
+    assert result["validated_finding_ids"] == []
+    assert result["candidate_identity_checked"] is False
+    assert result["validation_scope"] == "policy_and_canonical_contract_preflight"
+
+
 def test_validate_review_draft_separates_display_location_from_causal_anchor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

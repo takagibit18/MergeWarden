@@ -15,6 +15,7 @@ from src.analyzer.schemas import AnalysisPlan, DebugRequest, ReviewRequest
 from src.models.schemas import (
     DraftFinding,
     DraftFindingInput,
+    DraftFindingState,
     DraftFindingUpdateInput,
     ModelConfig,
     ModelResponse,
@@ -276,6 +277,12 @@ def test_finalize_context_keeps_relevant_catalog_entry_after_many_unrelated_reco
         [],
         {},
         [draft],
+        draft_states=[
+            DraftFindingState(
+                draft_id=draft.id,
+                evidence_refs=["ev-relevant-definition"],
+            )
+        ],
         evidence_ledger=ledger,
         token_budget=2400,
     )
@@ -287,6 +294,52 @@ def test_finalize_context_keeps_relevant_catalog_entry_after_many_unrelated_reco
     assert telemetry["required_catalog_ids"] == ["ev-relevant-definition"]
     assert telemetry["included_catalog_ids"] == ["ev-relevant-definition"]
     assert telemetry["catalog_token_count"] > 0
+
+
+def test_finalize_context_treats_same_file_catalog_records_as_optional() -> None:
+    draft = DraftFinding(
+        id="df_minimal",
+        source_response_id="rje_source",
+        file="src/example.py",
+        line=9,
+        claim="Comparison may use the wrong peer.",
+    )
+    message, telemetry = InferenceEngine._build_final_submit_evidence_summary(  # noqa: SLF001
+        [],
+        {},
+        [draft],
+        draft_states=[
+            DraftFindingState(draft_id=draft.id, evidence_refs=["ev-exact"])
+        ],
+        evidence_ledger=[
+            {
+                "artifact_id": "ev-exact",
+                "path": "src/example.py",
+                "start_line": 9,
+                "end_line": 9,
+                "source_type": "read_file",
+                "content": "return left == right",
+                "lifecycle": "delivered",
+            },
+            {
+                "artifact_id": "ev-same-file-context",
+                "path": "src/example.py",
+                "start_line": 30,
+                "end_line": 32,
+                "source_type": "read_file",
+                "content": "unrelated same-file context",
+                "lifecycle": "delivered",
+            },
+        ],
+        token_budget=1000,
+    )
+
+    assert message is not None
+    assert telemetry["required_catalog_ids"] == ["ev-exact"]
+    assert "id=ev-same-file-context" in message.content
+    assert telemetry["candidate_evidence_dependencies"] == {
+        "df_minimal": ["ev-exact"]
+    }
 
 
 def test_finalize_context_reports_missing_catalog_after_atomic_request_fit() -> None:
@@ -301,6 +354,12 @@ def test_finalize_context_reports_missing_catalog_after_atomic_request_fit() -> 
         [],
         {},
         [draft],
+        draft_states=[
+            DraftFindingState(
+                draft_id=draft.id,
+                evidence_refs=["ev-required"],
+            )
+        ],
         evidence_ledger=[
             {
                 "artifact_id": "ev-required",
@@ -319,6 +378,38 @@ def test_finalize_context_reports_missing_catalog_after_atomic_request_fit() -> 
     assert telemetry["context_insufficient"] is True
     assert telemetry["required_catalog_missing_count"] == 1
     assert telemetry["omitted_catalog_ids"][0]["id"] == "ev-required"
+
+
+def test_repair_feedback_keeps_each_candidate_protocol_complete() -> None:
+    original = "full original finding payload" + ("!" * 5000)
+    message = InferenceEngine._build_repair_feedback_message(  # noqa: SLF001
+        {
+            "validator_passed": False,
+            "unresolved_evidence_gaps": [
+                {
+                    "target_candidate_id": "cand_a",
+                    "current_finding_id": "F-A",
+                    "candidate_content_version": "version-a",
+                    "status": "needs_repair",
+                    "original_contents": {"evidence": original},
+                    "gaps": [
+                        {
+                            "code": "support_reference_missing",
+                            "field": "supports[0].evidence_refs",
+                            "required_action": "select an exact delivered ref",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert message is not None
+    assert message.preserve_on_trim is True
+    assert "target_candidate_id=cand_a" in message.content
+    assert "support_reference_missing" in message.content
+    assert original in message.content
+    assert "...[truncated]" not in message.content
 
 
 class _OneResponseClient:

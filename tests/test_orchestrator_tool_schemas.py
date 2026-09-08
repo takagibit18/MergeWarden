@@ -121,6 +121,27 @@ def test_submit_review_issue_requires_explicit_confidence() -> None:
         assert field in required
 
 
+def test_model_submit_schema_separates_initial_and_repair_identity() -> None:
+    initial = next(
+        schema
+        for schema in build_submit_tool_schemas(model_input=True)
+        if schema["function"]["name"] == "submit_review"
+    )["function"]["parameters"]["properties"]["issues"]["items"]
+    repair = next(
+        schema
+        for schema in build_submit_tool_schemas(model_input=True, repair=True)
+        if schema["function"]["name"] == "submit_review"
+    )["function"]["parameters"]["properties"]["issues"]["items"]
+
+    assert "target_candidate_id" not in initial["properties"]
+    assert "repair_status" not in initial["properties"]
+    assert "target_candidate_id" in repair["properties"]
+    assert "repair_status" in repair["properties"]
+    assert {"target_candidate_id", "repair_status"}.issubset(
+        repair["required"]
+    )
+
+
 def test_build_tool_schemas_from_default_registry_is_complete() -> None:
     schemas = build_tool_schemas(create_default_registry().list_specs())
 

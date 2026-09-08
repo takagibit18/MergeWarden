@@ -86,7 +86,9 @@ def build_draft_finding_update_tool_schema() -> dict[str, Any]:
     }
 
 
-def build_submit_tool_schemas(*, model_input: bool = False) -> list[dict[str, Any]]:
+def build_submit_tool_schemas(
+    *, model_input: bool = False, repair: bool = False
+) -> list[dict[str, Any]]:
     """Pseudo-tools used for structured final output submission.
 
     ``model_input=True`` is the current semantic contract.  The default keeps
@@ -94,20 +96,37 @@ def build_submit_tool_schemas(*, model_input: bool = False) -> list[dict[str, An
     """
 
     if model_input:
-        return _build_model_submit_tool_schemas()
+        return _build_model_submit_tool_schemas(repair=repair)
     return _build_legacy_submit_tool_schemas()
 
 
-def build_model_submit_tool_schemas() -> list[dict[str, Any]]:
+def build_model_submit_tool_schemas(*, repair: bool = False) -> list[dict[str, Any]]:
     """Return the current semantic model-input submit contract."""
 
-    return build_submit_tool_schemas(model_input=True)
+    return build_submit_tool_schemas(model_input=True, repair=repair)
 
 
-def _build_model_submit_tool_schemas() -> list[dict[str, Any]]:
+def _build_model_submit_tool_schemas(*, repair: bool = False) -> list[dict[str, Any]]:
     model_issue_schema = _llm_facing_schema(
         _inline_json_schema_refs(ModelFindingInput.model_json_schema())
     )
+    model_issue_properties = model_issue_schema.get("properties")
+    if isinstance(model_issue_properties, dict) and not repair:
+        # Candidate identity belongs to the runtime on the initial submit path.
+        # Keeping these fields out of the wire schema prevents the model from
+        # accidentally turning a first submission into an implicit repair.
+        model_issue_properties.pop("target_candidate_id", None)
+        model_issue_properties.pop("repair_status", None)
+        model_issue_properties.pop("candidate_content_version", None)
+    if repair:
+        required = model_issue_schema.setdefault("required", [])
+        for field in (
+            "target_candidate_id",
+            "repair_status",
+            "candidate_content_version",
+        ):
+            if field not in required:
+                required.append(field)
     # Keep parsing tolerant for the compatibility adapter and bounded repair
     # path, while making the active provider contract explicit for risk issues.
     # The integrity guard checks the same semantic fields and role rules.
@@ -143,9 +162,16 @@ def _build_model_submit_tool_schemas() -> list[dict[str, Any]]:
                 "description": (
                     "Submit semantic review findings. Provide one primary_anchor "
                     "and choose exact evidence_refs from the delivered evidence "
-                    "catalog. For a bounded repair, set target_candidate_id to one "
-                    "exact runtime candidate_id from candidate_repair_feedback. "
-                    "Runtime identity, location, snapshot, revision, and hash "
+                    "catalog. "
+                    + (
+                        "This is an atomic repair response: every issue must set "
+                        "target_candidate_id to one exact runtime candidate_id and "
+                        "candidate_content_version copied exactly from the feedback, "
+                        "and repair_status to repaired, unchanged, or incomplete. "
+                        if repair
+                        else "Do not provide runtime candidate identity or repair status. "
+                    )
+                    + "Runtime identity, location, snapshot, revision, and hash "
                     "fields are generated and validated by the program."
                 ),
                 "parameters": {

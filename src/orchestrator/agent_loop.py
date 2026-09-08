@@ -661,30 +661,11 @@ class AgentOrchestrator:
         issue = getattr(candidate, "issue", None)
         original_contents: dict[str, Any] = {}
         if issue is not None:
-            repair_intent = getattr(issue, "repair_intent", None)
-            original_contents = {
-                "severity": getattr(getattr(issue, "severity", None), "value", ""),
-                "finding_id": str(getattr(issue, "finding_id", "") or ""),
-                "location": str(getattr(issue, "location", "") or ""),
-                "evidence": str(getattr(issue, "evidence", "") or ""),
-                "suggestion": str(getattr(issue, "suggestion", "") or ""),
-                "observed_behavior": str(
-                    getattr(issue, "observed_behavior", "") or ""
-                ),
-                "causal_mechanism": str(
-                    getattr(issue, "causal_mechanism", "") or ""
-                ),
-                "violated_invariant": str(
-                    getattr(issue, "violated_invariant", "") or ""
-                ),
-                "repair_intent": (
-                    repair_intent.model_dump(mode="json")
-                    if repair_intent is not None
-                    else {}
-                ),
-                "trigger": str(getattr(issue, "trigger", "") or ""),
-                "impact": str(getattr(issue, "impact", "") or ""),
-            }
+            # The audit/journal copy must be lossless.  The model-facing repair
+            # message may select fewer atomic targets under a budget, but the
+            # runtime always retains the complete original issue here.
+            original_contents = issue.model_dump(mode="json")
+        content_hash = str(getattr(candidate, "content_hash", ""))
         return {
             "candidate_id": str(getattr(result, "candidate_id", "")),
             "target_candidate_id": str(getattr(result, "candidate_id", "")),
@@ -695,7 +676,8 @@ class AgentOrchestrator:
             "logical_identity_hash": str(
                 getattr(candidate, "logical_identity_hash", "")
             ),
-            "content_hash": str(getattr(candidate, "content_hash", "")),
+            "content_hash": content_hash,
+            "candidate_content_version": content_hash,
             "original_contents": original_contents,
             "status": str(getattr(result, "status", "")),
             "gaps": [
@@ -827,7 +809,6 @@ class AgentOrchestrator:
             )
             for result in needs
         ]
-        self._review_repair_attempt_count += 1
         self._last_validator_result = {
             "validator_passed": False,
             "submit_allowed": False,
@@ -847,6 +828,35 @@ class AgentOrchestrator:
                 "decide whether the candidate is repaired."
             ),
         }
+        source_gap_present = any(
+            classify_integrity_failure(failure) == "source_gap"
+            for result in needs
+            for failure in result.failures
+        )
+        required_repair_steps = 2 if source_gap_present else 1
+        repair_capacity = self._repair_sequence_capacity(required_repair_steps)
+        if not repair_capacity["allowed"]:
+            reason = str(
+                repair_capacity.get(
+                    "reason", "repair_sequence_budget_insufficient"
+                )
+            )
+            self._add_incomplete_reason(state, reason)
+            self._record_event(
+                EventType.DECISION,
+                "finding_repair",
+                {
+                    "iteration": self._iteration,
+                    "stage": "repair_sequence_preflight",
+                    "succeeded": False,
+                    "reason": reason,
+                    "source_gap_present": source_gap_present,
+                    **repair_capacity,
+                    "needs_repair_count": len(needs),
+                },
+            )
+            return response
+        self._review_repair_attempt_count += 1
         self._record_event(
             EventType.DECISION,
             "finding_repair",
@@ -861,18 +871,13 @@ class AgentOrchestrator:
                 "rejected_candidates": invalid_gaps,
             },
         )
-        source_gap_present = any(
-            classify_integrity_failure(failure) == "source_gap"
-            for result in needs
-            for failure in result.failures
-        )
         if source_gap_present:
             self._repair_evidence_attempt_count += 1
             # A missing observed body is an exploration problem, not a generic
             # invalid JSON problem.  Spend the current bounded repair turn on
             # the normal read/search tools and only then, if the shared budget
             # still permits it, request a submit-only recheck.
-            repair_plan = await self.analyze(
+            exploration_plan = await self.analyze(
                 state,
                 request,
                 tool_specs=self._registry.list_specs(),
@@ -880,17 +885,21 @@ class AgentOrchestrator:
                 allow_exploration=True,
             )
             self._account_latest_model_usage()
-            self._observe_review_submission(repair_plan)
-            self._observe_incomplete_plan(repair_plan, state)
+            self._observe_review_submission(exploration_plan)
+            self._observe_incomplete_plan(exploration_plan, state)
             repair_results = await self.execute_tools(
-                repair_plan,
+                exploration_plan,
                 self._registry,
                 state,
             )
-            self._observe_workflow_tools(repair_plan, repair_results)
+            self._observe_workflow_tools(exploration_plan, repair_results)
             self._refresh_evidence_ledger(state)
-            if self._budget_state == "hard_capped":
-                self._add_incomplete_reason(state, "repair_budget_exhausted")
+            submit_capacity = self._repair_sequence_capacity(1)
+            if not submit_capacity["allowed"]:
+                reason = str(
+                    submit_capacity.get("reason", "repair_budget_exhausted")
+                )
+                self._add_incomplete_reason(state, reason)
                 self._record_event(
                     EventType.DECISION,
                     "finding_repair",
@@ -899,36 +908,37 @@ class AgentOrchestrator:
                         "stage": "source_gap_submit_recheck_skipped",
                         "repair_attempt": self._review_repair_attempt_count,
                         "succeeded": False,
-                        "reason": "repair_budget_exhausted",
-                        "remaining_tokens": 0,
+                        "reason": reason,
+                        **submit_capacity,
                     },
                 )
-            if (
-                repair_plan.draft_review is None
-                and self._review_repair_attempt_count
-                < self._settings.review_repair_max_attempts
-                and self._budget_state != "hard_capped"
-            ):
-                self._review_repair_attempt_count += 1
-                self._record_event(
-                    EventType.DECISION,
-                    "finding_repair",
-                    {
-                        "iteration": self._iteration,
-                        "stage": "source_gap_submit_recheck",
-                        "repair_attempt": self._review_repair_attempt_count,
-                        "source_gap_exploration_tools": len(repair_plan.tool_calls),
-                    },
-                )
-                repair_plan = await self.analyze(
-                    state,
-                    request,
-                    tool_specs=[],
-                    force_submit=True,
-                )
-                self._account_latest_model_usage()
-                self._observe_review_submission(repair_plan)
-                self._observe_incomplete_plan(repair_plan, state)
+                return response
+            self._review_repair_attempt_count += 1
+            self._record_event(
+                EventType.DECISION,
+                "finding_repair",
+                {
+                    "iteration": self._iteration,
+                    "stage": "source_gap_submit_recheck",
+                    "repair_attempt": self._review_repair_attempt_count,
+                    "source_gap_exploration_tools": len(exploration_plan.tool_calls),
+                    "sequence_required_steps": 2,
+                    "remaining_repair_attempts": max(
+                        0,
+                        self._settings.review_repair_max_attempts
+                        - self._review_repair_attempt_count,
+                    ),
+                },
+            )
+            repair_plan = await self.analyze(
+                state,
+                request,
+                tool_specs=[],
+                force_submit=True,
+            )
+            self._account_latest_model_usage()
+            self._observe_review_submission(repair_plan)
+            self._observe_incomplete_plan(repair_plan, state)
         else:
             self._repair_contract_attempt_count += 1
             repair_plan = await self.analyze(
@@ -1127,11 +1137,63 @@ class AgentOrchestrator:
                         }
                     )
                 continue
+            expected_version = str(
+                getattr(repairable_candidates[target_index], "content_hash", "")
+            ).strip()
+            provided_version = str(
+                getattr(repaired_issue, "candidate_content_version", "")
+            ).strip()
+            if provided_version and expected_version and provided_version != expected_version:
+                if diagnostics is not None:
+                    diagnostics.append(
+                        {
+                            "code": "repair_target_expired",
+                            "target_candidate_id": target_id,
+                            "expected_candidate_content_version": expected_version,
+                            "provided_candidate_content_version": provided_version,
+                            "message": (
+                                "The repair response targets an expired candidate "
+                                "content version; the original finding remains unchanged."
+                            ),
+                        }
+                    )
+                continue
+            repair_status = str(getattr(repaired_issue, "repair_status", "") or "")
+            if repair_status in {"unchanged", "incomplete"}:
+                if diagnostics is not None:
+                    diagnostics.append(
+                        {
+                            "code": "repair_target_unchanged"
+                            if repair_status == "unchanged"
+                            else "repair_target_incomplete",
+                            "target_candidate_id": target_id,
+                            "repair_status": repair_status,
+                            "message": (
+                                "The repair protocol kept this exact target unchanged; "
+                                "the original finding remains in the merged report."
+                            ),
+                        }
+                    )
+                continue
             # The runtime rebinds the exact target and clears the selector
             # before the next full integrity validation.
             replacements[target_index] = repaired_issue.model_copy(
                 update={"candidate_id": target_id, "target_candidate_id": ""}
             )
+
+        if diagnostics is not None:
+            for target_index, candidate in repairable_candidates.items():
+                if target_index not in replacements:
+                    diagnostics.append(
+                        {
+                            "code": "repair_target_not_returned",
+                            "target_candidate_id": candidate.candidate_id,
+                            "message": (
+                                "The repair response did not return this target; the "
+                                "original finding remains unchanged and unresolved."
+                            ),
+                        }
+                    )
 
         merged: list[Any] = []
         for index, issue in enumerate(original.issues):
@@ -1340,7 +1402,7 @@ class AgentOrchestrator:
         data = result.data if isinstance(result.data, dict) else {}
         validator_payload = dict(data)
         validator_payload.setdefault(
-            "validated_draft_ids", [draft.id for draft in self._draft_finding_store.all()]
+            "validated_draft_ids", []
         )
         validator_payload.setdefault("validated_finding_ids", [])
         if not result.ok:
@@ -1378,7 +1440,7 @@ class AgentOrchestrator:
         )
         unresolved = data.get("unresolved_evidence_gaps", [])
         unresolved = (
-            [str(item) for item in unresolved]
+            [item for item in unresolved if isinstance(item, (dict, str))]
             if isinstance(unresolved, list)
             else []
         )
@@ -1396,16 +1458,23 @@ class AgentOrchestrator:
             and not failed_issues
             and (effective_count > 0 or empty_submit_allowed)
         )
+        validated_draft_ids = data.get("validated_draft_ids", [])
+        validated_draft_ids = (
+            [str(item).strip() for item in validated_draft_ids if str(item).strip()]
+            if isinstance(validated_draft_ids, list)
+            else []
+        )
+        validated_finding_ids = [
+            str(item.get("finding_id", "")).strip()
+            for item in issue_results
+            if isinstance(item, dict)
+            and item.get("passes_submit_preflight") is True
+            and str(item.get("finding_id", "")).strip()
+        ]
         validator_payload.update(
             {
-                "validated_draft_ids": [
-                    draft.id for draft in self._draft_finding_store.all()
-                ],
-                "validated_finding_ids": [
-                    str(item.get("finding_id"))
-                    for item in issue_results
-                    if isinstance(item, dict) and item.get("finding_id")
-                ],
+                "validated_draft_ids": validated_draft_ids,
+                "validated_finding_ids": validated_finding_ids,
                 "unresolved_evidence_gaps": unresolved,
                 "policy_warnings": summary_warnings,
                 "validator_passed": passed,
@@ -1859,8 +1928,18 @@ class AgentOrchestrator:
                 # the initial deferred round may have had validator in the full
                 # registry but intentionally removes it before serialization.
                 logical_stage = call_stage
+                repair_submit_schema = bool(
+                    isinstance(self._last_validator_result, dict)
+                    and (
+                        self._last_validator_result.get("unresolved_evidence_gaps")
+                        or self._last_validator_result.get("rejected_candidates")
+                    )
+                )
                 if force_submit:
-                    serialized_tools = build_submit_tool_schemas(model_input=True)
+                    serialized_tools = build_submit_tool_schemas(
+                        model_input=True,
+                        repair=repair_submit_schema,
+                    )
                 else:
                     serialized_tools = build_tool_schemas(active_tool_specs)
                     if (
@@ -1870,7 +1949,10 @@ class AgentOrchestrator:
                         serialized_tools.append(build_draft_finding_tool_schema())
                         serialized_tools.append(build_draft_finding_update_tool_schema())
                     if not defer_review_submit:
-                        serialized_tools += build_submit_tool_schemas(model_input=True)
+                        serialized_tools += build_submit_tool_schemas(
+                            model_input=True,
+                            repair=repair_submit_schema,
+                        )
                 wire_tool_schema_count = len(serialized_tools)
                 self._final_submit_attempt_count += int(submit_only_call)
                 result, usage = await engine.analyze(
@@ -3109,6 +3191,52 @@ class AgentOrchestrator:
             - self._settings.final_submit_reserve_tokens,
         )
         return min(self._settings.token_budget, reserve_ceiling)
+
+    def _repair_sequence_capacity(self, required_steps: int) -> dict[str, Any]:
+        """Preflight the complete repair sequence before spending its first call."""
+
+        steps = max(1, int(required_steps))
+        remaining_attempts = max(
+            0,
+            self._settings.review_repair_max_attempts
+            - self._review_repair_attempt_count,
+        )
+        remaining_tokens = max(0, self._settings.token_hard_budget - self._total_tokens)
+        # Reserve bounded completion capacity for every step.  The exact
+        # serialized request cap is enforced by InferenceEngine; this preflight
+        # only prevents a source->submit sequence from starting when the shared
+        # hard budget cannot accommodate both calls at all.
+        required_tokens = max(
+            self._settings.final_submit_request_token_budget,
+            steps * self._settings.submit_max_output_tokens,
+        )
+        remaining_seconds = max(
+            0.0,
+            self._run_timeout_seconds - self._run_elapsed_seconds(),
+        )
+        required_seconds = steps * min(
+            self._settings.model_request_timeout_seconds,
+            30.0,
+        )
+        reason = ""
+        if self._budget_state == "hard_capped":
+            reason = "repair_budget_exhausted"
+        elif remaining_attempts < steps:
+            reason = "repair_sequence_attempt_budget_insufficient"
+        elif remaining_tokens < required_tokens:
+            reason = "repair_sequence_token_budget_insufficient"
+        elif remaining_seconds < required_seconds:
+            reason = "repair_sequence_time_budget_insufficient"
+        return {
+            "allowed": not reason,
+            "reason": reason,
+            "required_steps": steps,
+            "remaining_repair_attempts": remaining_attempts,
+            "required_token_reserve": required_tokens,
+            "remaining_token_budget": remaining_tokens,
+            "required_time_reserve_seconds": required_seconds,
+            "remaining_time_budget_seconds": round(remaining_seconds, 3),
+        }
 
     def _record_pre_budget_submit(
         self,

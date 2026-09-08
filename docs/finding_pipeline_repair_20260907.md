@@ -237,6 +237,7 @@ provider 返回的成功使用量，模型未提交/上下文不足仍按运行�
 召回或语义质量提升；质量实验需要更多样本和独立设计。
 
 客户端构造检查在进程内设置 `MODEL_PROVIDER=zhipu` 后通过，使用
-`glm-5.3-flash`，保留 `HTTP_PROXY/HTTPS_PROXY`，移除大小写两种
-`ALL_PROXY`；仓库 `.env` 未修改。脱敏回放和完整回归均通过；完整回归为
-`911 passed, 1 skipped`（3 个依赖/框架 warning）。
+`glm-5.3-flash`；客户端只在构造 HTTP 传输时绕开大小写两种 `ALL_PROXY`，
+保留 `HTTP_PROXY/HTTPS_PROXY` 和 `NO_PROXY`，仓库 `.env` 未修改。脱敏回放
+和完整回归均通过；完整回归为 `917 passed, 1 skipped`（3 个依赖/框架
+warning），其中 baseline seal 的子进程安全目录配置已单独复核。

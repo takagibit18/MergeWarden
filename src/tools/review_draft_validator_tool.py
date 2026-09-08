@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -62,6 +62,8 @@ class ReviewDraftIssueInput(BaseModel):
             "never use finding_id, text, or position as a repair selector."
         ),
     )
+    repair_status: Literal["", "repaired", "unchanged", "incomplete"] = ""
+    candidate_content_version: str = ""
     primary_anchor: SourceAnchor | None = None
     related_locations: list[RelatedLocation] = Field(default_factory=list)
     observed_behavior: str = ""
@@ -174,6 +176,35 @@ class ValidateReviewDraftTool(BaseTool):
             summary_warnings.append(
                 "summary mentions bug/regression/breaking/user-visible risk but no issue passes current filter"
             )
+        draft_ids = [str(item).strip() for item in data.draft_ids if str(item).strip()]
+        validated_draft_ids = [
+            draft_ids[index]
+            for index, item in enumerate(issue_results)
+            if index < len(draft_ids) and item["passes_submit_preflight"]
+        ]
+        not_checked_draft_ids = [
+            draft_id
+            for index, draft_id in enumerate(draft_ids)
+            if index >= len(issue_results)
+            or not issue_results[index]["passes_submit_preflight"]
+        ]
+        validated_finding_ids = [
+            str(item.get("finding_id", "")).strip()
+            for item in issue_results
+            if item.get("passes_submit_preflight")
+            and str(item.get("finding_id", "")).strip()
+        ]
+        unresolved_evidence_gaps = [
+            {
+                "original_index": item["original_index"],
+                "target_candidate_id": item.get("target_candidate_id", ""),
+                "current_finding_id": item.get("finding_id", ""),
+                "gaps": item.get("repair_gaps", []),
+                "required_action": "; ".join(item.get("repair_hints", [])),
+            }
+            for item in issue_results
+            if not item["passes_submit_preflight"]
+        ]
         return {
             "normalized_summary": summary,
             "issue_results": issue_results,
@@ -181,16 +212,13 @@ class ValidateReviewDraftTool(BaseTool):
             "effective_issue_count": effective_issue_count,
             "should_submit_empty_issues": effective_issue_count == 0
             and not summary_warnings,
-            "validated_draft_ids": list(data.draft_ids),
-            "validated_finding_ids": [],
-            "unresolved_evidence_gaps": [
-                reason
-                for item in issue_results
-                for reason in [
-                    *item.get("fail_reasons", []),
-                    *item.get("contract_gap_codes", []),
-                ]
-            ],
+            "validated_draft_ids": validated_draft_ids,
+            "not_checked_draft_ids": not_checked_draft_ids,
+            "validated_finding_ids": validated_finding_ids,
+            "unresolved_evidence_gaps": unresolved_evidence_gaps,
+            "validation_scope": "policy_and_canonical_contract_preflight",
+            "candidate_identity_checked": False,
+            "candidate_version_checked": False,
             "policy_warnings": list(summary_warnings),
             "validator_passed": bool(
                 not summary_warnings
@@ -301,6 +329,16 @@ class ValidateReviewDraftTool(BaseTool):
 
         return {
             "original_index": index,
+            "finding_id": issue.finding_id,
+            "target_candidate_id": issue.target_candidate_id,
+            "repair_status": issue.repair_status,
+            "evidence_refs": sorted(
+                {
+                    str(evidence.artifact_id).strip()
+                    for evidence in issue.all_evidence()
+                    if str(evidence.artifact_id).strip()
+                }
+            ),
             "normalized_location": location.canonical,
             "severity": issue.severity.value,
             "confidence": issue.confidence,
@@ -315,6 +353,18 @@ class ValidateReviewDraftTool(BaseTool):
             "contract_status": "valid" if passes_contract else "needs_repair",
             "contract_gaps": [gap.as_dict() for gap in contract_gaps],
             "contract_gap_codes": list(dict.fromkeys(gap.code for gap in contract_gaps)),
+            "repair_gaps": [
+                *[gap.as_dict() for gap in contract_gaps],
+                *[
+                    {
+                        "code": reason,
+                        "field": "policy",
+                        "message": reason,
+                    }
+                    for reason in dict.fromkeys(fail_reasons)
+                    if reason not in {gap.code for gap in contract_gaps}
+                ],
+            ],
             "filter_reason_codes": list(filter_decision.reason_codes),
             "standard_threshold": filter_decision.standard_threshold,
             "relaxed_threshold": filter_decision.relaxed_threshold,

@@ -169,6 +169,8 @@ def _candidate_content_hash(issue: ReviewIssue) -> str:
     for key in (
         "candidate_id",
         "target_candidate_id",
+        "repair_status",
+        "candidate_content_version",
         "integrity_status",
         "root_cause_id",
         "context_manifest_id",

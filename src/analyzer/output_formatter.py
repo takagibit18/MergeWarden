@@ -61,6 +61,17 @@ class ReviewIssue(BaseModel):
             "not use it to create or rename a candidate."
         ),
     )
+    repair_status: Literal["", "repaired", "unchanged", "incomplete"] = Field(
+        default="",
+        description=(
+            "Repair-only outcome for the exact target candidate. Use unchanged or "
+            "incomplete when the original finding must remain visible."
+        ),
+    )
+    candidate_content_version: str = Field(
+        default="",
+        description="Repair-only content version copied from candidate_repair_feedback.",
+    )
     schema_version: str = Field(
         default="1.0",
         description="1.0 for legacy issues; 2.0 for structured hypotheses.",
