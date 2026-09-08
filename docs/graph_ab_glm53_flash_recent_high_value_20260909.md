@@ -4,9 +4,9 @@
 
 This run selected the three most recently completed positive golden fixtures in the formal-readiness checkpoint, ordered by their last recorded completion time:
 
-1. `golden_pydantic_pydantic_pr12117`
+1. `golden_deepset-ai_haystack_pr12208_reverse`
 2. `golden_vybestack_llxprt-code_pr3012_reverse`
-3. `golden_deepset-ai_haystack_pr12208_reverse`
+3. `golden_pydantic_pydantic_pr12117`
 
 Negative controls and the synthetic development smoke fixture were excluded. The paired variants were the same post-repair contract used in the prior real-model run: `A-agent-search` versus `B2-graph-hybrid-warm`. The model provider was real `zhipu` with `glm-5.3-flash`; invalid provider payload retries were disabled.
 
