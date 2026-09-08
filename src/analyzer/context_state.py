@@ -62,6 +62,21 @@ class ContextState(BaseModel):
         default_factory=list,
         description="Budgeted context manifests that are actually sent to the reviewer.",
     )
+    evidence_snapshot_id: str = Field(
+        default="",
+        description="System-owned snapshot identity for delivered source evidence.",
+    )
+    evidence_revision: str = Field(
+        default="",
+        description="System-owned repository revision identity for delivered evidence.",
+    )
+    evidence_ledger: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Exact source ranges delivered to the reviewer; index-only graph entries "
+            "are intentionally excluded."
+        ),
+    )
     relation_graph_summary: dict[str, object] = Field(
         default_factory=dict,
         description="Non-source telemetry for the change-centred code graph/index.",

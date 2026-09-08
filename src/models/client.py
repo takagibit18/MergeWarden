@@ -28,6 +28,7 @@ from src.models.exceptions import (
 )
 from src.models.compat import ModelCallPolicy, ModelProfile, resolve_model_profile
 from src.models.conversation import ModelConversation
+from src.models.request_assembler import RequestAssembler
 from src.models.schemas import Message, ModelConfig, ModelResponse, TokenUsage
 from src.models.token_telemetry import (
     common_prefix_tokens,
@@ -95,56 +96,19 @@ class ModelClient:
         self._last_call_attempts = []
 
         source_config = config or self._default_config
-        profile = self.profile_for(source_config.model)
-        runtime_config, runtime_policy = self._apply_policy(
-            source_config, policy, profile
+        runtime_config, runtime_policy, profile = self.prepare_call(
+            source_config, policy
         )
-        payload: dict[str, Any] = {
-            "model": runtime_config.model,
-            "messages": self._serialize_messages(messages, profile),
-            "temperature": runtime_config.temperature,
-            "max_tokens": runtime_config.max_tokens,
-            "top_p": runtime_config.top_p,
-        }
-        if tools:
-            payload["tools"] = tools
-        if runtime_config.tool_choice is not None:
-            payload["tool_choice"] = runtime_config.tool_choice
-        if runtime_config.extra_body is not None:
-            payload["extra_body"] = runtime_config.extra_body
-        if (
-            runtime_policy.thinking == "high"
-            and profile.compat.supports_reasoning_effort
-        ):
-            payload["reasoning_effort"] = (
-                "low"
-                if (
-                    profile.compat.thinking_format == "zhipu"
-                    and not profile.compat.supports_thinking_disable
-                )
-                else "high"
-            )
-        elif (
-            runtime_policy.thinking == "off"
-            and profile.compat.thinking_format == "zhipu"
-            and not profile.compat.supports_thinking_disable
-            and profile.compat.supports_reasoning_effort
-        ):
-            # GLM-5.3/Flash must keep thinking enabled. ``low`` is the
-            # provider-accepted lower bound for that model family.
-            payload["reasoning_effort"] = "low"
+        payload = RequestAssembler.wire_payload(
+            messages,
+            tools or [],
+            runtime_config,
+            runtime_policy,
+            profile=profile,
+        )
 
         actual_reasoning_effort = self._wire_reasoning_effort(payload)
-        request_text = serialize_json(
-            {
-                "model": payload.get("model"),
-                "messages": payload.get("messages", []),
-                "tools": payload.get("tools", []),
-                "tool_choice": payload.get("tool_choice"),
-                "extra_body": payload.get("extra_body"),
-                "reasoning_effort": payload.get("reasoning_effort"),
-            }
-        )
+        request_text = serialize_json(payload)
         previous_request_text = getattr(self, "_last_request_text", "")
         common_tokens = common_prefix_tokens(previous_request_text, request_text)
         common_chars = 0
@@ -163,6 +127,7 @@ class ModelClient:
         self._last_request_text = request_text
 
         last_error: ModelClientError | None = None
+        error: ModelClientError
         for attempt in range(self._max_retries):
             try:
                 completion = await asyncio.wait_for(
@@ -341,12 +306,25 @@ class ModelClient:
 
         return resolve_model_profile(self._settings, model)
 
+    def prepare_call(
+        self,
+        config: ModelConfig,
+        policy: ModelCallPolicy | None = None,
+    ) -> tuple[ModelConfig, ModelCallPolicy, ModelProfile]:
+        """Return the exact runtime config, policy, and provider profile."""
+
+        profile = self.profile_for(config.model)
+        runtime_config, runtime_policy = self._apply_policy(config, policy, profile)
+        return runtime_config, runtime_policy, profile
+
     @staticmethod
     def _sdk_timeout_code(exc: BaseException) -> str:
         """Classify an SDK timeout without depending on httpx internals."""
 
         current: BaseException | None = exc
         for _ in range(4):
+            if current is None:
+                break
             name = current.__class__.__name__.lower()
             if "connecttimeout" in name:
                 return "sdk_connect_timeout"
@@ -445,7 +423,7 @@ class ModelClient:
         if isinstance(extra_body, dict):
             thinking = extra_body.get("thinking")
             if isinstance(thinking, dict) and isinstance(thinking.get("type"), str):
-                return thinking["type"]
+                return str(thinking["type"])
             if isinstance(extra_body.get("enable_thinking"), bool):
                 return "high" if extra_body["enable_thinking"] else "off"
         return "not_sent"

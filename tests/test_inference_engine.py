@@ -10,10 +10,14 @@ from typing import cast
 from src.analyzer.context_state import ContextState
 from src.analyzer.event_log import EventType
 from src.analyzer.inference_engine import InferenceEngine
+from src.analyzer.prompts import USER_PREFIX_REVIEW
 from src.analyzer.trace import TraceRecorder
 from src.analyzer.schemas import DebugRequest, ReviewRequest
+from src.models.compat import ModelCallPolicy
 from src.models.conversation import ModelConversation
-from src.models.schemas import ModelResponse, TokenUsage
+from src.models.request_assembler import AssembledRequest, RequestAssembler
+from src.models.schemas import Message, ModelConfig, ModelResponse, TokenUsage
+from src.models.token_telemetry import serialize_json
 from src.tools.base import ToolResult
 
 
@@ -456,6 +460,286 @@ def test_analyze_keeps_prefetch_when_loaded_file_is_not_selected(monkeypatch) ->
     assert any(
         "prefetched_tool_context" in message.content for message in client.calls[-1]
     )
+
+
+def test_delivered_ledger_uses_post_assembly_payload_only() -> None:
+    state = ContextState(
+        evidence_snapshot_id="snapshot-a",
+        evidence_revision="revision-a",
+        candidate_context_manifests=[
+            {
+                "candidate_id": "candidate-a",
+                "snapshot_id": "graph-snapshot",
+                "revision": "graph-revision",
+                "included_spans": [
+                    {
+                        "span_id": "span-a",
+                        "file": "src/sent.py",
+                        "start_line": 4,
+                        "end_line": 5,
+                        "content": "4: sent\n5: source",
+                        "context_hash": "hash-a",
+                        "retrieval_source": "relation_graph",
+                        "snapshot_id": "graph-snapshot",
+                        "revision": "graph-revision",
+                        "side": "new",
+                    }
+                ],
+            }
+        ],
+    )
+    payload = {
+        "repo_path": ".",
+        "diff_mode": True,
+        "diff_text": None,
+        "diff_loaded": "",
+        "files": {"src/sent.py": "1: sent\n2: source"},
+        "summarized": ["file:src/summary.py"],
+        "candidate_context_manifests": [
+            {
+                "candidate_id": "candidate-a",
+                "included_spans": [
+                    {
+                        "span_id": "span-a",
+                        "file": "src/sent.py",
+                        "start_line": 4,
+                        "end_line": 5,
+                        "content": "4: sent\n5: source",
+                        "context_hash": "hash-a",
+                        "retrieval_source": "relation_graph",
+                    }
+                ],
+                "included_graph_paths": [],
+            }
+        ],
+    }
+    messages = [
+        Message(role="system", content="system"),
+        Message(role="user", content=USER_PREFIX_REVIEW + serialize_json(payload)),
+    ]
+    config = ModelConfig(model="fake-model")
+    assembled = AssembledRequest(
+        messages=messages,
+        estimated_tokens=1,
+        request_hash="request",
+        serialized_payload=RequestAssembler.serialized(
+            messages, [], config, ModelCallPolicy(thinking="off")
+        ),
+    )
+
+    InferenceEngine._record_delivered_review_evidence(  # noqa: SLF001
+        state,
+        assembled,
+        [],
+        repo_path=".",
+    )
+
+    records = {record["path"]: record for record in state.evidence_ledger}
+    assert records["src/sent.py"]["snapshot_id"] == "snapshot-a"
+    assert records["src/sent.py"]["revision"] == "revision-a"
+    assert not any(record["path"] == "src/summary.py" for record in state.evidence_ledger)
+    assert not any(record["path"] == "src/missing.py" for record in state.evidence_ledger)
+    manifest_record = next(
+        record
+        for record in state.evidence_ledger
+        if record["artifact_id"] == "span-a"
+    )
+    assert manifest_record["snapshot_id"] == "graph-snapshot"
+    assert manifest_record["revision"] == "graph-revision"
+
+
+def test_delivered_ledger_ignores_an_assembled_json_body_that_was_shortened() -> None:
+    state = ContextState(
+        evidence_snapshot_id="snapshot-a",
+        evidence_revision="revision-a",
+    )
+    assembled = AssembledRequest(
+        messages=[],
+        estimated_tokens=1,
+        request_hash="request",
+        serialized_payload=serialize_json(
+            {
+                "model": "fake-model",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": USER_PREFIX_REVIEW
+                        + '{"files":{"src/a.py":"1: body"}[request context shortened; retrieve missing evidence]',
+                    }
+                ],
+            }
+        ),
+    )
+
+    InferenceEngine._record_delivered_review_evidence(  # noqa: SLF001
+        state,
+        assembled,
+        [],
+        repo_path=".",
+    )
+
+    assert state.evidence_ledger == []
+
+
+def test_delivered_ledger_ignores_a_handoff_truncated_file_body() -> None:
+    state = ContextState(
+        evidence_snapshot_id="snapshot-a",
+        evidence_revision="revision-a",
+    )
+    payload = {
+        "repo_path": ".",
+        "diff_mode": False,
+        "files": {
+            "src/a.py": "1: body\n...[handoff truncated]",
+        },
+        "summarized": [],
+        "candidate_context_manifests": [],
+    }
+    messages = [
+        Message(role="system", content="system"),
+        Message(role="user", content=USER_PREFIX_REVIEW + serialize_json(payload)),
+    ]
+    assembled = AssembledRequest(
+        messages=messages,
+        estimated_tokens=1,
+        request_hash="request",
+        serialized_payload=RequestAssembler.serialized(
+            messages,
+            [],
+            ModelConfig(model="fake-model"),
+            ModelCallPolicy(thinking="off"),
+        ),
+    )
+
+    InferenceEngine._record_delivered_review_evidence(  # noqa: SLF001
+        state,
+        assembled,
+        [],
+        repo_path=".",
+    )
+
+    assert state.evidence_ledger == []
+
+
+def test_delivered_ledger_rejects_a_rewritten_manifest_span() -> None:
+    state = ContextState(
+        evidence_snapshot_id="snapshot-a",
+        evidence_revision="revision-a",
+        candidate_context_manifests=[
+            {
+                "candidate_id": "candidate-a",
+                "included_spans": [
+                    {
+                        "span_id": "span-a",
+                        "file": "src/a.py",
+                        "start_line": 4,
+                        "end_line": 4,
+                        "content": "4: trusted source",
+                        "context_hash": "hash-a",
+                        "retrieval_source": "relation_graph",
+                    }
+                ],
+            }
+        ],
+    )
+    payload = {
+        "files": {},
+        "candidate_context_manifests": [
+            {
+                "candidate_id": "candidate-a",
+                "included_spans": [
+                    {
+                        "span_id": "span-a",
+                        "file": "src/a.py",
+                        "start_line": 4,
+                        "end_line": 4,
+                        "content": "4: rewritten source",
+                    }
+                ],
+            }
+        ],
+    }
+    messages = [
+        Message(role="user", content=USER_PREFIX_REVIEW + serialize_json(payload)),
+    ]
+    assembled = AssembledRequest(
+        messages=messages,
+        estimated_tokens=1,
+        request_hash="request",
+        serialized_payload=RequestAssembler.serialized(
+            messages,
+            [],
+            ModelConfig(model="fake-model"),
+            ModelCallPolicy(thinking="off"),
+        ),
+    )
+
+    InferenceEngine._record_delivered_review_evidence(  # noqa: SLF001
+        state,
+        assembled,
+        [],
+        repo_path=".",
+    )
+
+    assert state.evidence_ledger == []
+
+
+def test_delivered_tool_evidence_requires_the_complete_wire_result_body() -> None:
+    captured = [
+        {
+            "tool_name": "read_file",
+            "tool_call_id": "call-1",
+            "data": {
+                "file_path": "src/a.py",
+                "start_line": 1,
+                "line_count": 2,
+                "content": "1: first\n2: second",
+            },
+        }
+    ]
+    complete = {
+        "role": "tool",
+        "tool_call_id": "call-1",
+        "content": serialize_json({"ok": True, "data": captured[0]["data"]}),
+    }
+    shortened = {
+        **complete,
+        "content": serialize_json(
+            {
+                "ok": True,
+                "data": {
+                    **captured[0]["data"],
+                    "content": "1: first\n[request context shortened; retrieve missing evidence]",
+                },
+            }
+        ),
+    }
+
+    assert InferenceEngine._delivered_tool_evidence(captured, [complete]) == captured  # noqa: SLF001
+    assert InferenceEngine._delivered_tool_evidence(captured, [shortened]) == []  # noqa: SLF001
+
+
+def test_schema_validation_repair_respects_a_zero_shared_budget(monkeypatch) -> None:
+    monkeypatch.setenv("CONTEXT_SUMMARY_ENABLED", "false")
+    client = InvalidThenValidSubmitClient()
+    engine = InferenceEngine(model_client=client)  # type: ignore[arg-type]
+
+    plan, _ = asyncio.run(
+        engine.analyze(
+            state=ContextState(goal="Run structured code review"),
+            request=ReviewRequest(repo_path="."),
+            tool_specs=[],
+            tool_schemas=[
+                {"type": "function", "function": {"name": "submit_review"}}
+            ],
+            repair_attempt_budget=0,
+        )
+    )
+
+    assert len(client.calls) == 1
+    assert plan.draft_review is None
+    assert plan.schema_repair_attempted_count == 0
+    assert plan.incomplete_reason == "schema_repair_budget_exhausted"
 
 
 def test_prefetch_coverage_requires_selected_file_to_reach_end_line() -> None:

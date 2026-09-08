@@ -95,6 +95,38 @@ class ReviewResponse(BaseModel):
         default="no_candidates",
         description="Verifier outcome independent of workflow validity.",
     )
+    completion_status: Literal["complete", "incomplete"] = Field(
+        default="complete",
+        description="Whether the review completed all required evidence checks.",
+    )
+    incomplete_reasons: list[str] = Field(
+        default_factory=list,
+        description="Structured reasons a review could not be completed safely.",
+    )
+
+    def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        """Keep the complete v0 response envelope compact for old consumers.
+
+        The new completion fields are emitted as soon as a run is incomplete;
+        a normal complete response keeps the historical serialized key set.
+        """
+
+        dumped = super().model_dump(*args, **kwargs)
+        if self.completion_status == "complete" and not self.incomplete_reasons:
+            dumped.pop("completion_status", None)
+            dumped.pop("incomplete_reasons", None)
+        return dumped
+
+
+class ReviewHandoff(BaseModel):
+    """Minimal evidence-preserving state passed into a submit-only turn."""
+
+    changed_diff: str = ""
+    file_contents: dict[str, str] = Field(default_factory=dict)
+    candidate_context_manifests: list[dict[str, Any]] = Field(default_factory=list)
+    evidence_ledger: list[dict[str, Any]] = Field(default_factory=list)
+    evidence_gaps: list[str] = Field(default_factory=list)
+    has_draft_findings: bool = False
 
 
 class DebugStep(BaseModel):
@@ -213,6 +245,11 @@ class AnalysisPlan(BaseModel):
         default=False,
         description="Whether a truncated response without valid submit needs recovery",
     )
+    schema_repair_attempted_count: int = Field(
+        default=0,
+        ge=0,
+        description="Schema-validation repair attempts consumed by this plan",
+    )
     model_finish_reason: str = Field(
         default="",
         description="Provider finish reason retained for runtime and funnel telemetry.",
@@ -244,5 +281,14 @@ class FindingCandidate(BaseModel):
     originating_iteration: int = Field(ge=0)
     source_issue_index: int = Field(default=0, ge=0)
     verification_status: Literal[
-        "pending", "accepted", "rejected", "verification_blocked"
+        "pending",
+        "accepted",
+        "rejected",
+        "verification_blocked",
+        "verified",
+        "needs_repair",
+        "invalid",
     ] = "pending"
+    integrity_status: Literal["pending", "verified", "needs_repair", "invalid"] = (
+        "pending"
+    )

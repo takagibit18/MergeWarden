@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import re
 from enum import Enum
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from src.analyzer.finding_schema import (
+    ClaimSupport,
     FINDING_SCHEMA_VERSION,
     CounterfactualResult,
     EvidenceProvenance,
@@ -56,6 +58,9 @@ class ReviewIssue(BaseModel):
         default="1.0",
         description="1.0 for legacy issues; 2.0 for structured hypotheses.",
     )
+    integrity_status: Literal["pending", "verified", "needs_repair", "invalid"] = (
+        "pending"
+    )
     finding_id: str = Field(
         default="",
         description="Reviewer-local hypothesis identifier; not a root-cause id.",
@@ -78,6 +83,13 @@ class ReviewIssue(BaseModel):
     repair_intent: RepairIntent = Field(default_factory=RepairIntent)
     trigger: str = ""
     impact: str = ""
+    supports: list[ClaimSupport] = Field(
+        default_factory=list,
+        description=(
+            "Canonical role envelopes. Runtime may derive this field from the "
+            "legacy role-specific evidence arrays during the compatibility migration."
+        ),
+    )
     cause_evidence: list[EvidenceProvenance] = Field(default_factory=list)
     contract_evidence: list[EvidenceProvenance] = Field(default_factory=list)
     trigger_evidence: list[EvidenceProvenance] = Field(default_factory=list)

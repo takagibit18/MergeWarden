@@ -11,11 +11,13 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 from src.analyzer.diff_lines import changed_new_lines_by_file
+from src.analyzer.evidence_ledger import EvidenceLedger
 from src.analyzer.evidence_binding import bind_candidate_evidence, bind_issue_candidate_id
-from src.analyzer.finding_schema import normalize_repo_path
+from src.analyzer.finding_contract import canonical_contract_gaps
+from src.analyzer.finding_schema import EvidenceSide, normalize_repo_path
 from src.analyzer.location import LocationParseResult, normalize_location
 from src.analyzer.output_formatter import ReviewIssue, ReviewReport, Severity
 from src.analyzer.schemas import FindingCandidate, ReviewRequest
@@ -120,6 +122,32 @@ class FindingIntegrityResult:
     passed: bool
     failures: tuple[IntegrityFailure, ...] = ()
 
+    @property
+    def status(self) -> Literal["verified", "needs_repair", "invalid"]:
+        """Expose the internal tri-state without changing the legacy ``passed`` flag."""
+
+        if self.passed:
+            return "verified"
+        if any(
+            failure.code
+            in {
+                "candidate_binding_mismatch",
+                "candidate_binding_missing",
+                "repository_path_invalid",
+                "repository_path_missing",
+                "location_invalid",
+                "location_line_missing",
+                "location_line_out_of_range",
+                "location_unreadable",
+                "finding_contract_invalid",
+                "support_reference_missing",
+                "evidence_identity_mismatch",
+            }
+            for failure in self.failures
+        ):
+            return "invalid"
+        return "needs_repair"
+
 
 @dataclass(frozen=True)
 class IntegrityGuardResult:
@@ -147,6 +175,26 @@ class IntegrityGuardResult:
     @property
     def rejected_candidate_ids(self) -> frozenset[str]:
         return frozenset(item.candidate_id for item in self.results if not item.passed)
+
+    @property
+    def verified_candidate_ids(self) -> frozenset[str]:
+        return frozenset(
+            item.candidate_id for item in self.results if item.status == "verified"
+        )
+
+    @property
+    def needs_repair_candidate_ids(self) -> frozenset[str]:
+        return frozenset(
+            item.candidate_id
+            for item in self.results
+            if item.status == "needs_repair"
+        )
+
+    @property
+    def invalid_candidate_ids(self) -> frozenset[str]:
+        return frozenset(
+            item.candidate_id for item in self.results if item.status == "invalid"
+        )
 
     @property
     def failures(self) -> dict[str, tuple[IntegrityFailure, ...]]:
@@ -181,6 +229,9 @@ class FindingIntegrityGuard:
         context_manifests: list[dict[str, Any]] | None = None,
         candidate_context: list[dict[str, Any]] | None = None,
         context_mode: str = "graph_hybrid",
+        evidence_ledger: EvidenceLedger | None = None,
+        snapshot_id: str = "",
+        revision: str = "",
     ) -> IntegrityGuardResult:
         """Validate candidates against repository and retained run context."""
 
@@ -198,6 +249,9 @@ class FindingIntegrityGuard:
             request,
             evidence,
             context_manifests=manifests,
+            evidence_ledger=evidence_ledger,
+            snapshot_id=snapshot_id,
+            revision=revision,
         )
         contexts = (
             candidate_context
@@ -225,6 +279,7 @@ class FindingIntegrityGuard:
                 repo_root=self._root_for(request),
                 changed=changed,
                 context=contexts_by_id.get(candidate.candidate_id),
+                evidence_ledger=evidence_ledger,
             )
             prepared_candidates.append(prepared)
             preparation_failures[candidate.candidate_id] = failures
@@ -235,6 +290,7 @@ class FindingIntegrityGuard:
                 repo_root=self._root_for(request),
                 changed=changed,
                 context=contexts_by_id.get(candidate.candidate_id),
+                evidence_ledger=evidence_ledger,
                 initial_failures=(
                     *binding_failures.get(candidate.candidate_id, ()),
                     *preparation_failures.get(candidate.candidate_id, ()),
@@ -249,9 +305,25 @@ class FindingIntegrityGuard:
                     "verification_status": (
                         "accepted"
                         if result_by_id.get(candidate.candidate_id, None)
-                        and result_by_id[candidate.candidate_id].passed
+                        and result_by_id[candidate.candidate_id].status == "verified"
                         else "verification_blocked"
-                    )
+                        if result_by_id.get(candidate.candidate_id, None)
+                        else "verification_blocked"
+                    ),
+                    "integrity_status": (
+                        result_by_id[candidate.candidate_id].status
+                        if result_by_id.get(candidate.candidate_id, None)
+                        else "invalid"
+                    ),
+                    "issue": candidate.issue.model_copy(
+                        update={
+                            "integrity_status": (
+                                result_by_id[candidate.candidate_id].status
+                                if result_by_id.get(candidate.candidate_id, None)
+                                else "invalid"
+                            )
+                        }
+                    ),
                 }
             )
             for candidate in prepared_candidates
@@ -269,6 +341,7 @@ class FindingIntegrityGuard:
         repo_root: Path,
         changed: dict[str, set[int]],
         context: dict[str, Any] | None,
+        evidence_ledger: EvidenceLedger | None,
     ) -> tuple[FindingCandidate, tuple[IntegrityFailure, ...]]:
         """Drop invalid optional structured evidence before final publication."""
 
@@ -301,6 +374,7 @@ class FindingIntegrityGuard:
                     repo_root=repo_root,
                     changed=changed,
                     context=context,
+                    evidence_ledger=evidence_ledger,
                     field=f"{role}_evidence[{index}]",
                 )
                 if not failures:
@@ -322,6 +396,7 @@ class FindingIntegrityGuard:
         repo_root: Path,
         changed: dict[str, set[int]],
         context: dict[str, Any] | None,
+        evidence_ledger: EvidenceLedger | None,
         field: str,
     ) -> list[IntegrityFailure]:
         """Validate one evidence role and return failures with full provenance."""
@@ -357,9 +432,44 @@ class FindingIntegrityGuard:
                     **metadata,
                 )
             )
-        if evidence_location.valid and not provenance_in_candidate_context(
-            context, evidence_item
-        ):
+        if evidence_ledger is not None:
+            missing_identity = [
+                field_name
+                for field_name in ("artifact_id", "snapshot_id", "revision")
+                if not str(getattr(evidence_item, field_name, "") or "").strip()
+            ]
+            if missing_identity:
+                failures.append(
+                    IntegrityFailure(
+                        "evidence_identity_mismatch",
+                        "Evidence is missing system-bound artifact, snapshot, or revision identity.",
+                        field=f"{field}.{missing_identity[0]}",
+                        location=evidence_item.location,
+                        **metadata,
+                    )
+                )
+        observed = evidence_location.valid and (
+            evidence_ledger.covers(
+                evidence_location.path or "",
+                evidence_location.line or 0,
+                evidence_location.end_line or evidence_location.line,
+                side=cast(
+                    EvidenceSide,
+                    str(getattr(evidence_item, "side", "new") or "new"),
+                ),
+                artifact_id=str(getattr(evidence_item, "artifact_id", "") or "").strip(),
+                snapshot_id=str(
+                    getattr(evidence_item, "snapshot_id", "") or ""
+                ).strip(),
+                revision=str(getattr(evidence_item, "revision", "") or "").strip(),
+                content_hash=str(
+                    getattr(evidence_item, "context_hash", "") or ""
+                ).strip(),
+            )
+            if evidence_ledger is not None
+            else provenance_in_candidate_context(context, evidence_item)
+        )
+        if evidence_location.valid and not observed:
             evidence_role = field.partition("_evidence")[0]
             budget_exhausted = context_budget_exhausted_for_evidence(
                 context,
@@ -394,6 +504,7 @@ class FindingIntegrityGuard:
         repo_root: Path,
         changed: dict[str, set[int]],
         context: dict[str, Any] | None,
+        evidence_ledger: EvidenceLedger | None,
         initial_failures: tuple[IntegrityFailure, ...],
     ) -> FindingIntegrityResult:
         issue = candidate.issue
@@ -417,6 +528,21 @@ class FindingIntegrityGuard:
                 )
             )
             return FindingIntegrityResult(candidate_id, False, tuple(failures))
+
+        for gap in canonical_contract_gaps(
+            issue,
+            strict=issue.is_structured_hypothesis
+            and issue.severity in _RISK_SEVERITIES
+            and (evidence_ledger is not None or bool(issue.supports)),
+        ):
+            failures.append(
+                IntegrityFailure(
+                    gap.code,
+                    gap.message,
+                    field=gap.field,
+                    location=issue.location,
+                )
+            )
 
         if issue.candidate_id and issue.candidate_id != candidate_id:
             failures.append(
@@ -454,6 +580,7 @@ class FindingIntegrityGuard:
                     context=context,
                     changed=changed,
                     field="location",
+                    evidence_ledger=evidence_ledger,
                 )
             )
 
@@ -474,6 +601,7 @@ class FindingIntegrityGuard:
                         context=context,
                         changed=changed,
                         field="primary_anchor",
+                        evidence_ledger=evidence_ledger,
                     )
                 )
 
@@ -495,6 +623,7 @@ class FindingIntegrityGuard:
                         context=context,
                         changed=changed,
                         field=field,
+                        evidence_ledger=evidence_ledger,
                     )
                 )
 
@@ -512,6 +641,7 @@ class FindingIntegrityGuard:
                         repo_root=repo_root,
                         changed=changed,
                         context=context,
+                        evidence_ledger=evidence_ledger,
                         field=f"{role}_evidence[{index}]",
                     )
                 )
@@ -742,12 +872,20 @@ class FindingIntegrityGuard:
         context: dict[str, Any] | None,
         changed: dict[str, set[int]],
         field: str,
+        evidence_ledger: EvidenceLedger | None = None,
     ) -> list[IntegrityFailure]:
         if not location.valid or location.line is None:
             return []
         if _location_intersects_changed_lines(location, changed):
             return []
-        if location_in_candidate_context(context, location):
+        if evidence_ledger is not None:
+            if evidence_ledger.covers(
+                location.path or "",
+                location.line,
+                location.end_line or location.line,
+            ):
+                return []
+        elif location_in_candidate_context(context, location):
             return []
         budget_exhausted = context_budget_exhausted_for_location(context, location)
         return [

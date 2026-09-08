@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path, PurePath
+from types import SimpleNamespace
 
 import pytest
 
@@ -44,6 +45,52 @@ class DummyEchoTool(BaseTool):
 
     async def execute(self, **kwargs):
         return {"echo": kwargs.get("value", "")}
+
+
+def test_repair_merge_retains_omitted_candidates_and_matches_by_finding_id() -> None:
+    def issue(finding_id: str, suggestion: str) -> ReviewIssue:
+        return ReviewIssue(
+            severity=Severity.WARNING,
+            location=f"src/{finding_id.lower()}.py:1",
+            evidence=f"Evidence for {finding_id}.",
+            suggestion=suggestion,
+            confidence=0.95,
+            schema_version="1.0",
+            finding_id=finding_id,
+        )
+
+    original = ReviewReport(
+        summary="original",
+        issues=[
+            issue("F-A", "Repair A"),
+            issue("F-B", "Repair B"),
+            issue("F-C", "Keep C"),
+        ],
+    )
+    repaired_b = issue("F-B", "Repaired B with delivered evidence")
+    preview = SimpleNamespace(
+        bound_candidates=[
+            SimpleNamespace(source_issue_index=0, candidate_id="candidate-a"),
+            SimpleNamespace(source_issue_index=1, candidate_id="candidate-b"),
+            SimpleNamespace(source_issue_index=2, candidate_id="candidate-c"),
+        ],
+        results=[
+            SimpleNamespace(status="needs_repair"),
+            SimpleNamespace(status="needs_repair"),
+            SimpleNamespace(status="verified"),
+        ],
+    )
+
+    merged = AgentOrchestrator._merge_repaired_report(
+        original,
+        ReviewReport(summary="repair", issues=[repaired_b]),
+        preview,
+    )
+
+    assert [item.finding_id for item in merged.issues] == ["F-A", "F-B", "F-C"]
+    assert merged.issues[0].suggestion == "Repair A"
+    assert merged.issues[1].suggestion == "Repaired B with delivered evidence"
+    assert merged.issues[2].suggestion == "Keep C"
 
 
 class DummyWriteTool(BaseTool):

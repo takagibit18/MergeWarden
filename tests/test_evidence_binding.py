@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from src.analyzer.evidence_binding import bind_candidate_evidence
+from src.analyzer.evidence_ledger import ledger_from_sources
 from src.analyzer.finding_integrity import FindingIntegrityGuard, build_candidates
 from src.analyzer.finding_schema import (
     EvidenceProvenance,
@@ -323,6 +324,109 @@ def test_read_evidence_mislabeled_as_diff_is_bound_to_successful_read() -> None:
     bound, _ = _context(candidates, request, _read_evidence())
 
     assert bound[0].issue.contract_evidence[0].retrieval_source == "read_file"
+
+
+def test_clipped_diff_does_not_outrank_complete_read_evidence() -> None:
+    request = ReviewRequest(
+        repo_path=".",
+        diff_mode=True,
+        diff_text=(
+            "diff --git a/main.py b/main.py\n"
+            "--- a/main.py\n"
+            "+++ b/main.py\n"
+            "@@ -1,2 +1,2 @@\n"
+            "+return load(value + 1)\n"
+        ),
+    )
+    issue = _issue(contract_source="git_diff", contract_file="main.py", contract_line=1)
+    candidates = build_candidates(ReviewReport(issues=[issue]), iteration=0)
+    tools = [
+        {
+            "tool_name": "read_file",
+            "arguments": {"file_path": "main.py"},
+            "data": {
+                "file_path": "main.py",
+                "start_line": 1,
+                "line_count": 1,
+                "content": "1: return load(value + 1)",
+            },
+        }
+    ]
+
+    bound, _ = _context(candidates, request, tools)
+
+    assert [item.retrieval_source for item in bound[0].issue.all_evidence()] == [
+        "read_file",
+        "read_file",
+    ]
+
+
+def test_delivered_tool_binding_uses_ledger_identity_when_diff_is_not_delivered(
+    tmp_path: Path,
+) -> None:
+    """A source omitted from the wire request cannot outrank delivered tool text."""
+
+    (tmp_path / "main.py").write_text("return load(value + 1)\n", encoding="utf-8")
+    request = ReviewRequest(
+        repo_path=str(tmp_path),
+        diff_mode=True,
+        diff_text=(
+            "diff --git a/main.py b/main.py\n"
+            "--- a/main.py\n"
+            "+++ b/main.py\n"
+            "@@ -1 +1 @@\n"
+            "-return load(value)\n"
+            "+return load(value + 1)\n"
+        ),
+    )
+    tool_evidence = [
+        {
+            "tool_name": "read_file",
+            "tool_call_id": "read-1",
+            "arguments": {"file_path": "main.py"},
+            "data": {
+                "file_path": "main.py",
+                "start_line": 1,
+                "line_count": 1,
+                "content": "1: return load(value + 1)",
+            },
+        }
+    ]
+    ledger = ledger_from_sources(
+        tool_evidence=tool_evidence,
+        snapshot_id="snapshot-a",
+        revision="revision-a",
+    )
+    issue = ReviewIssue(
+        severity=Severity.WARNING,
+        location="main.py:1",
+        evidence="The caller changes the value before loading it.",
+        suggestion="Preserve the established caller contract.",
+        confidence=0.95,
+        schema_version="1.0",
+        cause_evidence=[
+            EvidenceProvenance(
+                file="main.py",
+                line=1,
+                statement="The changed caller loads the incremented value.",
+            )
+        ],
+    )
+    candidates = build_candidates(ReviewReport(issues=[issue]), iteration=0)
+
+    result = FindingIntegrityGuard(tmp_path).validate(
+        candidates,
+        request,
+        tool_evidence=tool_evidence,
+        evidence_ledger=ledger,
+        snapshot_id="snapshot-a",
+        revision="revision-a",
+    )
+
+    bound_evidence = result.bound_candidates[0].issue.cause_evidence[0]
+    assert bound_evidence.retrieval_source == "read_file"
+    assert bound_evidence.artifact_id == ledger.records[0].artifact_id
+    assert result.results[0].status == "verified"
 
 
 def test_omitted_source_is_bound_from_successful_read() -> None:

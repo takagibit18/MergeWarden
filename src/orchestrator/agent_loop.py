@@ -14,13 +14,16 @@ from uuid import uuid4
 
 from src.analyzer.context_builder import ContextBuilder
 from src.analyzer.context_mode import ReviewContextMode
+from src.analyzer.evidence_ledger import ledger_from_sources
 from src.analyzer.context_state import ContextState, DecisionStep, ErrorDetail
 from src.analyzer.context_strategy import ContextStrategy, build_context_strategy
 from src.analyzer.diff_lines import changed_new_lines_by_file
 from src.analyzer.event_log import EventEntry, EventLog, EventType
 from src.analyzer.finding_integrity import FindingIntegrityGuard, build_candidates
+from src.analyzer.finding_contract import canonical_contract_gaps
 from src.analyzer.inference_engine import InferenceEngine
 from src.analyzer.output_formatter import ReviewReport
+from src.analyzer.persistent_index import repository_identity, revision_identity
 from src.analyzer.review_policy import evaluate_issue_filter
 from src.analyzer.review_skills import (
     RETRIEVAL_VERSION,
@@ -83,6 +86,8 @@ def _review_outcome_for_counts(checked: int, accepted: int) -> ReviewOutcome:
 
 
 def _non_negative_int(value: object) -> int:
+    if not isinstance(value, (int, float, str, bytes, bytearray)):
+        return 0
     try:
         return max(0, int(value or 0))
     except (TypeError, ValueError):
@@ -222,6 +227,7 @@ class AgentOrchestrator:
         self._workflow_reprompt_count = 0
         self._model_raw_issue_count = 0
         self._submitted_issue_count = 0
+        self._submitted_attempt_count = 0
         self._policy_passed_issue_count = 0
         self._policy_rejected_issue_count = 0
         self._non_risk_issue_count = 0
@@ -249,6 +255,13 @@ class AgentOrchestrator:
         self._tool_result_journal_writes = 0
         self._draft_findings_created = 0
         self._draft_findings_from_visible_content = 0
+        self._review_repair_attempt_count = 0
+        self._review_repair_succeeded_count = 0
+        self._integrity_needs_repair_count = 0
+        self._integrity_invalid_count = 0
+        self._final_published_count = 0
+        self._evidence_snapshot_id = ""
+        self._evidence_revision = ""
         self._trace_recorder = TraceRecorder(
             detail_mode=self._settings.agent_trace_detail,
             max_chars=self._settings.agent_trace_max_chars,
@@ -330,6 +343,7 @@ class AgentOrchestrator:
         response = await self._maybe_force_submit_review(state, request, response)
         assert isinstance(response, ReviewResponse)
         response = await self._maybe_recover_review_workflow(response, request, state)
+        response = await self._maybe_repair_review_findings(response, request, state)
         self._recover_model_timeout_after_valid_review(state)
         self._reviewer_latency_seconds = perf_counter() - reviewer_started
         verifier_started = perf_counter()
@@ -340,7 +354,7 @@ class AgentOrchestrator:
         )
         response = self._finalize_review_workflow(response, state)
         self._record_finding_funnel(response)
-        self._record_review_telemetry(state)
+        self._record_review_telemetry(state, response=response)
         self._close_event_log()
         return response
 
@@ -419,10 +433,7 @@ class AgentOrchestrator:
                 decision.event_payload(original_index=original_index),
             )
 
-        candidates = build_candidates(
-            response.report,
-            iteration=self._iteration,
-        )
+        candidates = build_candidates(submitted_report, iteration=self._iteration)
         self._verifier_candidate_count = len(candidates)
         self._risk_candidate_count = len(candidates)
         self._record_event(
@@ -464,18 +475,35 @@ class AgentOrchestrator:
                     "semantic_verify_findings", "no_risk_candidates"
                 )
 
+        observed_tool_evidence = self._observed_tool_evidence(state)
         guard_result = FindingIntegrityGuard(self._workspace_root).validate(
             candidates,
             request,
-            tool_evidence=list(self._verifier_tool_evidence),
+            tool_evidence=observed_tool_evidence,
             context_manifests=[
                 dict(item) for item in state.candidate_context_manifests
             ],
             context_mode=state.context_mode,
+            evidence_ledger=ledger_from_sources(
+                existing_payload=state.evidence_ledger,
+                snapshot_id=self._evidence_snapshot_id,
+                revision=self._evidence_revision,
+            ),
+            snapshot_id=self._evidence_snapshot_id,
+            revision=self._evidence_revision,
         )
+        state.evidence_ledger = ledger_from_sources(
+            existing_payload=state.evidence_ledger,
+            snapshot_id=self._evidence_snapshot_id,
+            revision=self._evidence_revision,
+        ).to_payload()
         self._deterministic_rejected_count = guard_result.rejected_count
         self._verifier_accepted_count = guard_result.passed_count
         self._verifier_rejected_count = guard_result.rejected_count
+        self._integrity_needs_repair_count = len(
+            guard_result.needs_repair_candidate_ids
+        )
+        self._integrity_invalid_count = len(guard_result.invalid_candidate_ids)
         self._review_outcome = _review_outcome_for_counts(
             guard_result.checked_count,
             guard_result.passed_count,
@@ -499,11 +527,18 @@ class AgentOrchestrator:
                 "deterministic_evidence_checked_count": guard_result.checked_count,
                 "deterministic_evidence_passed_count": guard_result.passed_count,
                 "deterministic_evidence_rejected_count": guard_result.rejected_count,
+                "verified_count": len(guard_result.verified_candidate_ids),
+                "needs_repair_count": len(guard_result.needs_repair_candidate_ids),
+                "invalid_count": len(guard_result.invalid_candidate_ids),
                 "integrity_failures": {
                     candidate_id: codes
                     for candidate_id, codes in self._integrity_failure_codes.items()
                 },
                 "integrity_failure_details": self._integrity_failure_details,
+                "candidate_statuses": {
+                    result.candidate_id: result.status
+                    for result in guard_result.results
+                },
                 "review_outcome": self._review_outcome,
                 "verifier_kind": "integrity_guard",
             },
@@ -530,7 +565,249 @@ class AgentOrchestrator:
             issues=output_issues,
             schema_version=response.report.schema_version,
         )
+        incomplete_codes = sorted(
+            {
+                failure.code
+                for failures in guard_result.failures.values()
+                for failure in failures
+                if failure.code
+                in {
+                    "evidence_not_observed",
+                    "verifier_context_budget_exhausted",
+                    "evidence_incomplete",
+                    "evidence_binding_missing",
+                    "finding_contract_incomplete",
+                    "finding_contract_invalid",
+                    "support_role_missing",
+                    "support_reference_missing",
+                    "evidence_identity_mismatch",
+                    "location_invalid",
+                    "location_line_missing",
+                    "location_line_out_of_range",
+                    "repository_path_invalid",
+                    "repository_path_missing",
+                }
+            }
+        )
+        if incomplete_codes:
+            response.completion_status = "incomplete"
+            response.incomplete_reasons = incomplete_codes
         return response
+
+    async def _maybe_repair_review_findings(
+        self,
+        response: ReviewResponse,
+        request: ReviewRequest,
+        state: ContextState,
+    ) -> ReviewResponse:
+        """Give one bounded, exact integrity repair opportunity before publish."""
+
+        if not response.report.issues:
+            return response
+        if self._review_repair_attempt_count >= self._settings.review_repair_max_attempts:
+            return response
+        candidates = build_candidates(response.report, iteration=self._iteration)
+        if not candidates:
+            return response
+        observed_tool_evidence = self._observed_tool_evidence(state)
+        ledger = ledger_from_sources(
+            existing_payload=state.evidence_ledger,
+            snapshot_id=self._evidence_snapshot_id,
+            revision=self._evidence_revision,
+        )
+        preview = FindingIntegrityGuard(self._workspace_root).validate(
+            candidates,
+            request,
+            tool_evidence=observed_tool_evidence,
+            context_manifests=[dict(item) for item in state.candidate_context_manifests],
+            context_mode=state.context_mode,
+            evidence_ledger=ledger,
+            snapshot_id=self._evidence_snapshot_id,
+            revision=self._evidence_revision,
+        )
+        needs = [
+            result
+            for result in preview.results
+            if result.status == "needs_repair"
+        ]
+        needs_source_indexes = {
+            candidate.source_issue_index
+            for candidate, result in zip(
+                preview.bound_candidates,
+                preview.results,
+                strict=False,
+            )
+            if result.status == "needs_repair"
+        }
+        self._integrity_needs_repair_count = len(needs)
+        self._integrity_invalid_count = sum(
+            result.status == "invalid" for result in preview.results
+        )
+        if not needs:
+            return response
+        gaps = [
+            {
+                "candidate_id": result.candidate_id,
+                "status": result.status,
+                "gaps": [failure.as_detail() for failure in result.failures],
+            }
+            for result in needs
+        ]
+        self._review_repair_attempt_count += 1
+        self._last_validator_result = {
+            "validator_passed": False,
+            "submit_allowed": False,
+            "unresolved_evidence_gaps": gaps,
+            "repair_instruction": (
+                "Repair only the listed candidates. Preserve every candidate that "
+                "already passed. Fill each missing role with a real delivered-source "
+                "reference; never invent evidence, ids, hashes, or locations. "
+                "Preserve each target finding_id so the runtime can match the repair. "
+                "If a target cannot be repaired, return that finding unchanged instead "
+                "of omitting it."
+            ),
+        }
+        self._record_event(
+            EventType.DECISION,
+            "finding_repair",
+            {
+                "iteration": self._iteration,
+                "stage": "pre_publish_preflight",
+                "repair_attempt": self._review_repair_attempt_count,
+                "candidate_count": len(candidates),
+                "needs_repair_count": len(needs),
+                "invalid_count": self._integrity_invalid_count,
+                "gaps": gaps,
+            },
+        )
+        repair_plan = await self.analyze(
+            state,
+            request,
+            tool_specs=[],
+            force_submit=True,
+        )
+        self._observe_review_submission(repair_plan)
+        self._observe_incomplete_plan(repair_plan, state)
+        if repair_plan.draft_review is None:
+            self._record_event(
+                EventType.DECISION,
+                "finding_repair",
+                {
+                    "iteration": self._iteration,
+                    "stage": "pre_publish_repair_result",
+                    "repair_attempt": self._review_repair_attempt_count,
+                    "succeeded": False,
+                    "reason": repair_plan.incomplete_reason or "no_valid_submit",
+                },
+            )
+            return response
+        merged = self._merge_repaired_report(
+            response.report,
+            repair_plan.draft_review,
+            preview,
+        )
+        self._last_plan = repair_plan.model_copy(update={"draft_review": merged})
+        response.report = merged
+        repaired_candidates = build_candidates(merged, iteration=self._iteration)
+        repaired_tool_evidence = self._observed_tool_evidence(state)
+        repaired_result = FindingIntegrityGuard(self._workspace_root).validate(
+            repaired_candidates,
+            request,
+            tool_evidence=repaired_tool_evidence,
+            context_manifests=[dict(item) for item in state.candidate_context_manifests],
+            context_mode=state.context_mode,
+            evidence_ledger=ledger_from_sources(
+                existing_payload=state.evidence_ledger,
+                snapshot_id=self._evidence_snapshot_id,
+                revision=self._evidence_revision,
+            ),
+            snapshot_id=self._evidence_snapshot_id,
+            revision=self._evidence_revision,
+        )
+        succeeded = bool(repaired_result.verified_candidate_ids) and not bool(
+            repaired_result.needs_repair_candidate_ids
+        )
+        repaired_verified_count = sum(
+            result.status == "verified"
+            and candidate.source_issue_index in needs_source_indexes
+            for candidate, result in zip(
+                repaired_result.bound_candidates,
+                repaired_result.results,
+                strict=False,
+            )
+        )
+        self._review_repair_succeeded_count = repaired_verified_count
+        self._record_event(
+            EventType.DECISION,
+            "finding_repair",
+            {
+                "iteration": self._iteration,
+                "stage": "pre_publish_repair_result",
+                "repair_attempt": self._review_repair_attempt_count,
+                "succeeded": succeeded,
+                "verified_count": len(repaired_result.verified_candidate_ids),
+                "repaired_verified_count": repaired_verified_count,
+                "needs_repair_count": len(repaired_result.needs_repair_candidate_ids),
+                "invalid_count": len(repaired_result.invalid_candidate_ids),
+            },
+        )
+        return response
+
+    @staticmethod
+    def _merge_repaired_report(
+        original: ReviewReport,
+        repaired: ReviewReport,
+        preview: Any,
+    ) -> ReviewReport:
+        """Replace repairable issues by stable identity and retain omissions."""
+
+        repairable_candidates = {
+            candidate.source_issue_index: candidate
+            for candidate, result in zip(preview.bound_candidates, preview.results, strict=False)
+            if result.status == "needs_repair"
+        }
+        targets_by_finding_id: dict[str, list[int]] = {}
+        targets_by_candidate_id: dict[str, list[int]] = {}
+        for index, candidate in repairable_candidates.items():
+            finding_id = original.issues[index].finding_id.strip()
+            if finding_id:
+                targets_by_finding_id.setdefault(finding_id, []).append(index)
+            candidate_id = candidate.candidate_id.strip()
+            if candidate_id:
+                targets_by_candidate_id.setdefault(candidate_id, []).append(index)
+
+        replacements: dict[int, Any] = {}
+        for repaired_issue in repaired.issues:
+            target_index: int | None = None
+            finding_id = repaired_issue.finding_id.strip()
+            for index in targets_by_finding_id.get(finding_id, []):
+                if index not in replacements:
+                    target_index = index
+                    break
+            if target_index is None:
+                candidate_id = repaired_issue.candidate_id.strip()
+                for index in targets_by_candidate_id.get(candidate_id, []):
+                    if index not in replacements:
+                        target_index = index
+                        break
+            if target_index is not None:
+                replacements[target_index] = repaired_issue
+
+        merged: list[Any] = []
+        for index, issue in enumerate(original.issues):
+            if index in repairable_candidates and index in replacements:
+                merged.append(replacements[index])
+            else:
+                # A missing repair response must remain visible to the final
+                # integrity guard; omission is not an implicit withdrawal.
+                merged.append(issue)
+        if not original.issues:
+            merged = list(repaired.issues)
+        return ReviewReport(
+            summary=repaired.summary or original.summary,
+            issues=merged,
+            schema_version=repaired.schema_version or original.schema_version,
+        )
 
     async def _maybe_recover_review_workflow(
         self,
@@ -776,14 +1053,12 @@ class AgentOrchestrator:
         ]
         effective_count = int(data.get("effective_issue_count", 0) or 0)
         empty_submit_allowed = data.get("should_submit_empty_issues") is True
-        has_draft = bool(self._draft_finding_store.all())
         passed = bool(
             all_tools_succeeded
             and not summary_warnings
             and not unresolved
             and not failed_issues
             and (effective_count > 0 or empty_submit_allowed)
-            and has_draft
         )
         validator_payload.update(
             {
@@ -1085,6 +1360,8 @@ class AgentOrchestrator:
         """Create the initial context state for one run."""
         start = perf_counter()
         state = self._context_builder.prepare_context(request)
+        state.evidence_snapshot_id = self._evidence_snapshot_id
+        state.evidence_revision = self._evidence_revision
         if isinstance(request, ReviewRequest) and request.diff_mode:
             state.constraints.append("diff_mode")
         if isinstance(request, DebugRequest) and (
@@ -1160,6 +1437,15 @@ class AgentOrchestrator:
             skill_selection = None
             skill_telemetry = None
 
+        # Publish only already-delivered tool evidence.  Diff, file, and graph
+        # bodies are registered by the inference engine after the exact request
+        # survives assembly and receives a provider response.
+        state.evidence_ledger = ledger_from_sources(
+            existing_payload=state.evidence_ledger,
+            snapshot_id=self._evidence_snapshot_id,
+            revision=self._evidence_revision,
+        ).to_payload()
+
         engine = self._build_engine()
         if engine is None:
             self._provider_error_seen = True
@@ -1231,8 +1517,32 @@ class AgentOrchestrator:
                     stage=call_stage,
                     skill_selection=skill_selection,
                     skill_telemetry=skill_telemetry,
+                    repair_attempt_budget=(
+                        max(
+                            0,
+                            self._settings.review_repair_max_attempts
+                            - self._review_repair_attempt_count,
+                        )
+                        if isinstance(request, ReviewRequest)
+                        else None
+                    ),
                 )
                 self._latest_tokens = usage.total_tokens
+                if result.schema_repair_attempted_count:
+                    self._review_repair_attempt_count += (
+                        result.schema_repair_attempted_count
+                    )
+                    self._record_event(
+                        EventType.DECISION,
+                        "finding_repair",
+                        {
+                            "iteration": self._iteration,
+                            "stage": "schema_validation_repair",
+                            "repair_attempt": self._review_repair_attempt_count,
+                            "schema_repair_attempted_count": result.schema_repair_attempted_count,
+                            "shared_repair_budget": self._settings.review_repair_max_attempts,
+                        },
+                    )
                 self._persist_draft_finding_calls(result)
                 if result.draft_review is not None:
                     self._submit_review_seen_any = True
@@ -1320,6 +1630,7 @@ class AgentOrchestrator:
                 "final_submit_evidence_truncated_count": (
                     result.final_submit_evidence_truncated_count
                 ),
+                "schema_repair_attempted_count": result.schema_repair_attempted_count,
                 "budget_state": self._budget_state,
             },
         )
@@ -1930,6 +2241,17 @@ class AgentOrchestrator:
     def _reset_run(self, max_iterations: int, repo_path: str) -> None:
         self._run_id = str(uuid4())
         self._workspace_root = Path(repo_path).resolve()
+        try:
+            repository_id = repository_identity(self._workspace_root)
+            self._evidence_revision = revision_identity(self._workspace_root)
+            self._evidence_snapshot_id = hashlib.sha256(
+                f"{repository_id}|{self._evidence_revision}".encode("utf-8")
+            ).hexdigest()[:24]
+        except Exception:  # noqa: BLE001
+            self._evidence_revision = "working-tree"
+            self._evidence_snapshot_id = hashlib.sha256(
+                str(self._workspace_root).encode("utf-8")
+            ).hexdigest()[:24]
         configured_log_dir = Path(self._settings.event_log_dir)
         if not configured_log_dir.is_absolute():
             configured_log_dir = Path(repo_path) / configured_log_dir
@@ -2007,6 +2329,7 @@ class AgentOrchestrator:
         self._workflow_reprompt_count = 0
         self._model_raw_issue_count = 0
         self._submitted_issue_count = 0
+        self._submitted_attempt_count = 0
         self._policy_passed_issue_count = 0
         self._policy_rejected_issue_count = 0
         self._non_risk_issue_count = 0
@@ -2034,6 +2357,11 @@ class AgentOrchestrator:
         self._tool_result_journal_writes = 0
         self._draft_findings_created = 0
         self._draft_findings_from_visible_content = 0
+        self._review_repair_attempt_count = 0
+        self._review_repair_succeeded_count = 0
+        self._integrity_needs_repair_count = 0
+        self._integrity_invalid_count = 0
+        self._final_published_count = 0
         self._record_event(
             EventType.PHASE_START,
             "prepare",
@@ -2430,6 +2758,17 @@ class AgentOrchestrator:
                 request.diff_text = diff_text
         if not diff_text.strip():
             return None
+        try:
+            repository_id = repository_identity(Path(request.repo_path).resolve())
+            self._evidence_revision = revision_identity(Path(request.repo_path).resolve())
+            diff_hash = hashlib.sha256(diff_text.encode("utf-8")).hexdigest()
+            self._evidence_snapshot_id = hashlib.sha256(
+                f"{repository_id}|{self._evidence_revision}|{diff_hash}".encode(
+                    "utf-8"
+                )
+            ).hexdigest()[:24]
+        except Exception:  # noqa: BLE001
+            pass
         return ReviewToolContext.from_diff(request.repo_path, diff_text)
 
     async def _execute_one_tool(
@@ -2560,6 +2899,7 @@ class AgentOrchestrator:
         if plan.draft_review is not None and self._submit_iteration is None:
             self._submit_iteration = self._iteration
         if plan.draft_review is not None:
+            self._submitted_attempt_count += 1
             self._review_stage = "complete"
 
     def _recover_model_timeout_after_valid_review(self, state: ContextState) -> None:
@@ -2619,7 +2959,12 @@ class AgentOrchestrator:
             return "natural_model_stop"
         return "other"
 
-    def _record_review_telemetry(self, state: ContextState) -> None:
+    def _record_review_telemetry(
+        self,
+        state: ContextState,
+        *,
+        response: ReviewResponse | None = None,
+    ) -> None:
         """Emit one complete, mode-aware review telemetry envelope."""
 
         graph = dict(state.relation_graph_summary)
@@ -2679,6 +3024,35 @@ class AgentOrchestrator:
             "candidate_finding_count": self._verifier_candidate_count,
             "accepted_finding_count": self._verifier_accepted_count,
             "verifier_rejection_count": self._verifier_rejected_count,
+            "logical_candidate_count": self._verifier_candidate_count,
+            "submitted_finding_count": self._submitted_issue_count,
+            "submitted_attempt_count": self._submitted_attempt_count,
+            "no_finding_run_count": int(self._submitted_issue_count == 0),
+            "non_risk_not_routed_count": self._non_risk_issue_count,
+            "pre_verifier_rejected_count": self._policy_rejected_issue_count,
+            "policy_passed_count": self._policy_passed_issue_count,
+            "policy_rejected_count": self._policy_rejected_issue_count,
+            "risk_candidate_count": self._risk_candidate_count,
+            "integrity_checked_count": self._verifier_candidate_count,
+            "integrity_verified_count": self._verifier_accepted_count,
+            "integrity_needs_repair_count": self._integrity_needs_repair_count,
+            "integrity_invalid_count": self._integrity_invalid_count,
+            "deterministic_rejected_count": self._deterministic_rejected_count,
+            "repair_attempted_count": self._review_repair_attempt_count,
+            "repair_succeeded_count": self._review_repair_succeeded_count,
+            "final_published_count": self._final_published_count,
+            "final_risk_finding_count": sum(
+                issue.severity.value in {"critical", "warning"}
+                for issue in (response.report.issues if response is not None else [])
+            ),
+            "evidence_complete_count": sum(
+                self._issue_evidence_complete(issue)
+                for issue in (response.report.issues if response is not None else [])
+            ),
+            "evidence_validated_count": self._verifier_accepted_count,
+            "finding_run_status": (
+                response.completion_status if response is not None else ""
+            ),
             "review_outcome": self._review_outcome,
             "integrity_failures": self._integrity_failure_codes,
             "integrity_failure_details": self._integrity_failure_details,
@@ -2763,26 +3137,65 @@ class AgentOrchestrator:
     def _record_finding_funnel(self, response: ReviewResponse) -> None:
         """Emit one mutually inspectable finding funnel after all output gates."""
 
+        final_evidence_complete_count = sum(
+            self._issue_evidence_complete(issue) for issue in response.report.issues
+        )
+        final_risk_count = sum(
+            issue.severity.value in {"critical", "warning"}
+            for issue in response.report.issues
+        )
+        self._final_published_count = len(response.report.issues)
         payload = {
+            "logical_candidate_count": self._verifier_candidate_count,
             "submitted_finding_count": self._submitted_issue_count,
+            "submitted_attempt_count": self._submitted_attempt_count,
+            "provider_attempt_count": self._provider_attempt_count,
             "no_finding_run_count": int(self._submitted_issue_count == 0),
             "non_risk_not_routed_count": self._non_risk_issue_count,
             "pre_verifier_rejected_count": max(
                 0, self._policy_rejected_issue_count
             ),
+            "policy_passed_count": self._policy_passed_issue_count,
+            "policy_rejected_count": self._policy_rejected_issue_count,
             "risk_candidate_count": self._risk_candidate_count,
+            "integrity_checked_count": self._verifier_candidate_count,
+            "integrity_verified_count": self._verifier_accepted_count,
+            "integrity_needs_repair_count": self._integrity_needs_repair_count,
+            "integrity_invalid_count": self._integrity_invalid_count,
             "deterministic_rejected_count": self._deterministic_rejected_count,
+            "repair_attempted_count": self._review_repair_attempt_count,
+            "repair_succeeded_count": self._review_repair_succeeded_count,
+            "evidence_complete_count": final_evidence_complete_count,
+            "evidence_validated_count": self._verifier_accepted_count,
             "review_outcome": self._review_outcome,
-            "final_risk_finding_count": sum(
-                issue.severity.value in {"critical", "warning"}
-                for issue in response.report.issues
-            ),
+            "final_published_count": len(response.report.issues),
+            "final_risk_finding_count": final_risk_count,
             "final_effective_issue_count": len(response.report.issues),
+            "run_status": response.completion_status,
         }
         self._record_event(
             EventType.FINDING_FUNNEL_COMPLETED,
             "finding_funnel",
             payload,
+        )
+
+    @staticmethod
+    def _issue_evidence_complete(issue: Any) -> int:
+        """Count only explicit final-result role evidence, not mere locations."""
+
+        if not getattr(issue, "is_structured_hypothesis", False):
+            return 0
+        gaps = canonical_contract_gaps(issue)
+        return int(
+            not any(
+                gap.code
+                in {
+                    "evidence_incomplete",
+                    "evidence_binding_missing",
+                    "support_reference_missing",
+                }
+                for gap in gaps
+            )
         )
 
     @staticmethod
@@ -2818,7 +3231,12 @@ class AgentOrchestrator:
         """Append feedback entries with iteration metadata, maintain ring-buffer window
         and digest index for folded-summary injection."""
         self._verifier_tool_evidence.extend(
-            capture_verifier_tool_evidence(entries, self._workspace_root)
+            capture_verifier_tool_evidence(
+                entries,
+                self._workspace_root,
+                snapshot_id=self._evidence_snapshot_id,
+                revision=self._evidence_revision,
+            )
         )
         window = max(1, self._settings.feedback_window_iterations)
         for entry in entries:
@@ -2843,6 +3261,25 @@ class AgentOrchestrator:
         min_keep = max_iter - window + 1
         self._tool_feedback = [
             item for item in self._tool_feedback if item.get("iteration", 0) >= min_keep
+        ]
+
+    def _observed_tool_evidence(self, state: ContextState) -> list[dict[str, Any]]:
+        """Return only tool observations already recorded in the delivered ledger."""
+
+        ledger = ledger_from_sources(
+            existing_payload=state.evidence_ledger,
+            snapshot_id=self._evidence_snapshot_id,
+            revision=self._evidence_revision,
+        )
+        delivered_call_ids = {
+            record.source_tool_call_id.strip()
+            for record in ledger.records
+            if record.source_tool_call_id.strip()
+        }
+        return [
+            entry
+            for entry in self._verifier_tool_evidence
+            if str(entry.get("tool_call_id", "")).strip() in delivered_call_ids
         ]
 
     @staticmethod

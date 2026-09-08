@@ -7,7 +7,17 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from src.analyzer.finding_schema import EvidenceProvenance
+from src.analyzer.finding_contract import (
+    canonical_contract_gaps,
+    normalize_producer_issue_payload,
+)
+from src.analyzer.finding_schema import (
+    ClaimSupport,
+    EvidenceProvenance,
+    RelatedLocation,
+    RepairIntent,
+    SourceAnchor,
+)
 from src.analyzer.location import normalize_location
 from src.analyzer.output_formatter import (
     ReviewIssue,
@@ -38,6 +48,20 @@ class ReviewDraftIssueInput(BaseModel):
     evidence: str
     suggestion: str
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    schema_version: str | None = Field(
+        default=None,
+        description="Use 2.0 for a structured finding hypothesis; omit for legacy policy-only validation.",
+    )
+    finding_id: str = ""
+    primary_anchor: SourceAnchor | None = None
+    related_locations: list[RelatedLocation] = Field(default_factory=list)
+    observed_behavior: str = ""
+    causal_mechanism: str = ""
+    violated_invariant: str = ""
+    repair_intent: RepairIntent = Field(default_factory=RepairIntent)
+    trigger: str = ""
+    impact: str = ""
+    supports: list[ClaimSupport] = Field(default_factory=list)
     cause_evidence: list[EvidenceProvenance] = Field(
         default_factory=list,
         description=(
@@ -45,6 +69,9 @@ class ReviewDraftIssueInput(BaseModel):
             "when they were actually observed by the reviewer."
         ),
     )
+    contract_evidence: list[EvidenceProvenance] = Field(default_factory=list)
+    trigger_evidence: list[EvidenceProvenance] = Field(default_factory=list)
+    impact_evidence: list[EvidenceProvenance] = Field(default_factory=list)
 
 
 class ValidateReviewDraftInput(BaseModel):
@@ -104,7 +131,7 @@ class ValidateReviewDraftTool(BaseTool):
             for index, issue in enumerate(data.issues)
         ]
         effective_issue_count = sum(
-            1 for item in issue_results if item["passes_current_filter"]
+            1 for item in issue_results if item["passes_submit_preflight"]
         )
         summary = data.summary.strip()
         summary_warnings: list[str] = []
@@ -125,12 +152,15 @@ class ValidateReviewDraftTool(BaseTool):
             "unresolved_evidence_gaps": [
                 reason
                 for item in issue_results
-                for reason in item.get("fail_reasons", [])
+                for reason in [
+                    *item.get("fail_reasons", []),
+                    *item.get("contract_gap_codes", []),
+                ]
             ],
             "policy_warnings": list(summary_warnings),
             "validator_passed": bool(
                 not summary_warnings
-                and all(item["passes_current_filter"] for item in issue_results)
+                and all(item["passes_submit_preflight"] for item in issue_results)
                 and (
                     effective_issue_count > 0
                     or (effective_issue_count == 0 and not summary_warnings)
@@ -138,19 +168,19 @@ class ValidateReviewDraftTool(BaseTool):
             ),
             "submit_allowed": bool(
                 not summary_warnings
-                and all(item["passes_current_filter"] for item in issue_results)
+                and all(item["passes_submit_preflight"] for item in issue_results)
             ),
         }
 
     def _validate_issue(
         self, index: int, input_issue: ReviewDraftIssueInput
     ) -> dict[str, Any]:
+        issue_payload = normalize_producer_issue_payload(
+            input_issue.model_dump(exclude_unset=True)
+        )
+        issue_payload.setdefault("schema_version", "1.0")
         issue = ReviewIssue(
-            severity=input_issue.severity,
-            location=input_issue.location,
-            evidence=input_issue.evidence,
-            suggestion=input_issue.suggestion,
-            confidence=input_issue.confidence,
+            **issue_payload,
         )
         location = normalize_location(issue.location)
         evidence_specific = has_specific_code_evidence(issue.evidence)
@@ -178,6 +208,13 @@ class ValidateReviewDraftTool(BaseTool):
         )
         passes_causality = not causality_required or changed_anchor_present
         passes_filter = passes_output_filter and passes_causality
+        contract_gaps = canonical_contract_gaps(
+            issue,
+            strict=issue.is_structured_hypothesis
+            and issue.severity in {Severity.CRITICAL, Severity.WARNING},
+        )
+        passes_contract = not contract_gaps
+        passes_submit_preflight = passes_filter and passes_contract
         fail_reasons: list[str] = []
         repair_hints: list[str] = []
 
@@ -223,6 +260,10 @@ class ValidateReviewDraftTool(BaseTool):
                 "lower severity to info/style or remove issue if evidence is speculative"
             )
 
+        for gap in contract_gaps:
+            fail_reasons.append(gap.code)
+            repair_hints.append(gap.message)
+
         return {
             "original_index": index,
             "normalized_location": location.canonical,
@@ -234,6 +275,11 @@ class ValidateReviewDraftTool(BaseTool):
             "changed_anchor_present": changed_anchor_present,
             "evidence_specific": evidence_specific,
             "passes_current_filter": passes_filter,
+            "passes_contract": passes_contract,
+            "passes_submit_preflight": passes_submit_preflight,
+            "contract_status": "valid" if passes_contract else "needs_repair",
+            "contract_gaps": [gap.as_dict() for gap in contract_gaps],
+            "contract_gap_codes": list(dict.fromkeys(gap.code for gap in contract_gaps)),
             "filter_reason_codes": list(filter_decision.reason_codes),
             "standard_threshold": filter_decision.standard_threshold,
             "relaxed_threshold": filter_decision.relaxed_threshold,

@@ -18,6 +18,7 @@ VERIFIER_CONTEXT_TOOL_NAMES = {
     "changed_context",
     "find_symbol_context",
     "symbol_context",
+    "grep_files",
 }
 _MAX_CONTEXT_TEXT_CHARS = 3_500
 
@@ -55,12 +56,17 @@ class _AppendOutcome:
 def capture_verifier_tool_evidence(
     entries: list[dict[str, Any]],
     workspace_root: Path | None,
+    *,
+    snapshot_id: str = "",
+    revision: str = "",
 ) -> list[dict[str, Any]]:
     """Capture successful context-tool results independently of the feedback window."""
     captured: list[dict[str, Any]] = []
     for entry in entries:
         tool_call = entry.get("tool_call")
-        function = tool_call.get("function") if isinstance(tool_call, dict) else None
+        if not isinstance(tool_call, dict):
+            continue
+        function = tool_call.get("function")
         if not isinstance(function, dict):
             continue
         tool_name = str(function.get("name", "")).strip()
@@ -79,9 +85,15 @@ def capture_verifier_tool_evidence(
         if not isinstance(data, dict):
             continue
         arguments = _parse_arguments(function.get("arguments", {}))
+        call_id = str(entry.get("tool_call_id", "")).strip()
+        if not call_id:
+            call_id = str(tool_call.get("id", "")).strip()
         captured.append(
             {
                 "tool_name": tool_name,
+                "tool_call_id": call_id,
+                "snapshot_id": snapshot_id,
+                "revision": revision,
                 "arguments": _normalize_paths(arguments, workspace_root),
                 "data": _normalize_paths(data, workspace_root),
             }
@@ -1597,12 +1609,17 @@ def _select_context_manifests(
 ) -> list[dict[str, Any]]:
     """Select every explicitly declared manifest, with one legacy fallback."""
 
-    requested_ids = {str(candidate.issue.context_manifest_id or "").strip()}
-    requested_ids.update(
-        str(evidence.context_manifest_id or "").strip()
-        for evidence in candidate.issue.all_evidence()
-        if str(evidence.context_manifest_id or "").strip()
-    )
+    requested_ids = {
+        value
+        for value in {
+            str(candidate.issue.context_manifest_id or "").strip(),
+            *(
+                str(evidence.context_manifest_id or "").strip()
+                for evidence in candidate.issue.all_evidence()
+            ),
+        }
+        if value
+    }
     if requested_ids:
         return [
             manifest

@@ -17,6 +17,8 @@ FINDING_SCHEMA_VERSION = "2.0"
 CounterfactualResult = Literal["yes", "no", "uncertain"]
 EvidenceEligibility = Literal["strong", "exploratory", "none"]
 EvidenceRole = Literal["cause", "contract", "trigger", "impact", "related"]
+EvidenceSide = Literal["old", "new", "context", "unknown"]
+FindingSeverity = Literal["critical", "warning", "info", "style"]
 
 
 class SourceAnchor(BaseModel):
@@ -68,12 +70,62 @@ class RepairIntent(BaseModel):
         )
 
 
+class ClaimSupport(BaseModel):
+    """One role-specific claim backed by shared evidence references."""
+
+    role: EvidenceRole
+    statement: str = Field(min_length=1)
+    evidence_refs: list[str] = Field(min_length=1)
+
+
+class FindingDraft(BaseModel):
+    """Canonical internal finding contract shared by parser and verifier."""
+
+    finding_id: str = Field(min_length=1)
+    schema_version: Literal["2.0"] = "2.0"
+    severity: FindingSeverity
+    confidence: float = Field(ge=0.0, le=1.0)
+    primary_anchor: SourceAnchor
+    observed_behavior: str = Field(min_length=1)
+    causal_mechanism: str = Field(min_length=1)
+    violated_invariant: str = Field(min_length=1)
+    repair_intent: RepairIntent
+    trigger: str = Field(min_length=1)
+    impact: str = Field(min_length=1)
+    supports: list[ClaimSupport] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _unique_support_roles(self) -> "FindingDraft":
+        """Reject duplicate role envelopes before runtime evidence binding."""
+
+        roles = [item.role for item in self.supports]
+        if len(roles) != len(set(roles)):
+            raise ValueError("supports must contain at most one envelope per role")
+        return self
+
+
 class EvidenceProvenance(BaseModel):
     """One evidence claim whose provenance is canonically bound by the runtime."""
 
     candidate_id: str = Field(
         default="",
         description="System-owned candidate identity; model input is overwritten.",
+    )
+    artifact_id: str = Field(
+        default="",
+        description="System-owned delivered-source artifact identity.",
+    )
+    snapshot_id: str = Field(
+        default="",
+        description="System-owned repository snapshot identity.",
+    )
+    revision: str = Field(
+        default="",
+        description="System-owned repository/index revision identity.",
+    )
+    side: EvidenceSide = Field(
+        default="new",
+        description="Source side used for the citation: new, old, or context.",
     )
     context_manifest_id: str = Field(
         default="",

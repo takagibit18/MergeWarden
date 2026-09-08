@@ -249,6 +249,44 @@ def build_submit_tool_schemas() -> list[dict[str, Any]]:
                                     },
                                     "trigger": {"type": "string"},
                                     "impact": {"type": "string"},
+                                    "supports": {
+                                        "type": "array",
+                                        "description": (
+                                            "Canonical role envelopes. Each support must "
+                                            "reference evidence declared in the matching "
+                                            "role-specific evidence array."
+                                        ),
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "role": {
+                                                    "type": "string",
+                                                    "enum": [
+                                                        "cause",
+                                                        "contract",
+                                                        "trigger",
+                                                        "impact",
+                                                        "related",
+                                                    ],
+                                                },
+                                                "statement": {
+                                                    "type": "string",
+                                                    "minLength": 1,
+                                                },
+                                                "evidence_refs": {
+                                                    "type": "array",
+                                                    "items": {"type": "string", "minLength": 1},
+                                                    "minItems": 1,
+                                                },
+                                            },
+                                            "required": [
+                                                "role",
+                                                "statement",
+                                                "evidence_refs",
+                                            ],
+                                            "additionalProperties": False,
+                                        },
+                                    },
                                     "cause_evidence": {
                                         "type": "array",
                                         "items": evidence_schema,
@@ -292,6 +330,7 @@ def build_submit_tool_schemas() -> list[dict[str, Any]]:
                                     "contract_evidence",
                                     "trigger_evidence",
                                     "impact_evidence",
+                                    "supports",
                                 ],
                             },
                         },
