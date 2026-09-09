@@ -631,7 +631,14 @@ class AgentOrchestrator:
             candidate = candidate_by_source_index.get(index)
             if candidate is not None and candidate.candidate_id in rejected_ids:
                 continue
-            output_issues.append(bound_by_source_index.get(index, issue))
+            # Repair and integrity intentionally inspect the raw submitted
+            # report so a policy-filtered response cannot discard a candidate
+            # before its bounded repair opportunity. Publication still obeys
+            # the independent policy gate after the repaired issue is bound.
+            published_issue = bound_by_source_index.get(index, issue)
+            if not evaluate_issue_filter(published_issue).passed:
+                continue
+            output_issues.append(published_issue)
         response.report = ReviewReport(
             summary=submitted_report.summary,
             issues=output_issues,
@@ -1140,9 +1147,32 @@ class AgentOrchestrator:
             if self._last_plan is not None and self._last_plan.draft_review is not None
             else response.report
         )
-        if not submitted_report.issues:
-            return response
         if self._review_repair_attempt_count >= self._settings.review_repair_max_attempts:
+            if submitted_report.issues:
+                configured_zero_budget = (
+                    self._settings.review_repair_max_attempts <= 0
+                )
+                self._record_event(
+                    EventType.DECISION,
+                    "finding_repair",
+                    {
+                        "iteration": self._iteration,
+                        "stage": "pre_publish_repair_skipped",
+                        "succeeded": False,
+                        "reason": (
+                            "configured_zero_budget"
+                            if configured_zero_budget
+                            else "repair_budget_exhausted"
+                        ),
+                        "repair_disabled": configured_zero_budget,
+                        "configured_zero_budget": configured_zero_budget,
+                        "needs_repair_count": len(submitted_report.issues),
+                        "repair_attempted_count": self._review_repair_attempt_count,
+                        "repair_budget_total": self._settings.review_repair_max_attempts,
+                    },
+                )
+            return response
+        if not submitted_report.issues:
             return response
         candidates = build_candidates(
             submitted_report,
@@ -4149,6 +4179,7 @@ class AgentOrchestrator:
             and response.completion_status == "complete"
             and not self._integrity_needs_repair_count
             and not self._integrity_invalid_count
+            and not self._policy_rejected_issue_count
             and not self._completion_incomplete_reasons
         )
 
