@@ -310,6 +310,25 @@ class AnalysisPlan(BaseModel):
         ge=0,
         description="Schema-validation repair attempts consumed by this plan",
     )
+    format_recovery_id: str = Field(
+        default="",
+        description="Runtime recovery identity for one rejected structured submit",
+    )
+    format_recovery_required: bool = Field(
+        default=False,
+        description="Whether the original submit payload crossed format recovery",
+    )
+    format_recovery_raw_payload: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Original submit payload retained for preservation checks",
+    )
+    format_recovery_validation_error: str = ""
+    format_recovery_input_response_id: str = ""
+    format_recovery_response_id: str = ""
+    format_recovery_status: Literal[
+        "", "accepted", "rejected_preserved_input", "deferred"
+    ] = ""
+    format_recovery_rejected: bool = False
     model_finish_reason: str = Field(
         default="",
         description="Provider finish reason retained for runtime and funnel telemetry.",

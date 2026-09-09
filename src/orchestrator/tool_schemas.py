@@ -131,36 +131,36 @@ def _build_model_submit_tool_schemas(*, repair: bool = False) -> list[dict[str, 
         ):
             if field not in required:
                 required.append(field)
-    # Keep parsing tolerant for the compatibility adapter and bounded repair
-    # path, while making the active provider contract explicit for risk issues.
-    # The integrity guard checks the same semantic fields and role rules.
-    risk_condition: dict[str, Any] = {
-        "properties": {
-            "severity": {"enum": ["critical", "warning"]}
+    # Initial findings retain the conditional structured-risk requirements.
+    # Repair findings are intentionally patch-only: adding full finding fields
+    # here would make omission/inheritance ambiguous and would let the model
+    # replace runtime-owned content accidentally.
+    if not repair:
+        risk_condition: dict[str, Any] = {
+            "properties": {
+                "severity": {"enum": ["critical", "warning"]}
+            }
         }
-    }
-    if repair:
-        risk_condition["required"] = ["severity"]
-    model_issue_schema.setdefault("allOf", []).append(
-        {
-            "if": risk_condition,
-            "then": {
-                "required": [
-                    "primary_anchor",
-                    "evidence",
-                    "suggestion",
-                    "confidence",
-                    "observed_behavior",
-                    "causal_mechanism",
-                    "violated_invariant",
-                    "repair_intent",
-                    "trigger",
-                    "impact",
-                    "supports",
-                ]
-            },
-        }
-    )
+        model_issue_schema.setdefault("allOf", []).append(
+            {
+                "if": risk_condition,
+                "then": {
+                    "required": [
+                        "primary_anchor",
+                        "evidence",
+                        "suggestion",
+                        "confidence",
+                        "observed_behavior",
+                        "causal_mechanism",
+                        "violated_invariant",
+                        "repair_intent",
+                        "trigger",
+                        "impact",
+                        "supports",
+                    ]
+                },
+            }
+        )
     return [
         {
             "type": "function",

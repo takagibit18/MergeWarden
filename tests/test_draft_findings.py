@@ -872,7 +872,9 @@ def test_repeated_draft_checkpoint_stops_with_incomplete_reason(tmp_path) -> Non
         orchestrator.run_review(ReviewRequest(repo_path=str(tmp_path)))
     )
 
-    assert client.calls == 2
+    # The repeated checkpoint closes exploration first, then receives exactly
+    # one submit-only finalization opportunity before the draft is closed.
+    assert client.calls == 3
     assert len(orchestrator._draft_finding_store) == 1  # noqa: SLF001
     assert orchestrator._draft_finding_store.states()[0].status == "incomplete"  # noqa: SLF001
     assert response.completion_status == "incomplete"

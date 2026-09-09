@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import json as _json
 import os
+import re
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Literal
@@ -29,10 +30,13 @@ from src.analyzer.finding_delivery import (
     RepairTransaction,
     candidate_content_version,
 )
-from src.analyzer.finding_contract import canonical_contract_gaps
+from src.analyzer.finding_contract import (
+    canonical_contract_gaps,
+    normalize_model_finding_payload,
+)
 from src.analyzer.finding_schema import SourceAnchor
 from src.analyzer.inference_engine import InferenceEngine
-from src.analyzer.output_formatter import ReviewIssue, ReviewReport
+from src.analyzer.output_formatter import ReviewIssue, ReviewReport, Severity
 from src.analyzer.persistent_index import repository_identity, revision_identity
 from src.analyzer.review_policy import evaluate_issue_filter
 from src.analyzer.review_skills import (
@@ -69,6 +73,7 @@ from src.orchestrator.draft_findings import (
 )
 from src.orchestrator.run_journal import (
     DraftFindingStateJournalPayload,
+    FormatRecoveryJournalPayload,
     LengthRecoveryJournalPayload,
     ModelResponseJournalPayload,
     PendingRunJournalEntry,
@@ -292,6 +297,10 @@ class AgentOrchestrator:
         self._repair_contract_attempt_count = 0
         self._repair_evidence_attempt_count = 0
         self._final_submit_attempt_count = 0
+        self._finalization_attempted = False
+        self._finalization_status = "not_attempted"
+        self._finalization_skip_reason = ""
+        self._finalization_response_id = ""
         self._review_repair_succeeded_count = 0
         self._integrity_needs_repair_count = 0
         self._integrity_invalid_count = 0
@@ -715,9 +724,16 @@ class AgentOrchestrator:
             for candidate_id, gap in zip(candidate_ids, gaps, strict=False)
         }
         base_versions = {
-            str(item.get("candidate_id", "")).strip(): str(
-                item.get("candidate_content_version", item.get("content_hash", ""))
-            ).strip()
+            str(item.get("candidate_id", "")).strip(): (
+                self._candidate_registry.expected_version(
+                    str(item.get("candidate_id", "")).strip()
+                ).strip()
+                or str(
+                    item.get(
+                        "candidate_content_version", item.get("content_hash", "")
+                    )
+                ).strip()
+            )
             for item in gaps
             if str(item.get("candidate_id", "")).strip()
         }
@@ -929,6 +945,7 @@ class AgentOrchestrator:
         result: Any,
         *,
         candidate: Any | None = None,
+        registry: CandidateRegistry | None = None,
     ) -> dict[str, Any]:
         """Serialize candidate-level feedback with the original repair target."""
 
@@ -939,13 +956,18 @@ class AgentOrchestrator:
             # message may select fewer atomic targets under a budget, but the
             # runtime always retains the complete original issue here.
             original_contents = issue.model_dump(mode="json")
+        candidate_id = str(getattr(result, "candidate_id", "")).strip()
         content_hash = str(
+            registry.expected_version(candidate_id)
+            if registry is not None and candidate_id
+            else ""
+        ).strip() or str(
             getattr(candidate, "candidate_content_version", "")
             or getattr(candidate, "content_hash", "")
         )
         return {
-            "candidate_id": str(getattr(result, "candidate_id", "")),
-            "target_candidate_id": str(getattr(result, "candidate_id", "")),
+            "candidate_id": candidate_id,
+            "target_candidate_id": candidate_id,
             "current_finding_id": str(
                 getattr(issue, "finding_id", "") if issue is not None else ""
             ),
@@ -1053,7 +1075,9 @@ class AgentOrchestrator:
         }
         invalid_gaps = [
             self._integrity_result_gap_payload(
-                result, candidate=candidate_by_id.get(result.candidate_id)
+                result,
+                candidate=candidate_by_id.get(result.candidate_id),
+                registry=self._candidate_registry,
             )
             for result in invalid_results
         ]
@@ -1086,7 +1110,9 @@ class AgentOrchestrator:
             return response
         gaps = [
             self._integrity_result_gap_payload(
-                result, candidate=candidate_by_id.get(result.candidate_id)
+                result,
+                candidate=candidate_by_id.get(result.candidate_id),
+                registry=self._candidate_registry,
             )
             for result in needs
         ]
@@ -1487,6 +1513,10 @@ class AgentOrchestrator:
                     )
                 continue
             expected_version = str(
+                registry.expected_version(target_id)
+                if registry is not None
+                else ""
+            ).strip() or str(
                 getattr(
                     repairable_candidates[target_index],
                     "candidate_content_version",
@@ -1581,28 +1611,67 @@ class AgentOrchestrator:
                     )
                 continue
             original_issue = original.issues[target_index]
-            replacement = (
-                AgentOrchestrator._apply_repair_patch(
+            if registry is not None:
+                patch_payload = (
+                    repaired_issue.repair_patch.model_dump(
+                        mode="json", exclude_none=True
+                    )
+                    if repaired_issue.repair_patch is not None
+                    else {}
+                )
+                if repair_status != "repaired" or not patch_payload:
+                    if diagnostics is not None:
+                        diagnostics.append(
+                            {
+                                "code": "repair_patch_missing",
+                                "target_candidate_id": target_id,
+                                "message": (
+                                    "Active runtime repair accepts only a non-empty "
+                                    "repair_patch for repaired targets; the original "
+                                    "candidate remains unchanged."
+                                ),
+                            }
+                        )
+                    target_dispositions[target_index] = "patch_missing"
+                    continue
+                support_error = AgentOrchestrator._repair_support_patch_error(
+                    original_issue,
+                    repaired_issue,
+                )
+                if support_error is not None:
+                    if diagnostics is not None:
+                        diagnostics.append(
+                            {
+                                "code": support_error[0],
+                                "target_candidate_id": target_id,
+                                "message": support_error[1],
+                            }
+                        )
+                    target_dispositions[target_index] = "patch_rejected"
+                    continue
+                replacement = AgentOrchestrator._apply_repair_patch(
                     original_issue,
                     repaired_issue,
                     candidate_id=target_id,
                 )
-                if repaired_issue.repair_patch is not None
-                else repaired_issue.model_copy(
-                    update={
-                        "candidate_id": target_id,
-                        **(
-                            {"finding_id": original_issue.finding_id}
-                            if registry is not None
-                            else {}
-                        ),
-                        "target_candidate_id": "",
-                        "repair_status": "",
-                        "repair_reason": "",
-                        "repair_patch": None,
-                    }
+            else:
+                replacement = (
+                    AgentOrchestrator._apply_repair_patch(
+                        original_issue,
+                        repaired_issue,
+                        candidate_id=target_id,
+                    )
+                    if repaired_issue.repair_patch is not None
+                    else repaired_issue.model_copy(
+                        update={
+                            "candidate_id": target_id,
+                            "target_candidate_id": "",
+                            "repair_status": "",
+                            "repair_reason": "",
+                            "repair_patch": None,
+                        }
+                    )
                 )
-            )
             if expected_version and candidate_content_version(replacement) == expected_version:
                 target_dispositions[target_index] = "no_progress"
                 if diagnostics is not None:
@@ -1655,6 +1724,67 @@ class AgentOrchestrator:
         )
 
     @staticmethod
+    def _repair_support_patch_error(
+        original_issue: ReviewIssue,
+        repaired_issue: ReviewIssue,
+    ) -> tuple[str, str] | None:
+        """Reject evidence replacement that loses or invents a trusted ref."""
+
+        patch = repaired_issue.repair_patch
+        if patch is None or patch.supports is None:
+            return None
+        patch_roles = {item.role for item in patch.supports}
+        original_by_role: dict[str, set[str]] = {}
+        for item in original_issue.all_evidence():
+            role = ""
+            for candidate_role, field in (
+                ("cause", "cause_evidence"),
+                ("contract", "contract_evidence"),
+                ("trigger", "trigger_evidence"),
+                ("impact", "impact_evidence"),
+            ):
+                if item in getattr(original_issue, field):
+                    role = candidate_role
+                    break
+            if not role or role not in patch_roles:
+                continue
+            reference = str(item.evidence_id or item.reference_id).strip()
+            if reference and item.resolution_status == "resolved":
+                original_by_role.setdefault(role, set()).add(reference)
+
+        patched_by_role: dict[str, set[str]] = {}
+        for role, field in (
+            ("cause", "cause_evidence"),
+            ("contract", "contract_evidence"),
+            ("trigger", "trigger_evidence"),
+            ("impact", "impact_evidence"),
+        ):
+            if role not in patch_roles:
+                continue
+            for item in getattr(repaired_issue, field):
+                if item.resolution_status != "resolved" or not item.evidence_id:
+                    return (
+                        "repair_patch_unresolved_evidence",
+                        (
+                            "repair_patch.supports contains an evidence reference "
+                            "that is not resolved in the delivered evidence catalog."
+                        ),
+                    )
+                patched_by_role.setdefault(role, set()).add(item.evidence_id)
+
+        for role, required in original_by_role.items():
+            if not required.issubset(patched_by_role.get(role, set())):
+                return (
+                    "repair_patch_evidence_dropped",
+                    (
+                        f"repair_patch.supports for role {role} drops an already "
+                        "trusted evidence reference; omitted roles inherit, and "
+                        "patched roles must preserve existing trusted refs."
+                    ),
+                )
+        return None
+
+    @staticmethod
     def _apply_repair_patch(
         original_issue: Any,
         repaired_issue: Any,
@@ -1670,14 +1800,26 @@ class AgentOrchestrator:
         if "supports" in updates:
             # normalize_model_repair_payload has already resolved these refs
             # into the live evidence catalog on the temporary envelope.
-            updates["supports"] = repaired_issue.supports
+            patch_roles = {
+                str(item.get("role", "")).strip()
+                for item in updates["supports"]
+                if isinstance(item, dict)
+            }
+            inherited_supports = [
+                item
+                for item in original_issue.supports
+                if item.role not in patch_roles
+            ]
+            updates["supports"] = [*inherited_supports, *repaired_issue.supports]
             for field in (
                 "cause_evidence",
                 "contract_evidence",
                 "trigger_evidence",
                 "impact_evidence",
             ):
-                updates[field] = getattr(repaired_issue, field)
+                role = field.removesuffix("_evidence")
+                if role in patch_roles:
+                    updates[field] = getattr(repaired_issue, field)
         if "primary_anchor" in updates:
             anchor = updates["primary_anchor"]
             if isinstance(anchor, dict):
@@ -2143,22 +2285,66 @@ class AgentOrchestrator:
         """Finalize normal runs or recover a truncated review submission."""
         assert response is not None
         if self._permission_mode == "plan":
+            self._finalization_status = "skipped_plan_mode"
             return response
         if not isinstance(response, ReviewResponse):
             return response
+        if self._finalization_attempted:
+            return response
+        self._finalization_attempted = True
         plan = self._last_plan
         if plan is None:
+            self._finalization_status = "skipped_no_plan"
+            return response
+        if plan.format_recovery_rejected:
+            # The salvage report is intentionally kept for integrity checking,
+            # but it is not a valid submit_review.  Do not turn it into a false
+            # completion or run a second unconstrained finalization.
+            self._finalization_attempted = True
+            self._finalization_status = "format_recovery_rejected"
             return response
         if self._has_review_business_output(plan.draft_review):
+            self._finalization_status = "already_submitted"
+            self._finalization_response_id = plan.source_response_id
+            if self._draft_finding_store.has_pending():
+                self._close_pending_drafts_after_finalization(
+                    state,
+                    plan.draft_review or ReviewReport(),
+                )
+                self._clear_exploration_incomplete_reasons()
             return response
         if self._length_recovery_required:
-            return await self._recover_review_after_length(state, request, response)
-        if self._draft_finding_store.has_pending():
-            self._add_incomplete_reason(state, "unresolved_draft_findings")
-            self._record_finalize_skipped("unresolved_draft_findings")
-            self._apply_completion_state(response, state)
-            return response
-        skip_reason = self._finalize_skip_reason()
+            recovered = await self._recover_review_after_length(state, request, response)
+            recovered_plan = self._last_plan
+            if recovered_plan is not None:
+                self._finalization_response_id = recovered_plan.source_response_id
+            if (
+                recovered_plan is not None
+                and self._has_review_business_output(recovered_plan.draft_review)
+            ):
+                self._finalization_status = "submitted"
+                if self._draft_finding_store.has_pending():
+                    self._close_pending_drafts_after_finalization(
+                        state,
+                        recovered_plan.draft_review or ReviewReport(),
+                    )
+                    self._clear_exploration_incomplete_reasons()
+                response.incomplete_reasons = [
+                    reason
+                    for reason in response.incomplete_reasons
+                    if reason
+                    not in {
+                        "max_iterations",
+                        "draft_stagnation",
+                        "no_effective_action",
+                        "unresolved_draft_findings",
+                    }
+                ]
+            else:
+                self._finalization_status = "failed"
+            return recovered
+        pending_drafts = self._draft_finding_store.has_pending()
+        skip_reason = self._finalize_skip_reason(pending_drafts=pending_drafts)
         if skip_reason:
             if not self._has_review_business_output(plan.draft_review):
                 incomplete_reason = {
@@ -2170,18 +2356,44 @@ class AgentOrchestrator:
                 }.get(skip_reason, skip_reason)
                 self._add_incomplete_reason(state, incomplete_reason)
                 self._apply_completion_state(response, state)
+            self._finalization_status = "skipped"
+            self._finalization_skip_reason = skip_reason
             self._record_finalize_skipped(skip_reason)
             return response
+        # This call is deliberately submit-only.  The engine receives an empty
+        # tool list and serializes only submit_review, so exhausted exploration
+        # cannot be mistaken for a finalization attempt.
         finalize_plan = await self.analyze(
             state, request, tool_specs=[], force_submit=True
         )
         self._last_plan = finalize_plan
+        self._finalization_response_id = finalize_plan.source_response_id
         self._observe_review_submission(finalize_plan)
         self._observe_incomplete_plan(finalize_plan, state)
         formatted = self.format_result(state, tool_results=[])
         assert isinstance(formatted, ReviewResponse)
         response = formatted
-        if finalize_plan.draft_review is None:
+        if self._has_review_business_output(finalize_plan.draft_review):
+            self._finalization_status = "submitted"
+            if self._draft_finding_store.has_pending():
+                self._close_pending_drafts_after_finalization(
+                    state,
+                    finalize_plan.draft_review or ReviewReport(),
+                )
+            self._clear_exploration_incomplete_reasons()
+            response.incomplete_reasons = [
+                reason
+                for reason in response.incomplete_reasons
+                if reason
+                not in {
+                    "max_iterations",
+                    "draft_stagnation",
+                    "no_effective_action",
+                    "unresolved_draft_findings",
+                }
+            ]
+        else:
+            self._finalization_status = "failed"
             self._add_incomplete_reason(
                 state,
                 finalize_plan.incomplete_reason or "no_valid_submit",
@@ -2194,6 +2406,11 @@ class AgentOrchestrator:
                 "iteration": self._iteration,
                 "finalize_attempt": True,
                 "finalize_submit_seen": finalize_plan.draft_review is not None,
+                "ordinary_exploration_tools_exposed": False,
+                "ordinary_exploration_tool_count": 0,
+                "pending_drafts_before": pending_drafts,
+                "pending_drafts_after": self._draft_finding_store.has_pending(),
+                "finalization_status": self._finalization_status,
                 "budget_state": self._budget_state,
                 "prior_length_finish_seen": self._model_length_finish_seen,
                 "final_submit_evidence_included_count": (
@@ -2532,6 +2749,7 @@ class AgentOrchestrator:
                     ),
                     allow_exploration=explicit_exploration_allowed,
                 )
+                self._prepare_format_recovery(result, state)
                 # The engine updates the ledger only after it has confirmed which
                 # source bodies survived request serialization.  Publish that same
                 # snapshot before execute_tools so preflight sees the exact catalog
@@ -2545,6 +2763,7 @@ class AgentOrchestrator:
                     if self._active_repair_transaction is None:
                         format_transaction = RepairTransaction(
                             required_steps=["format"],
+                            input_recovery_id=result.format_recovery_id,
                             token_budget=self._settings.submit_max_output_tokens,
                             time_budget_seconds=min(
                                 self._settings.model_request_timeout_seconds,
@@ -2567,7 +2786,7 @@ class AgentOrchestrator:
                     )
                 self._persist_draft_finding_calls(result, state=state)
                 self._sync_draft_states(state)
-                if result.draft_review is not None:
+                if result.draft_review is not None and not result.format_recovery_rejected:
                     self._submit_review_seen_any = True
                 if result.draft_debug is not None:
                     self._submit_debug_seen_any = True
@@ -3253,15 +3472,105 @@ class AgentOrchestrator:
             )
         self._sync_draft_states(state)
 
-    def _add_incomplete_reason(self, state: ContextState, reason: str) -> None:
-        """Record one stable response-level incomplete reason."""
+    def _add_incomplete_reason(
+        self,
+        state: ContextState,
+        reason: str,
+        *,
+        close_pending_drafts: bool = True,
+    ) -> None:
+        """Record one incomplete reason and optionally close open hypotheses.
+
+        Exploration termination is provisional until the submit-only finalizer
+        has had its bounded chance.  Those paths therefore keep pending drafts
+        open; hard runtime blockers still close them immediately.
+        """
 
         normalized = str(reason or "").strip()
         if not normalized:
             return
         if normalized not in self._completion_incomplete_reasons:
             self._completion_incomplete_reasons.append(normalized)
-        self._mark_pending_drafts_incomplete(state, normalized)
+        if close_pending_drafts:
+            self._mark_pending_drafts_incomplete(state, normalized)
+
+    def _clear_exploration_incomplete_reasons(self) -> None:
+        """Remove provisional exploration-stop reasons after finalization."""
+
+        provisional = {
+            "max_iterations",
+            "draft_stagnation",
+            "no_effective_action",
+            "unresolved_draft_findings",
+        }
+        self._completion_incomplete_reasons = [
+            reason
+            for reason in self._completion_incomplete_reasons
+            if reason not in provisional
+        ]
+
+    def _close_pending_drafts_after_finalization(
+        self,
+        state: ContextState,
+        report: ReviewReport,
+    ) -> None:
+        """Record a truthful terminal state for drafts after final submit."""
+
+        terminal_status: Literal["evidence_sufficient", "disproved"] = (
+            "evidence_sufficient" if report.issues else "disproved"
+        )
+        reason = (
+            "finalization_submission_received"
+            if report.issues
+            else "finalization_submitted_no_finding"
+        )
+        changed_ids: list[str] = []
+        for checkpoint in self._draft_finding_store.states():
+            if checkpoint.status != "pending":
+                continue
+            update = DraftFindingUpdateInput(
+                draft_id=checkpoint.draft_id,
+                status=terminal_status,
+                reason=reason,
+                missing_checks=list(checkpoint.missing_checks),
+                evidence_refs=list(checkpoint.evidence_refs),
+            )
+            transition = self._draft_finding_store.update(
+                update,
+                iteration=self._iteration,
+            )
+            if transition is None or not transition[1]:
+                continue
+            changed_ids.append(checkpoint.draft_id)
+            next_state = transition[0]
+            if self._run_journal is not None:
+                self._run_journal.append(
+                    PendingRunJournalEntry(
+                        type="draft_finding_state",
+                        payload=DraftFindingStateJournalPayload(
+                            draft_id=next_state.draft_id,
+                            status=next_state.status,
+                            reason=next_state.reason,
+                            missing_checks=next_state.missing_checks,
+                            evidence_refs=next_state.evidence_refs,
+                            iteration=self._iteration,
+                        ).model_dump(mode="json"),
+                    )
+                )
+        if changed_ids:
+            self._draft_state_transition_count += len(changed_ids)
+            self._record_event(
+                EventType.DECISION,
+                "draft_finding_state",
+                {
+                    "iteration": self._iteration,
+                    "status": terminal_status,
+                    "draft_ids": changed_ids,
+                    "reason": reason,
+                    "origin": "submit_only_finalization",
+                },
+            )
+        self._sync_draft_states(state)
 
     def _apply_completion_state(
         self,
@@ -3363,7 +3672,11 @@ class AgentOrchestrator:
         if not has_effective_action and not defer_review_submit:
             terminal_reason = "no_effective_action"
             if has_pending_drafts or self._permission_mode == "plan":
-                self._add_incomplete_reason(state, terminal_reason)
+                self._add_incomplete_reason(
+                    state,
+                    terminal_reason,
+                    close_pending_drafts=not has_pending_drafts,
+                )
         elif (
             has_pending_drafts
             and not has_explicit_submit
@@ -3371,7 +3684,11 @@ class AgentOrchestrator:
             >= self._settings.draft_stagnation_max_rounds
         ):
             terminal_reason = "draft_stagnation"
-            self._add_incomplete_reason(state, terminal_reason)
+            self._add_incomplete_reason(
+                state,
+                terminal_reason,
+                close_pending_drafts=False,
+            )
 
         self._model_completed = (
             not has_pending_tools
@@ -3407,7 +3724,11 @@ class AgentOrchestrator:
             self._add_incomplete_reason(state, terminal_reason)
         elif reached_limit and has_pending_drafts:
             terminal_reason = terminal_reason or "max_iterations"
-            self._add_incomplete_reason(state, terminal_reason)
+            self._add_incomplete_reason(
+                state,
+                terminal_reason,
+                close_pending_drafts=False,
+            )
 
         stop = (
             self._model_incomplete_seen
@@ -3651,6 +3972,10 @@ class AgentOrchestrator:
         self._repair_contract_attempt_count = 0
         self._repair_evidence_attempt_count = 0
         self._final_submit_attempt_count = 0
+        self._finalization_attempted = False
+        self._finalization_status = "not_attempted"
+        self._finalization_skip_reason = ""
+        self._finalization_response_id = ""
         self._review_repair_succeeded_count = 0
         self._integrity_needs_repair_count = 0
         self._integrity_invalid_count = 0
@@ -3883,7 +4208,7 @@ class AgentOrchestrator:
             )
         self._record_event(EventType.DECISION, "pre_budget_submit", payload)
 
-    def _finalize_skip_reason(self) -> str:
+    def _finalize_skip_reason(self, *, pending_drafts: bool = False) -> str:
         if self._model_timeout_seen:
             return "model_timeout"
         if self._model_incomplete_seen:
@@ -3903,6 +4228,13 @@ class AgentOrchestrator:
                 "token_budget_exhausted",
                 "unrecoverable_error",
             }:
+                if pending_drafts and reason in {
+                    "max_iterations",
+                    "draft_stagnation",
+                    "no_effective_action",
+                    "unresolved_draft_findings",
+                }:
+                    continue
                 return reason
         return ""
 
@@ -3932,6 +4264,9 @@ class AgentOrchestrator:
                 "finalize_attempt": False,
                 "skip_reason": skip_reason,
                 "budget_state": self._budget_state,
+                "finalization_status": self._finalization_status,
+                "pending_drafts": self._draft_finding_store.has_pending(),
+                "ordinary_exploration_tools_exposed": False,
                 "run_timed_out": self._run_timeout_exceeded(),
                 "elapsed_ms": int(self._run_elapsed_seconds() * 1000),
             },
@@ -4386,16 +4721,442 @@ class AgentOrchestrator:
                 payload["recommended_next_step"] = result.recommended_next_step
         return payload
 
+    @staticmethod
+    def _format_recovery_error_fields(error: str) -> set[str]:
+        """Extract fields the schema explicitly reported as missing/invalid."""
+
+        fields: set[str] = set()
+        for pattern in (r"issues\.\d+\.([A-Za-z_]\w*)", r"issues\[\d+\]\.([A-Za-z_]\w*)"):
+            fields.update(re.findall(pattern, error or ""))
+        return fields
+
+    @staticmethod
+    def _format_recovery_canonical_ref(
+        reference: str,
+        evidence_catalog: list[dict[str, Any]],
+    ) -> str:
+        """Map an input alias to the exact delivered catalog id for comparison."""
+
+        value = str(reference or "").strip()
+        if not value:
+            return ""
+        for record in evidence_catalog:
+            if not isinstance(record, dict):
+                continue
+            identifiers = {
+                str(record.get(key, "") or "").strip()
+                for key in ("evidence_id", "artifact_id", "reference_id")
+            }
+            aliases = record.get("aliases", [])
+            if isinstance(aliases, str):
+                identifiers.add(aliases.strip())
+            elif isinstance(aliases, list):
+                identifiers.update(str(item or "").strip() for item in aliases)
+            if value in identifiers:
+                return str(record.get("evidence_id", "") or value).strip()
+        return value
+
+    @classmethod
+    def _format_recovery_refs(
+        cls,
+        raw_issue: dict[str, Any],
+        evidence_catalog: list[dict[str, Any]],
+    ) -> set[str]:
+        refs: set[str] = set()
+        supports = raw_issue.get("supports", [])
+        if isinstance(supports, list):
+            for support in supports:
+                if not isinstance(support, dict):
+                    continue
+                raw_refs = support.get("evidence_refs", [])
+                if not isinstance(raw_refs, list):
+                    continue
+                refs.update(
+                    cls._format_recovery_canonical_ref(item, evidence_catalog)
+                    for item in raw_refs
+                    if str(item or "").strip()
+                )
+        return {item for item in refs if item}
+
+    @staticmethod
+    def _recovered_issue_refs(issue: ReviewIssue) -> set[str]:
+        refs = {
+            str(item or "").strip()
+            for support in issue.supports
+            for item in support.evidence_refs
+            if str(item or "").strip()
+        }
+        refs.update(
+            str(item.evidence_id or item.reference_id).strip()
+            for item in issue.all_evidence()
+            if str(item.evidence_id or item.reference_id).strip()
+        )
+        return refs
+
+    @staticmethod
+    def _format_recovery_value(field: str, value: Any) -> Any:
+        if field == "primary_anchor" and isinstance(value, dict):
+            try:
+                return SourceAnchor.model_validate(value).model_dump(mode="json")
+            except Exception:  # noqa: BLE001
+                return value
+        if field == "repair_intent" and isinstance(value, dict):
+            return {
+                "action": str(value.get("action", "") or "").strip(),
+                "targets": [str(item) for item in value.get("targets", [])],
+                "boundary": str(value.get("boundary", "") or "").strip(),
+            }
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+    @classmethod
+    def _check_format_recovery_preservation(
+        cls,
+        plan: AnalysisPlan,
+        state: ContextState,
+    ) -> tuple[bool, list[str], list[dict[str, Any]]]:
+        """Ensure format recovery did not mutate semantic/evidence content."""
+
+        raw_payload = plan.format_recovery_raw_payload
+        raw_issues = raw_payload.get("issues") if isinstance(raw_payload, dict) else None
+        report = plan.draft_review
+        if not isinstance(raw_issues, list) or report is None:
+            return (
+                False,
+                [],
+                [{"code": "format_recovery_missing_comparable_payload"}],
+            )
+        if len(raw_issues) != len(report.issues):
+            return (
+                False,
+                [],
+                [
+                    {
+                        "code": "format_recovery_issue_count_changed",
+                        "raw_issue_count": len(raw_issues),
+                        "recovered_issue_count": len(report.issues),
+                    }
+                ],
+            )
+        allowed_fields = cls._format_recovery_error_fields(
+            plan.format_recovery_validation_error
+        )
+        preserved_refs: set[str] = set()
+        for index, (raw_issue, recovered_issue) in enumerate(
+            zip(raw_issues, report.issues, strict=True)
+        ):
+            if not isinstance(raw_issue, dict):
+                return (
+                    False,
+                    sorted(preserved_refs),
+                    [{"code": "format_recovery_raw_issue_not_object", "index": index}],
+                )
+            raw_refs = cls._format_recovery_refs(raw_issue, state.evidence_ledger)
+            recovered_refs = cls._recovered_issue_refs(recovered_issue)
+            preserved_refs.update(raw_refs)
+            if not raw_refs.issubset(recovered_refs):
+                return (
+                    False,
+                    sorted(preserved_refs),
+                    [
+                        {
+                            "code": "format_recovery_evidence_changed",
+                            "index": index,
+                            "raw_refs": sorted(raw_refs),
+                            "recovered_refs": sorted(recovered_refs),
+                        }
+                    ],
+                )
+            if not recovered_refs.issubset(raw_refs):
+                return (
+                    False,
+                    sorted(preserved_refs),
+                    [
+                        {
+                            "code": "format_recovery_evidence_added",
+                            "index": index,
+                            "raw_refs": sorted(raw_refs),
+                            "recovered_refs": sorted(recovered_refs),
+                        }
+                    ],
+                )
+            for evidence in recovered_issue.all_evidence():
+                if evidence.resolution_status != "resolved":
+                    return (
+                        False,
+                        sorted(preserved_refs),
+                        [
+                            {
+                                "code": "format_recovery_unresolved_evidence",
+                                "index": index,
+                                "reference_id": evidence.reference_id,
+                            }
+                        ],
+                    )
+            for field in (
+                "severity",
+                "primary_anchor",
+                "evidence",
+                "suggestion",
+                "confidence",
+                "observed_behavior",
+                "causal_mechanism",
+                "violated_invariant",
+                "repair_intent",
+                "trigger",
+                "impact",
+            ):
+                if field in allowed_fields:
+                    continue
+                if field not in raw_issue or raw_issue.get(field) in (None, "", []):
+                    continue
+                raw_value = cls._format_recovery_value(field, raw_issue.get(field))
+                recovered_value = cls._format_recovery_value(
+                    field,
+                    getattr(recovered_issue, field),
+                )
+                if raw_value != recovered_value:
+                    return (
+                        False,
+                        sorted(preserved_refs),
+                        [
+                            {
+                                "code": "format_recovery_semantic_changed",
+                                "index": index,
+                                "field": field,
+                            }
+                        ],
+                    )
+            raw_supports = raw_issue.get("supports", [])
+            if isinstance(raw_supports, list):
+                recovered_supports: dict[str, str] = {
+                    str(support.role): support.statement
+                    for support in recovered_issue.supports
+                }
+                for support in raw_supports:
+                    if not isinstance(support, dict):
+                        continue
+                    role = str(support.get("role", "")).strip()
+                    statement = str(support.get("statement", "")).strip()
+                    if statement and role not in allowed_fields and recovered_supports.get(role) != statement:
+                        return (
+                            False,
+                            sorted(preserved_refs),
+                            [
+                                {
+                                    "code": "format_recovery_support_statement_changed",
+                                    "index": index,
+                                    "role": role,
+                                }
+                            ],
+                        )
+        return True, sorted(preserved_refs), []
+
+    @staticmethod
+    def _build_format_recovery_salvage(
+        plan: AnalysisPlan,
+        state: ContextState,
+    ) -> ReviewReport:
+        """Materialize the original payload with placeholders, never guesses."""
+
+        raw = plan.format_recovery_raw_payload
+        raw_issues = raw.get("issues", []) if isinstance(raw, dict) else []
+        issues: list[ReviewIssue] = []
+        if isinstance(raw_issues, list):
+            for raw_issue in raw_issues:
+                if not isinstance(raw_issue, dict):
+                    continue
+                normalized = normalize_model_finding_payload(
+                    raw_issue,
+                    evidence_catalog=state.evidence_ledger,
+                )
+                if not isinstance(normalized, dict):
+                    continue
+                normalized.setdefault("severity", "info")
+                normalized.setdefault(
+                    "primary_anchor",
+                    {"file": "__format_recovery__", "line": 1},
+                )
+                normalized.setdefault("location", "__format_recovery__:1")
+                normalized.setdefault("evidence", "")
+                normalized.setdefault("suggestion", "")
+                normalized.setdefault("confidence", 0.0)
+                normalized["schema_version"] = "2.0"
+                normalized.update(
+                    {
+                        "candidate_id": "",
+                        "finding_id": "",
+                        "target_candidate_id": "",
+                        "repair_status": "",
+                        "candidate_content_version": "",
+                        "repair_reason": "",
+                        "repair_patch": None,
+                    }
+                )
+                try:
+                    issues.append(ReviewIssue.model_validate(normalized))
+                except Exception:  # noqa: BLE001
+                    # Keep an explicit placeholder issue only when the raw
+                    # severity is still a valid compatibility value.
+                    try:
+                        issues.append(
+                            ReviewIssue(
+                                severity=Severity(
+                                    str(raw_issue.get("severity", "info"))
+                                ),
+                                location=str(normalized.get("location", "")),
+                                evidence=str(raw_issue.get("evidence", "") or ""),
+                                suggestion=str(raw_issue.get("suggestion", "") or ""),
+                                confidence=float(raw_issue.get("confidence", 0.0) or 0.0),
+                                schema_version="2.0",
+                            )
+                        )
+                    except Exception:  # noqa: BLE001
+                        continue
+        summary = str(raw.get("summary", "") or "").strip() if isinstance(raw, dict) else ""
+        return ReviewReport(
+            summary=summary
+            or "Format recovery rejected; the original candidate was preserved for integrity validation.",
+            issues=issues,
+            schema_version="2.0",
+        )
+
+    def _prepare_format_recovery(
+        self,
+        plan: AnalysisPlan,
+        state: ContextState,
+    ) -> None:
+        """Persist and, when necessary, reject unsafe schema-recovery mutation."""
+
+        if not plan.format_recovery_required or not plan.format_recovery_id:
+            return
+        diagnostics: list[dict[str, Any]] = []
+        preserved_refs: list[str] = []
+        if plan.draft_review is not None:
+            safe, preserved_refs, diagnostics = self._check_format_recovery_preservation(
+                plan,
+                state,
+            )
+        else:
+            safe = False
+            plan.draft_review = self._build_format_recovery_salvage(plan, state)
+            diagnostics = [{"code": "format_recovery_no_valid_recovered_report"}]
+        if safe:
+            plan.format_recovery_status = "accepted"
+        else:
+            plan.draft_review = self._build_format_recovery_salvage(plan, state)
+            plan.format_recovery_status = "rejected_preserved_input"
+            plan.format_recovery_rejected = True
+        payload = FormatRecoveryJournalPayload(
+            recovery_id=plan.format_recovery_id,
+            iteration=self._iteration,
+            input_response_id=plan.format_recovery_input_response_id,
+            recovery_response_id=plan.format_recovery_response_id,
+            validation_error=plan.format_recovery_validation_error,
+            status=plan.format_recovery_status,
+            raw_payload=redact_sensitive_values(plan.format_recovery_raw_payload),
+            preserved_evidence_refs=preserved_refs,
+            diagnostics=diagnostics,
+        ).model_dump(mode="json")
+        if self._run_journal is not None:
+            self._run_journal.append(
+                PendingRunJournalEntry(type="format_recovery", payload=payload)
+            )
+        self._record_event(
+            EventType.DECISION,
+            "format_recovery",
+            {
+                "recovery_id": plan.format_recovery_id,
+                "iteration": self._iteration,
+                "status": plan.format_recovery_status,
+                "input_response_id": plan.format_recovery_input_response_id,
+                "recovery_response_id": plan.format_recovery_response_id,
+                "preserved_evidence_refs": preserved_refs,
+                "diagnostics": diagnostics,
+            },
+        )
+
+    def _close_format_recovery_transaction(self, plan: AnalysisPlan) -> None:
+        """Close the format-only transaction before candidate repair can open."""
+
+        transaction = self._active_repair_transaction
+        if (
+            transaction is None
+            or not plan.format_recovery_id
+            or transaction.input_recovery_id != plan.format_recovery_id
+        ):
+            return
+        status: Literal[
+            "accepted", "partially_accepted", "rejected", "incomplete", "deferred"
+        ] = (
+            "accepted"
+            if plan.format_recovery_status == "accepted"
+            else "rejected"
+        )
+        transaction.status = status
+        transaction.target_results = {
+            plan.format_recovery_id: plan.format_recovery_status or "deferred"
+        }
+        if plan.format_recovery_rejected:
+            transaction.rejection_reasons.append("format_recovery_preservation_failed")
+        self._persist_repair_transaction(transaction)
+        self._record_event(
+            EventType.REPAIR_TRANSACTION,
+            "repair",
+            {
+                "stage": "closed",
+                **transaction.model_dump(mode="json"),
+                "repair_transaction_count": self._review_repair_attempt_count,
+                "repair_model_call_count": self._repair_model_call_count,
+            },
+        )
+        self._active_repair_transaction = None
+
     def _observe_review_submission(self, plan: AnalysisPlan) -> None:
         """Record the first valid submit_review on its 0-based loop iteration."""
 
-        if plan.draft_review is not None and self._submit_iteration is None:
+        format_recovery_rejected = plan.format_recovery_rejected
+        if (
+            plan.draft_review is not None
+            and not format_recovery_rejected
+            and self._submit_iteration is None
+        ):
             self._submit_iteration = self._iteration
         if plan.draft_review is not None:
             if not self._repair_schema_open():
                 self._register_initial_candidates(plan.draft_review)
-            self._submitted_attempt_count += 1
-            self._review_stage = "complete"
+            if not format_recovery_rejected:
+                self._submitted_attempt_count += 1
+                self._review_stage = "complete"
+            else:
+                self._review_stage = "explore"
+            if plan.format_recovery_id and self._run_journal is not None:
+                mapped_candidate_ids = sorted(
+                    {
+                        issue.candidate_id.strip()
+                        for issue in plan.draft_review.issues
+                        if issue.candidate_id.strip()
+                    }
+                )
+                self._run_journal.append(
+                    PendingRunJournalEntry(
+                        type="format_recovery",
+                        payload=FormatRecoveryJournalPayload(
+                            recovery_id=plan.format_recovery_id,
+                            iteration=self._iteration,
+                            input_response_id=plan.format_recovery_input_response_id,
+                            recovery_response_id=plan.format_recovery_response_id,
+                            validation_error=plan.format_recovery_validation_error,
+                            status=plan.format_recovery_status or "deferred",
+                            raw_payload=redact_sensitive_values(
+                                plan.format_recovery_raw_payload
+                            ),
+                            mapped_candidate_ids=mapped_candidate_ids,
+                        ).model_dump(mode="json"),
+                    )
+                )
+        self._close_format_recovery_transaction(plan)
 
     def _register_initial_candidates(self, report: ReviewReport) -> None:
         """Register the initial report before any identity-sensitive repair."""
@@ -4611,6 +5372,10 @@ class AgentOrchestrator:
             "length_recoveries_attempted": self._length_recovery_attempted,
             "length_recoveries_succeeded": self._length_recovery_succeeded,
             "length_recoveries_failed": self._length_recovery_failed,
+            "finalization_attempted": self._finalization_attempted,
+            "finalization_status": self._finalization_status,
+            "finalization_skip_reason": self._finalization_skip_reason,
+            "finalization_response_id": self._finalization_response_id,
             "submit_review_seen_any": self._submit_review_seen_any,
             "investigation_ready": bool(
                 response.investigation_ready

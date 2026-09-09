@@ -29,6 +29,7 @@ RunJournalEntryType = Literal[
     "candidate_registration",
     "preflight",
     "evidence_catalog",
+    "format_recovery",
     "repair_transaction",
     "finding_finalization",
 ]
@@ -140,6 +141,23 @@ class EvidenceCatalogJournalPayload(BaseModel):
     snapshot_id: str = ""
     revision: str = ""
     records: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class FormatRecoveryJournalPayload(BaseModel):
+    """Raw structured-submit recovery and its preservation decision."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    recovery_id: str = Field(default="", min_length=1)
+    iteration: int = Field(default=0, ge=0)
+    input_response_id: str = ""
+    recovery_response_id: str = ""
+    validation_error: str = ""
+    status: Literal["accepted", "rejected_preserved_input", "deferred"]
+    raw_payload: dict[str, Any] = Field(default_factory=dict)
+    preserved_evidence_refs: list[str] = Field(default_factory=list)
+    mapped_candidate_ids: list[str] = Field(default_factory=list)
+    diagnostics: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class RepairTransactionJournalPayload(BaseModel):
@@ -352,6 +370,7 @@ class RunJournal:
             | CandidateRegistrationJournalPayload
             | PreflightJournalPayload
             | EvidenceCatalogJournalPayload
+            | FormatRecoveryJournalPayload
             | RepairTransactionJournalPayload
             | FindingFinalizationJournalPayload
         )
@@ -371,6 +390,8 @@ class RunJournal:
             model = PreflightJournalPayload.model_validate(payload)
         elif entry_type == "evidence_catalog":
             model = EvidenceCatalogJournalPayload.model_validate(payload)
+        elif entry_type == "format_recovery":
+            model = FormatRecoveryJournalPayload.model_validate(payload)
         elif entry_type == "repair_transaction":
             model = RepairTransactionJournalPayload.model_validate(payload)
         else:

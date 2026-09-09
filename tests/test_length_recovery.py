@@ -185,6 +185,7 @@ def test_length_with_draft_and_tool_recovers_via_submit_only_context(
         "length_recovery",
         "model_response",
         "length_recovery",
+        "draft_finding_state",
     ]
     assert [
         entry.payload["status"] for entry in entries if entry.type == "length_recovery"

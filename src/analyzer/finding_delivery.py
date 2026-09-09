@@ -306,6 +306,10 @@ class RepairTransaction(BaseModel):
     transaction_id: str = Field(
         default_factory=lambda: "rtx_" + uuid4().hex[:20], min_length=1
     )
+    input_recovery_id: str = Field(
+        default="",
+        description="Separate format-recovery identity, never a candidate id.",
+    )
     candidate_ids: list[str] = Field(default_factory=list)
     base_versions: dict[str, str] = Field(default_factory=dict)
     gap_codes: dict[str, list[str]] = Field(default_factory=dict)

@@ -1893,6 +1893,42 @@ def test_submit_review_rejects_issue_missing_confidence() -> None:
     assert "missing required confidence" in parse_meta["submit_review_validation_error"]
 
 
+def test_repair_submit_rejects_top_level_semantic_fields() -> None:
+    client = RecordingFakeModelClient()
+    engine = InferenceEngine(model_client=client)  # type: ignore[arg-type]
+
+    plan, parse_meta = engine._parse_tool_calls(  # noqa: SLF001
+        [
+            {
+                "function": {
+                    "name": "submit_review",
+                    "arguments": json.dumps(
+                        {
+                            "summary": "repair",
+                            "issues": [
+                                {
+                                    "target_candidate_id": "cand-runtime",
+                                    "candidate_content_version": "version-a",
+                                    "repair_status": "repaired",
+                                    "suggestion": "silently replace the finding",
+                                    "repair_patch": {"trigger": "new trigger"},
+                                }
+                            ],
+                        }
+                    ),
+                }
+            }
+        ],
+        ReviewRequest(repo_path="."),
+        force_submit=True,
+    )
+
+    assert plan.draft_review is None
+    assert "forbidden top-level semantic fields" in parse_meta[
+        "submit_review_validation_error"
+    ]
+
+
 def test_fallback_review_json_cannot_bypass_missing_confidence() -> None:
     client = RecordingFakeModelClient()
     engine = InferenceEngine(model_client=client)  # type: ignore[arg-type]

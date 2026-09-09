@@ -16,8 +16,10 @@ from src.analyzer.context_state import ContextState
 from src.analyzer.evidence_ledger import ledger_from_sources
 from src.analyzer.event_log import EventType
 from src.analyzer.finding_contract import (
+    is_model_repair_payload,
     issue_supports,
     normalize_model_finding_payload,
+    validate_model_repair_payload,
 )
 from src.analyzer.diff_lines import ParsedDiffHunk, parse_unified_diff_hunks
 from src.analyzer.finding_schema import normalize_repo_path
@@ -552,6 +554,11 @@ class InferenceEngine:
             evidence_catalog=state.evidence_ledger,
         )
         self._complete_invalid_draft_tool_calls(response.tool_calls, parse_meta)
+        format_recovery_raw_payload = parse_meta.get("format_recovery_raw_payload")
+        format_recovery_validation_error = str(
+            parse_meta.get("format_recovery_validation_error", "") or ""
+        )
+        format_recovery_input_response_id = response_id
         if plan.draft_finding_calls:
             plan.draft_finding_source_response_id = response_id
         parse_meta["tool_choice"] = self._trace_tool_choice(config)
@@ -635,6 +642,19 @@ class InferenceEngine:
                         plan.schema_repair_attempted_count
                     )
                     plan = parsed
+        if isinstance(format_recovery_raw_payload, dict) and format_recovery_raw_payload:
+            recovery_seed = (
+                f"{format_recovery_input_response_id}|{iteration}|"
+                f"{format_recovery_validation_error}"
+            )
+            plan.format_recovery_id = "fr_" + hashlib.sha256(
+                recovery_seed.encode("utf-8")
+            ).hexdigest()[:20]
+            plan.format_recovery_required = True
+            plan.format_recovery_raw_payload = format_recovery_raw_payload
+            plan.format_recovery_validation_error = format_recovery_validation_error
+            plan.format_recovery_input_response_id = format_recovery_input_response_id
+            plan.format_recovery_response_id = response_id
         plan.source_response_id = response_id
         incomplete_reason = self._length_incomplete_reason(response, plan)
         plan.model_finish_reason = response.finish_reason
@@ -980,6 +1000,8 @@ class InferenceEngine:
             "valid_draft_update_call_ids": [],
             "location_warnings": [],
             "force_submit_discarded_count": 0,
+            "format_recovery_raw_payload": {},
+            "format_recovery_validation_error": "",
         }
 
         for raw in raw_calls:
@@ -1067,6 +1089,13 @@ class InferenceEngine:
                         "Invalid submit_review payload ignored: %s", payload_error
                     )
                     parse_meta["submit_review_validation_error"] = payload_error
+                    if not any(
+                        is_model_repair_payload(item)
+                        for item in payload.get("issues", [])
+                        if isinstance(item, dict)
+                    ):
+                        parse_meta["format_recovery_raw_payload"] = payload
+                        parse_meta["format_recovery_validation_error"] = payload_error
                     continue
                 normalized_payload, warnings = self._normalize_review_payload(
                     payload,
@@ -1080,6 +1109,13 @@ class InferenceEngine:
                 except ValidationError as exc:
                     logger.warning("Invalid submit_review payload ignored: %s", exc)
                     parse_meta["submit_review_validation_error"] = str(exc)
+                    if not any(
+                        is_model_repair_payload(item)
+                        for item in payload.get("issues", [])
+                        if isinstance(item, dict)
+                    ):
+                        parse_meta["format_recovery_raw_payload"] = payload
+                        parse_meta["format_recovery_validation_error"] = str(exc)
                     continue
                 continue
             if name == "submit_debug":
@@ -1273,6 +1309,13 @@ class InferenceEngine:
                 f"got {type(payload['issues']).__name__}"
             )
         for index, issue in enumerate(payload["issues"]):
+            if is_model_repair_payload(issue):
+                repair_error = validate_model_repair_payload(issue)
+                if repair_error:
+                    return (
+                        "Invalid submit_review repair issue at "
+                        f"issues[{index}]: {repair_error}"
+                    )
             if (
                 isinstance(issue, dict)
                 and "confidence" not in issue

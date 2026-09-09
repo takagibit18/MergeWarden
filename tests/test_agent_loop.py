@@ -9,7 +9,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from src.analyzer.context_state import ContextState
 from src.analyzer.event_log import EventType
+from src.analyzer.inference_engine import InferenceEngine
 from src.analyzer.output_formatter import ReviewIssue, ReviewReport, Severity
 from src.analyzer.schemas import (
     AnalysisPlan,
@@ -1753,6 +1755,151 @@ def test_empty_review_draft_allows_force_submit_finalize(
 
     assert [item["force_submit"] for item in analyze_calls] == [False, True]
     assert response.report.summary == "No issues found."
+
+
+def test_pending_draft_is_kept_open_until_submit_only_finalization(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    orchestrator = AgentOrchestrator(review_max_iterations=1)
+    analyze_calls: list[bool] = []
+
+    async def _draft_then_submit(state, request, tool_specs, **kwargs):  # type: ignore[no-untyped-def]
+        force_submit = bool(kwargs.get("force_submit"))
+        analyze_calls.append(force_submit)
+        if force_submit:
+            return AnalysisPlan(
+                source_response_id="final-response",
+                draft_review=ReviewReport(summary="No supported issues.", issues=[]),
+            )
+        plan = AnalysisPlan(
+            source_response_id="draft-response",
+            draft_finding_source_response_id="draft-response",
+            draft_finding_calls=[
+                DraftFindingInput(
+                    file="src/app.py",
+                    claim="The changed branch may drop a required value.",
+                    line=10,
+                )
+            ],
+        )
+        orchestrator._persist_draft_finding_calls(plan, state=state)  # noqa: SLF001
+        orchestrator._sync_draft_states(state)  # noqa: SLF001
+        return plan
+
+    monkeypatch.setattr(orchestrator, "analyze", _draft_then_submit)
+
+    response = asyncio.run(orchestrator.run_review(ReviewRequest(repo_path=".")))
+
+    assert analyze_calls == [False, True]
+    assert not orchestrator._draft_finding_store.has_pending()  # noqa: SLF001
+    assert orchestrator._finalization_status == "submitted"  # noqa: SLF001
+    assert "max_iterations" not in response.incomplete_reasons
+    log_path = tmp_path / ".mergewarden" / "logs" / f"{response.run_id}.jsonl"
+    events = [
+        json.loads(line)
+        for line in log_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    finalize_event = next(
+        item
+        for item in events
+        if item["event_type"] == EventType.DECISION.value
+        and item["phase"] == "finalize"
+        and item["payload"].get("finalize_attempt") is True
+    )
+    assert finalize_event["payload"]["ordinary_exploration_tools_exposed"] is False
+    assert finalize_event["payload"]["pending_drafts_before"] is True
+
+
+def test_format_recovery_rejects_changed_evidence_and_preserves_candidate_input(
+    tmp_path,
+) -> None:
+    orchestrator = AgentOrchestrator()
+    orchestrator._reset_run(max_iterations=1, repo_path=str(tmp_path))  # noqa: SLF001
+    state = ContextState()
+    state.evidence_ledger = [
+        {
+            "evidence_id": "ev-good",
+            "artifact_id": "artifact-good",
+            "path": "src/app.py",
+            "start_line": 10,
+            "end_line": 10,
+            "source_type": "git_diff",
+            "snapshot_id": "snapshot-a",
+            "revision": "revision-a",
+            "lifecycle": "delivered",
+            "truncated": False,
+        }
+    ]
+    raw_payload = {
+        "summary": "one candidate",
+        "issues": [
+            {
+                "severity": "warning",
+                "primary_anchor": {"file": "src/app.py", "line": 10},
+                "evidence": "the changed branch drops the value",
+                "confidence": 0.9,
+                "supports": [
+                    {
+                        "role": "cause",
+                        "statement": "The changed branch drops the value.",
+                        "evidence_refs": ["ev-good"],
+                    }
+                ],
+            }
+        ],
+    }
+    recovered_payload = {
+        "summary": "one candidate",
+        "issues": [
+            {
+                "severity": "warning",
+                "primary_anchor": {"file": "src/app.py", "line": 10},
+                "evidence": "the changed branch drops the value",
+                "suggestion": "preserve the value",
+                "confidence": 0.9,
+                "supports": [
+                    {
+                        "role": "cause",
+                        "statement": "The changed branch drops the value.",
+                        "evidence_refs": ["ev-bad"],
+                    }
+                ],
+            }
+        ],
+    }
+    normalized, _ = InferenceEngine._normalize_review_payload(  # noqa: SLF001
+        recovered_payload,
+        evidence_catalog=state.evidence_ledger,
+    )
+    plan = AnalysisPlan(
+        source_response_id="recovered-response",
+        draft_review=ReviewReport.model_validate(normalized),
+        format_recovery_id="fr_test_preserve",
+        format_recovery_required=True,
+        format_recovery_raw_payload=raw_payload,
+        format_recovery_validation_error="issues.0.suggestion Field required",
+        format_recovery_input_response_id="input-response",
+        format_recovery_response_id="recovered-response",
+    )
+
+    orchestrator._prepare_format_recovery(plan, state)  # noqa: SLF001
+    orchestrator._observe_review_submission(plan)  # noqa: SLF001
+
+    assert plan.format_recovery_rejected is True
+    assert plan.format_recovery_status == "rejected_preserved_input"
+    assert plan.draft_review is not None
+    assert plan.draft_review.issues[0].cause_evidence[0].evidence_id == "ev-good"
+    assert plan.draft_review.issues[0].candidate_id.startswith("cand_")
+    entries = orchestrator._run_journal.replay()  # noqa: SLF001
+    recovery_entries = [item for item in entries if item.type == "format_recovery"]
+    assert recovery_entries
+    assert recovery_entries[0].payload["input_response_id"] == "input-response"
+    assert recovery_entries[0].payload["raw_payload"]["issues"][0]["supports"][0][
+        "evidence_refs"
+    ] == ["ev-good"]
 
 
 def test_hard_cap_still_skips_extra_finalize(tmp_path, monkeypatch) -> None:

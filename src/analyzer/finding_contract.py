@@ -140,12 +140,13 @@ class ModelFindingInput(BaseModel):
 
 
 class ModelRepairIssueInput(BaseModel):
-    """Model-facing repair envelope with optional field-level semantic content.
+    """Model-facing identity-bound repair envelope.
 
-    The target and base version are mandatory. All finding fields are optional
-    because unchanged, incomplete, and deferred may report only a disposition,
-    while repaired may carry a minimal repair patch. Legacy full-issue repair
-    responses remain parseable for compatibility.
+    A repair response is deliberately not a second full finding.  The runtime
+    owns the candidate's current semantic content and applies only the explicit
+    ``repair_patch`` fields after checking the exact target and version.  This
+    prevents an omitted field, a stale full finding, or a guessed identity from
+    silently replacing the original candidate.
     """
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -169,19 +170,6 @@ class ModelRepairIssueInput(BaseModel):
             "runtime-owned original candidate."
         ),
     )
-    severity: FindingSeverity | None = None
-    primary_anchor: SourceAnchor | None = None
-    evidence: str | None = None
-    suggestion: str | None = None
-    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
-    observed_behavior: str | None = None
-    causal_mechanism: str | None = None
-    violated_invariant: str | None = None
-    repair_intent: RepairIntent | None = None
-    trigger: str | None = None
-    impact: str | None = None
-    supports: list[ModelClaimSupport] | None = None
-    related_locations: list[RelatedLocation] | None = None
 
 
 def is_structured_issue_payload(payload: Any) -> bool:
@@ -209,6 +197,51 @@ def is_model_repair_payload(payload: Any) -> bool:
         return False
     target = str(payload.get("target_candidate_id", "") or "").strip()
     return bool(target and ("repair_status" in payload or "repair_patch" in payload))
+
+
+_REPAIR_ENVELOPE_FIELDS = frozenset(
+    {
+        "target_candidate_id",
+        "candidate_content_version",
+        "repair_status",
+        "repair_reason",
+        "repair_patch",
+    }
+)
+
+
+def validate_model_repair_payload(payload: Any) -> str:
+    """Return a precise protocol error for one patch-only repair issue.
+
+    This check is separate from ``normalize_model_repair_payload`` because the
+    latter materializes a temporary compatibility envelope for the existing
+    evidence binder.  The wire boundary must reject semantic fields outside
+    ``repair_patch`` before that compatibility adapter can see them.
+    """
+
+    if not isinstance(payload, dict):
+        return f"repair issue must be an object, got {type(payload).__name__}"
+    unexpected = sorted(set(payload) - _REPAIR_ENVELOPE_FIELDS)
+    if unexpected:
+        return (
+            "repair issue contains forbidden top-level semantic fields: "
+            + ", ".join(unexpected)
+            + "; put changed fields under repair_patch"
+        )
+    try:
+        model_input = ModelRepairIssueInput.model_validate(payload)
+    except ValidationError as exc:
+        return str(exc)
+    if model_input.repair_status == "repaired":
+        patch = model_input.repair_patch
+        if patch is None or not patch.model_dump(mode="json", exclude_none=True):
+            return "repaired repair_status requires a non-empty repair_patch"
+    elif model_input.repair_patch is not None:
+        return (
+            "repair_patch is allowed only when repair_status is repaired; "
+            f"got {model_input.repair_status}"
+        )
+    return ""
 
 
 def normalize_model_repair_payload(
