@@ -3600,6 +3600,23 @@ class AgentOrchestrator:
         if reasons:
             response.completion_status = "incomplete"
             response.incomplete_reasons = list(dict.fromkeys(reasons))
+        elif (
+            self._finalization_status == "submitted"
+            and self._submit_review_seen_any
+            and not self._blocking_error
+            and (not self._provider_error_seen or self._model_timeout_recovered)
+            and not response.workflow_invalid
+            and not self._draft_finding_store.has_incomplete()
+            and not self._integrity_needs_repair_count
+            and not self._integrity_invalid_count
+        ):
+            # The loop may have formatted an iteration-guard placeholder
+            # before the bounded submit-only finalizer ran.  A valid final
+            # submission is the authoritative terminal response; clear only
+            # those stale provisional flags so publication is not reported as
+            # incomplete after a finding was actually published.
+            response.completion_status = "complete"
+            response.incomplete_reasons = []
         self._sync_draft_states(state)
         response.investigation_ready = bool(
             self._investigation_ready

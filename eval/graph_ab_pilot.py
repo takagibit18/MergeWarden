@@ -758,6 +758,18 @@ def _apply_runtime_contract(config: dict[str, Any]) -> None:
     """
     if config.get("runtime_contract_source") != "current":
         return
+    # Provider selection is part of a real-model eval contract.  Model names
+    # such as ``glm-5.3-flash`` are not sufficient to distinguish the zhipu
+    # endpoint from other OpenAI-compatible gateways, and those gateways can
+    # expose different reasoning controls.  Keep the provider/base URL in
+    # the experiment config so a run cannot silently switch compatibility
+    # profiles because the user's local .env points elsewhere.
+    provider = str(config.get("provider", "")).strip()
+    base_url = str(config.get("base_url", "")).strip()
+    if provider:
+        os.environ["MODEL_PROVIDER"] = provider
+    if base_url:
+        os.environ["OPENAI_BASE_URL"] = base_url
     shared = config.get("shared", {})
     env_map = {
         "model": "MODEL_NAME",

@@ -1,4 +1,4 @@
-experiment_id: finding-delivery-repair-v4-phase1-20260909
+experiment_id: finding-delivery-repair-v4-phase1-zhipu-20260909
 formal_graph_ab: false
 held_out_executed: false
 runtime_contract_source: current
@@ -6,9 +6,10 @@ seed: 20260909
 provider: zhipu
 base_url: https://open.bigmodel.cn/api/paas/v4
 
-# Phase 1 only: two Python fixtures, one measured agent-search run each.
-# Phase 2 variants are intentionally absent until these implementation checks
-# complete without a same-round protocol error and with publication evidence.
+# Explicit-provider follow-up to the bounded Phase 1 run.  The first run
+# reached the model but inherited a non-zhipu local gateway and the provider
+# rejected submit-only thinking=off.  This is a separately recorded,
+# non-automatic two-fixture measurement; Phase 2 remains disabled.
 shared:
   model: glm-5.3-flash
   temperature: 0.0

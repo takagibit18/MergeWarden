@@ -1769,6 +1769,7 @@ def test_pending_draft_is_kept_open_until_submit_only_finalization(
         force_submit = bool(kwargs.get("force_submit"))
         analyze_calls.append(force_submit)
         if force_submit:
+            orchestrator._submit_review_seen_any = True  # noqa: SLF001
             return AnalysisPlan(
                 source_response_id="final-response",
                 draft_review=ReviewReport(summary="No supported issues.", issues=[]),
@@ -1795,6 +1796,8 @@ def test_pending_draft_is_kept_open_until_submit_only_finalization(
     assert analyze_calls == [False, True]
     assert not orchestrator._draft_finding_store.has_pending()  # noqa: SLF001
     assert orchestrator._finalization_status == "submitted"  # noqa: SLF001
+    assert response.completion_status == "complete"
+    assert response.delivery_complete is True
     assert "max_iterations" not in response.incomplete_reasons
     log_path = tmp_path / ".mergewarden" / "logs" / f"{response.run_id}.jsonl"
     events = [

@@ -259,6 +259,31 @@ Review 正常分析阶段可额外暴露编排层伪工具 `record_draft_finding
 confidence、root cause、impact、evidence/verifier/candidate 字段，也不能绕过
 `submit_review` 或后续 verifier 合同。
 
+### 8.1 Finding delivery v4：format recovery、finalization 与 patch-only repair
+
+| 事务 | 模型可提供 | runtime 必须持有 | 成功条件 |
+|------|------|------|------|
+| format recovery | 仅结构化格式恢复 | 原始 response id、raw payload、candidate identity、delivered evidence ledger | semantic/evidence/reference/identity 与原始输入一致；否则保留原始输入并记 `rejected_preserved_input` |
+| finalization | 仅 `submit_review` / `submit_debug` | exploration stop reason、pending draft、最终 submit response | 一次 submit-only 调用后，provisional `max_iterations` 等原因清除，draft 有终态，最终响应成为发布权威 |
+| repair | `target_candidate_id`、`candidate_content_version`、`repair_status`、`repair_reason`、`repair_patch` | CandidateRegistry、原 finding、基础版本、完整 gap、共享 repair transaction | target/version 精确匹配；patch 合并后重新通过 canonical contract 与 integrity guard |
+| publish | 已验证最终 candidate | final guard status、serialized delivered evidence、finding finalization journal | `integrity=verified` 且 `final_published_count` 与最终 candidate 状态一致 |
+
+repair payload 禁止重复携带完整 semantic/evidence 顶层字段；`repaired` 必须有
+非空 `repair_patch`，省略字段由 runtime 从原候选继承。unknown、duplicate、
+cross-candidate、passed、旧 version 和伪造 identity 都必须拒绝，不能用 nearest
+candidate 或模型自填 finding/Graph/hash/revision 代替 runtime identity。所有
+format/source/contract/evidence repair 共用一份报告级额度。
+
+探索 iteration guard 只表示普通探索停止，不表示交付失败；如果没有硬阻断，
+编排层必须给 submit-only finalization 一次有界机会。只有 finalization 已提交、
+没有 incomplete draft、integrity 没有 needs-repair/invalid 且没有 provider hard
+failure 时，才能清除 placeholder 遗留的 completion incomplete 状态。`review_complete`
+和 `delivery_complete` 仍是两个字段；后者必须在 `finding_funnel_completed`、
+`finding_finalization` 与最终 response 中保持一致。
+
+评测 validation 配置如需固定 provider，必须显式记录 `provider` 与非敏感
+`base_url`；API key 仍只能来自运行环境，不得进入 YAML、summary 或 journal。
+
 Review 中 `finish_reason="length"` 且无合法 `submit_review` 的模型调用属于 incomplete，
 不得解释为合法空 review。runtime 必须标记 `recovery_required`，并至多发起一次只暴露
 `submit_review` 的 finalize recovery；其输入只来自已持久化 draft、已保留工具证据和

@@ -61,6 +61,21 @@ def test_apply_runtime_contract_sets_environment() -> None:
         assert os.environ.get(env_key) == value, f"{env_key} not propagated"
 
 
+def test_apply_runtime_contract_pins_provider_compatibility_profile() -> None:
+    _apply_runtime_contract(
+        {
+            "runtime_contract_source": "current",
+            "provider": "zhipu",
+            "base_url": "https://open.bigmodel.cn/api/paas/v4",
+            "shared": {},
+        }
+    )
+    assert os.environ.get("MODEL_PROVIDER") == "zhipu"
+    assert os.environ.get("OPENAI_BASE_URL") == (
+        "https://open.bigmodel.cn/api/paas/v4"
+    )
+
+
 def test_fresh_settings_reflect_development_contract() -> None:
     _apply_runtime_contract(CONTRACT_CONFIG)
     # get_settings() must return the contract values on a brand-new instance.

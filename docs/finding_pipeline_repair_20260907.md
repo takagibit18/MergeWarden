@@ -291,3 +291,35 @@ provider 返回的成功使用量，模型未提交/上下文不足仍按运行�
 保留 `HTTP_PROXY/HTTPS_PROXY` 和 `NO_PROXY`，仓库 `.env` 未修改。脱敏回放
 和完整回归均通过；完整回归为 `917 passed, 1 skipped`（3 个依赖/框架
 warning），其中 baseline seal 的子进程安全目录配置已单独复核。
+
+## 8. 2026-09-09 v4 finding delivery 修复与真实回放
+
+本轮新增实现、回归和真实验证的完整中文交付报告见：
+[`finding_delivery_repair_v4_20260909.md`](./finding_delivery_repair_v4_20260909.md)。
+
+### 8.1 本轮阶段边界更新
+
+| 阶段 | v4 权威输入 | 完成条件 | 不允许的越级行为 |
+| --- | --- | --- | --- |
+| format recovery | 原始 response、raw payload、原始 delivered ledger、candidate identity | 只恢复格式；semantic/evidence/identity 完全保真 | 改 ref、改语义、改 candidate 不能被当作恢复成功 |
+| finalization | iteration guard 后的 submit-only response | 合法 submit 后清除 provisional exploration incomplete，关闭 pending draft，更新最终状态 | `review_complete` 或 draft 状态替代 publish 不成立 |
+| repair | 精确 `target_candidate_id` + `candidate_content_version` + gap | patch-only 合并并重新过 canonical/integrity guard | 完整 finding 替换、nearest candidate、伪造 target/version |
+| publish | verified candidate + 实际 serialized delivered evidence | `final_published_count` 与最终 journal 对账 | draft/preflight/provider response 单独不算 published |
+
+repair submit 的模型输入现在只允许：
+
+```json
+{
+  "target_candidate_id": "cand_runtime_owned",
+  "candidate_content_version": "exact_base_version",
+  "repair_status": "repaired",
+  "repair_reason": "optional explanation",
+  "repair_patch": {"trigger": "only the missing semantic field"}
+}
+```
+
+format recovery 另写 `format_recovery` journal，保存 input/recovery response id、
+校验错误、保留引用和候选映射；rejected recovery 保留原始输入，不制造新的
+semantic finding。`eval/graph_ab_pilot.py` 的 validation contract 同时支持显式
+`provider` 与 `base_url`，使 `glm-5.3-flash` 不会因本地 `.env` 的兼容网关而
+静默切换 reasoning 协议。
