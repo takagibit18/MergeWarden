@@ -45,7 +45,7 @@ def test_final_submit_context_validation_uses_serialized_wire_payload() -> None:
             estimated_tokens=100,
             request_hash="hash",
             serialized_payload=(
-                '{"messages":[{"role":"user","content":"id=ev-required"}]}'
+                '{"messages":[{"role":"user","content":"evidence_id=ev-required"}]}'
             ),
         ),
         telemetry,

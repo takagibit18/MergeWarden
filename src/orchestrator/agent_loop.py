@@ -608,16 +608,21 @@ class AgentOrchestrator:
         candidate_by_source_index = {
             candidate.source_issue_index: candidate for candidate in candidates
         }
+        # The response object can still be the previous placeholder/iteration
+        # result while ``submitted_report`` is the authoritative report from
+        # the final submit plan.  Build the publication view from the latter;
+        # otherwise a verified candidate is silently dropped from the user
+        # payload even though the registry and integrity guard accepted it.
         output_issues = []
-        for index, issue in enumerate(response.report.issues):
+        for index, issue in enumerate(submitted_report.issues):
             candidate = candidate_by_source_index.get(index)
             if candidate is not None and candidate.candidate_id in rejected_ids:
                 continue
             output_issues.append(bound_by_source_index.get(index, issue))
         response.report = ReviewReport(
-            summary=response.report.summary,
+            summary=submitted_report.summary,
             issues=output_issues,
-            schema_version=response.report.schema_version,
+            schema_version=submitted_report.schema_version,
         )
         incomplete_code_set = {
             failure.code

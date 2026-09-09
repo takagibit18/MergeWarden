@@ -2801,7 +2801,7 @@ class InferenceEngine:
             item
             for item in required
             if re.search(
-                rf"(?<![A-Za-z0-9_])id={re.escape(item)}(?![A-Za-z0-9_])",
+                rf"(?<![A-Za-z0-9_])(?:evidence_)?id={re.escape(item)}(?![A-Za-z0-9_])",
                 serialized,
             )
             is None
