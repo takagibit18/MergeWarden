@@ -4,9 +4,9 @@
 
 本轮已实际落地 finding 交付链路修复，并完成离线全量回归与有界真实模型验证。实现提交基线为 `f8d9c7b`；本报告所在后续本地提交固化 provider 契约、最终状态收口、测试与实验摘要。
 
-真实模型验证没有启动 Phase 2。原因是首轮两条 measured run 发现运行时继承了本地非 zhipu 兼容分支，GLM-5.3 的 submit-only 请求被服务端以 400/code 1210 拒绝；修正为显式 zhipu endpoint 后，重新执行了同一批两个 Python fixture，各 1 次 A-agent-search。两批合计 4 条 measured run，未启用自动无效重试；没有再追加模型请求。
+真实模型验证没有启动 Phase 2。原因是首轮两条 measured run 发现运行时继承了本地非 zhipu 兼容分支，GLM-5.3 的 submit-only 请求被服务端以 400/code 1210 拒绝；修正为显式 zhipu endpoint 后，重新执行了同一批两个 Python fixture，各 1 次 A-agent-search。随后又按复核要求在 `c2ec014` 上对这两个 fixture 各重跑 1 次；所有回放均未启用自动无效重试，Phase 2 仍未扩展。
 
-修正后的 zhipu 回放已经出现真实最终发布证据：两个 fixture 均 `final_published_count=1`、`integrity_verified_count=1`、`evidence_complete_count=1`、`evidence_validated_count=1`，且无 repair 协议错误。Discount fixture 的当次运行已同时得到 `delivery_complete=true`；Haystack fixture 在最终发布后暴露了 iteration-guard 状态残留，随后已用离线回归修复该状态收口。由于本轮真实 measured 上限已用完，没有把离线收口修复冒充成新的真实模型结果。
+修正后的 zhipu 回放已经出现真实最终发布证据：两个 fixture 均 `final_published_count=1`、`integrity_verified_count=1`、`evidence_complete_count=1`、`evidence_validated_count=1`，且无 repair 协议错误。随后按本次复核要求，在 `c2ec014` 上对同两个 Python fixture 做了新的 post-final rerun：Haystack 再次得到 `final_published_count=1`、`delivery_complete=true`、`finding_run_status=complete`；Discount 因真实模型返回非法的 repair 结构被严格契约拒绝，保持 `final_published_count=0`、`delivery_complete=false`，没有发布不可信 finding。
 
 ## 1. 实施内容
 
@@ -71,7 +71,24 @@
 
 ### 3.3 Phase 2 决策
 
-Phase 2（Pydantic A-agent-search、Haystack B2 graph warm）未执行。首轮存在相同的 submit provider compatibility failure，且修正回放之后本轮总 measured budget 已达到 4；因此没有把不满足前置条件的结果扩成 Graph/模型质量结论。
+Phase 2（Pydantic A-agent-search、Haystack B2 graph warm）未执行。首轮存在 submit provider compatibility failure；修正回放阶段的 measured budget 已达到 4，本次 post-final rerun 也只复核原有两个 Python fixture，没有扩展到 Phase 2，因此没有把不满足前置条件的结果扩成 Graph/模型质量结论。
+
+### 3.4 `c2ec014` 后的 post-final rerun
+
+实验：`finding-delivery-repair-v4-postfinal-zhipu-20260909`；显式 zhipu endpoint、两个既有 Python fixture、A-agent-search 各 1 次、无自动无效重试。Runner `valid_runs=2`、`invalid_runs=0`；8 次 provider attempt 全部成功。
+
+| Fixture | run_id | 最终交付 | Finalization / repair | 成本与终止 |
+| --- | --- | --- | --- | --- |
+| Haystack PR12208 | `0feb6a45-9b8d-4e42-a73f-dd7c3552af2e` | `final_published=1`；`integrity_verified=1`；`evidence_complete=1`；`delivery_complete=true`；`finding_run_status=complete` | `finalization_status=already_submitted`；repair 0；`natural_model_stop` | 34,868 tokens；61.2039 s |
+| Discount synthetic | `4cb51c11-3aef-4766-bbbe-5bbdffd0facd` | `final_published=0`；`integrity_verified=0`；`evidence_complete=0`；`delivery_complete=false`；`finding_run_status=incomplete` | repair attempted 1 / succeeded 0；模型把 semantic/evidence 字段放在 repair issue 顶层而不是 `repair_patch`，被严格 patch-only 契约拒绝 | 39,656 tokens；119.9942 s；`model_incomplete` |
+
+这次 rerun 直接验证了最终状态收口：合法最终提交的 Haystack run 在 event log 中同时记录 `finding_funnel_completed`（`final_published_count=1`、`run_status=complete`）和 `phase_end(review_complete)`（`finalization_status=already_submitted`、`delivery_complete=true`）。Discount 的失败是模型 repair payload 不符合协议，不是 provider 调用失败；系统保留候选为 needs-repair 并阻断发布，因而不能把本轮宣称为两个 fixture 全部交付成功。
+
+本次摘要：[`eval/experiments/finding-delivery-repair-v4-postfinal-zhipu-20260909-summary.json`](../eval/experiments/finding-delivery-repair-v4-postfinal-zhipu-20260909-summary.json)
+
+本次配置：[`eval/variants/finding-delivery-repair-v4-postfinal-zhipu-20260909.yaml`](../eval/variants/finding-delivery-repair-v4-postfinal-zhipu-20260909.yaml)
+
+本次 raw pilot：[`eval/outputs/finding-delivery-repair-v4-postfinal-zhipu-20260909.json`](../eval/outputs/finding-delivery-repair-v4-postfinal-zhipu-20260909.json)；对应 event log 仍位于 `eval/outputs/event_logs/`。
 
 ## 4. 离线验证
 
@@ -88,4 +105,4 @@ Phase 2（Pydantic A-agent-search、Haystack B2 graph warm）未执行。首轮�
 - 没有修改 Graph 语言支持、parser、retrieval、construction、gold 或 confidence 规则。
 - 没有读取或修改 `.env`，没有 push；provider/base URL 只写入评测子进程环境。
 - `导学-MergeWarden.md`、`面经-MergeWarden.md` 是用户已有未跟踪文件，本轮未 stage、未改写、未删除。
-- 真实修正回放已经证明两个 fixture 各有一次最终发布；但 Haystack 的 `delivery_complete` 旧状态残留是在该真实回放后才由离线回归修复，因此报告不把“修复后的状态收口”伪装成新的真实模型测量。
+- post-final rerun 已证明 Haystack 在修复后的最终状态收口中真实完成发布；Discount 的模型 repair payload 违反 patch-only 契约，系统按安全语义保持未发布。两个 fixture 的结果均已落盘，不能以单个 fixture 的成功推断本轮整体 2/2 交付完成。
