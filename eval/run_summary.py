@@ -173,6 +173,7 @@ def extract_review_process_metrics(
                 "accepted",
                 "partially_rejected",
                 "all_candidates_rejected",
+                "incomplete",
             }:
                 metrics.review_outcome = raw_outcome  # type: ignore[assignment]
             raw_codes = payload.get("integrity_failures")
@@ -332,6 +333,7 @@ def extract_review_process_metrics(
                 "investigation_ready",
                 "submission_received",
                 "review_complete",
+                "delivery_complete",
             ):
                 if isinstance(payload.get(status_name), bool):
                     setattr(metrics, status_name, payload[status_name])

@@ -15,6 +15,7 @@ ReviewOutcome = Literal[
     "accepted",
     "partially_rejected",
     "all_candidates_rejected",
+    "incomplete",
 ]
 AnalysisAction = Literal["exploration", "state", "completion"]
 EXPLORATION_TOOL_NAMES = frozenset(
@@ -131,6 +132,17 @@ class ReviewResponse(BaseModel):
             "was publishable."
         ),
     )
+    delivery_complete: bool = Field(
+        default=False,
+        description=(
+            "All submitted candidates reached a terminal delivery disposition; "
+            "false means a candidate remains needs_repair or invalid."
+        ),
+    )
+    finding_run_status: Literal["complete", "incomplete"] = Field(
+        default="complete",
+        description="Explicit finding-delivery status kept alongside legacy completion fields.",
+    )
 
     def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         """Keep the complete v0 response envelope compact for old consumers.
@@ -151,11 +163,14 @@ class ReviewResponse(BaseModel):
                     self.investigation_ready,
                     self.submission_received,
                     self.review_complete,
+                    self.delivery_complete,
                 )
             ):
                 dumped.pop("investigation_ready", None)
                 dumped.pop("submission_received", None)
                 dumped.pop("review_complete", None)
+                dumped.pop("delivery_complete", None)
+                dumped.pop("finding_run_status", None)
         return dumped
 
 

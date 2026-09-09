@@ -297,10 +297,16 @@ def test_orchestrator_writes_model_then_tool_result_in_run_directory(tmp_path) -
 
     path = tmp_path / ".mergewarden" / "runs" / response.run_id / "journal.jsonl"
     replayed = RunJournal(response.run_id, path, fsync=False).replay()
-    assert [entry.type for entry in replayed] == [
+    core_entries = [
+        entry
+        for entry in replayed
+        if entry.type in {"model_response", "tool_result"}
+    ]
+    assert [entry.type for entry in core_entries] == [
         "model_response",
         "tool_result",
         "model_response",
     ]
-    assert replayed[1].payload["source_response_id"] == replayed[0].id
-    assert replayed[1].payload["result"]["data"] == {"echo": "kept"}
+    assert core_entries[1].payload["source_response_id"] == core_entries[0].id
+    assert core_entries[1].payload["result"]["data"] == {"echo": "kept"}
+    assert any(entry.type == "evidence_catalog" for entry in replayed)

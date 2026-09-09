@@ -333,6 +333,7 @@ class ReviewProcessMetrics(BaseModel):
     investigation_ready: bool = False
     submission_received: bool = False
     review_complete: bool = False
+    delivery_complete: bool = False
     iteration_guard_hit: bool = False
     pre_budget_submit_triggered: bool = False
     termination_reason: str = ""
@@ -396,6 +397,7 @@ class ReviewProcessMetrics(BaseModel):
         "accepted",
         "partially_rejected",
         "all_candidates_rejected",
+        "incomplete",
     ] = "no_candidates"
     integrity_failure_codes: dict[str, list[str]] = Field(default_factory=dict)
     integrity_failure_details: dict[str, list[dict[str, Any]]] = Field(

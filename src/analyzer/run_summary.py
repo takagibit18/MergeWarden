@@ -53,6 +53,7 @@ class RunSummary(BaseModel):
     repair_evidence_attempt_count: int = 0
     final_submit_attempt_count: int = 0
     finding_run_status: str = ""
+    delivery_complete: bool = False
     model_names: list[str] = Field(default_factory=list)
     total_tokens: int = 0
     provider_attempt_count: int = 0
@@ -404,6 +405,8 @@ def _update_summary(summary: RunSummary, event: dict[str, Any]) -> None:
         finding_run_status = str(payload.get("finding_run_status", "") or "").strip()
         if finding_run_status:
             summary.finding_run_status = finding_run_status
+        if isinstance(payload.get("delivery_complete"), bool):
+            summary.delivery_complete = payload["delivery_complete"]
         summary.review_skill_loaded_count = _non_negative_int(
             payload.get("review_skill_loaded_count")
         )
@@ -461,6 +464,7 @@ def _update_summary(summary: RunSummary, event: dict[str, Any]) -> None:
             "accepted",
             "partially_rejected",
             "all_candidates_rejected",
+            "incomplete",
         }:
             summary.review_outcome = raw_outcome  # type: ignore[assignment]
         raw_codes = payload.get("integrity_failures")

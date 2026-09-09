@@ -308,6 +308,98 @@ def test_model_input_unknown_reference_is_not_replaced_by_nearest_catalog_span()
     assert evidence.get("line") is None
 
 
+def test_graph_span_hash_revision_and_candidate_tokens_are_not_evidence_ids() -> None:
+    payload = {
+        "severity": "warning",
+        "primary_anchor": {"file": "src/app.py", "line": 2},
+        "evidence": "The changed return value reaches callers.",
+        "suggestion": "Preserve the established caller contract.",
+        "confidence": 0.95,
+        "supports": [
+            {
+                "role": "cause",
+                "statement": "The changed return produces the new value.",
+                "evidence_refs": [
+                    "C-graph-candidate",
+                    "span-graph-001",
+                    "content-hash-001",
+                    "revision-001",
+                ],
+            }
+        ],
+    }
+
+    normalized = normalize_model_finding_payload(
+        payload,
+        evidence_catalog=[
+            {
+                "evidence_id": "ev-delivered",
+                "artifact_id": "artifact-delivered",
+                "path": "src/app.py",
+                "start_line": 2,
+                "end_line": 2,
+                "source_type": "git_diff",
+                "lifecycle": "delivered",
+                "truncated": False,
+            }
+        ],
+    )
+
+    evidence = normalized["cause_evidence"]
+    assert len(evidence) == 4
+    assert all(item["resolution_status"] == "unresolved" for item in evidence)
+    assert all(item.get("evidence_id", "") == "" for item in evidence)
+
+
+def test_selected_or_truncated_catalog_records_are_known_but_undelivered() -> None:
+    payload = {
+        "severity": "warning",
+        "primary_anchor": {"file": "src/app.py", "line": 2},
+        "evidence": "The changed return value reaches callers.",
+        "suggestion": "Preserve the established caller contract.",
+        "confidence": 0.95,
+        "supports": [
+            {
+                "role": "cause",
+                "statement": "The changed return produces the new value.",
+                "evidence_refs": ["ev-selected", "ev-truncated"],
+            }
+        ],
+    }
+
+    normalized = normalize_model_finding_payload(
+        payload,
+        evidence_catalog=[
+            {
+                "evidence_id": "ev-selected",
+                "artifact_id": "artifact-selected",
+                "path": "src/app.py",
+                "start_line": 2,
+                "end_line": 2,
+                "source_type": "read_file",
+                "lifecycle": "selected",
+                "truncated": False,
+            },
+            {
+                "evidence_id": "ev-truncated",
+                "artifact_id": "artifact-truncated",
+                "path": "src/app.py",
+                "start_line": 2,
+                "end_line": 2,
+                "source_type": "read_file",
+                "lifecycle": "delivered",
+                "truncated": True,
+            },
+        ],
+    )
+
+    evidence = normalized["cause_evidence"]
+    assert [item["resolution_status"] for item in evidence] == [
+        "undelivered",
+        "undelivered",
+    ]
+
+
 def test_model_input_cannot_supply_runtime_identity_or_bind_selected_evidence() -> None:
     payload = {
         "severity": "warning",

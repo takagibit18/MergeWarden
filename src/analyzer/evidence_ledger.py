@@ -72,6 +72,11 @@ class ObservedEvidence(BaseModel):
             self.content_hash = hashlib.sha256(self.content.encode("utf-8")).hexdigest()
         if self.content and not self.body_hash:
             self.body_hash = hashlib.sha256(self.content.encode("utf-8")).hexdigest()
+        if not self.delivery_request_id and self.source_tool_call_id:
+            # Tool call ids are the smallest durable request boundary available
+            # for runtime evidence; provider request ids are intentionally not
+            # copied into model-facing provenance.
+            self.delivery_request_id = self.source_tool_call_id
         if not self.evidence_id:
             identity = "|".join(
                 (
@@ -362,6 +367,12 @@ def _add_manifest(
                 side=cast(
                     EvidenceSide,
                     str(span.get("side", manifest.get("side", "new")) or "new"),
+                ),
+                delivery_request_id=str(
+                    span.get(
+                        "delivery_request_id",
+                        manifest.get("delivery_request_id", ""),
+                    )
                 ),
             )
         )

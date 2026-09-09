@@ -27,6 +27,7 @@ RunJournalEntryType = Literal[
     "draft_finding_state",
     "length_recovery",
     "candidate_registration",
+    "preflight",
     "evidence_catalog",
     "repair_transaction",
     "finding_finalization",
@@ -118,6 +119,17 @@ class CandidateRegistrationJournalPayload(BaseModel):
     iteration: int = Field(default=0, ge=0)
     registrations: list[dict[str, Any]] = Field(default_factory=list)
     duplicate_sources: dict[str, list[int]] = Field(default_factory=dict)
+
+
+class PreflightJournalPayload(BaseModel):
+    """Input and deterministic result of one draft preflight call."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    iteration: int = Field(default=0, ge=0)
+    all_tools_succeeded: bool = False
+    input: dict[str, Any] = Field(default_factory=dict)
+    result: dict[str, Any] = Field(default_factory=dict)
 
 
 class EvidenceCatalogJournalPayload(BaseModel):
@@ -338,6 +350,7 @@ class RunJournal:
             | DraftFindingStateJournalPayload
             | LengthRecoveryJournalPayload
             | CandidateRegistrationJournalPayload
+            | PreflightJournalPayload
             | EvidenceCatalogJournalPayload
             | RepairTransactionJournalPayload
             | FindingFinalizationJournalPayload
@@ -354,6 +367,8 @@ class RunJournal:
             model = LengthRecoveryJournalPayload.model_validate(payload)
         elif entry_type == "candidate_registration":
             model = CandidateRegistrationJournalPayload.model_validate(payload)
+        elif entry_type == "preflight":
+            model = PreflightJournalPayload.model_validate(payload)
         elif entry_type == "evidence_catalog":
             model = EvidenceCatalogJournalPayload.model_validate(payload)
         elif entry_type == "repair_transaction":

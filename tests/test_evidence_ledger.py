@@ -129,6 +129,47 @@ def test_ledger_requires_the_same_snapshot_revision_and_side() -> None:
     )
 
 
+def test_evidence_id_is_distinct_from_artifact_but_legacy_alias_resolves_exactly() -> None:
+    ledger = ledger_from_sources(
+        tool_evidence=[
+            {
+                "tool_name": "read_file",
+                "tool_call_id": "request-call-1",
+                "data": {
+                    "file_path": "src/example.py",
+                    "start_line": 10,
+                    "line_count": 2,
+                    "content": "10: a\n11: b",
+                    "truncated": False,
+                },
+            }
+        ],
+        snapshot_id="snapshot-a",
+        revision="revision-a",
+    )
+
+    record = ledger.records[0]
+    assert record.evidence_id.startswith("ev_")
+    assert record.evidence_id != record.artifact_id
+    assert record.delivery_request_id == "request-call-1"
+    assert ledger.covers(
+        record.path,
+        10,
+        11,
+        evidence_id=record.evidence_id,
+        snapshot_id="snapshot-a",
+        revision="revision-a",
+    )
+    assert ledger.covers(
+        record.path,
+        10,
+        11,
+        artifact_id=record.artifact_id,
+        snapshot_id="snapshot-a",
+        revision="revision-a",
+    )
+
+
 def test_diff_hunk_with_an_omitted_line_cannot_prove_even_its_visible_prefix() -> None:
     diff = (
         "diff --git a/src/example.py b/src/example.py\n"
