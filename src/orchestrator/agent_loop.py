@@ -24,6 +24,7 @@ from src.analyzer.finding_integrity import (
     build_candidates,
     classify_integrity_failure,
 )
+from src.analyzer.finding_delivery import CandidateRegistry, RepairTransaction
 from src.analyzer.finding_contract import canonical_contract_gaps
 from src.analyzer.inference_engine import InferenceEngine
 from src.analyzer.output_formatter import ReviewReport
@@ -276,6 +277,10 @@ class AgentOrchestrator:
         self._iteration_state_action_applied = False
         self._iteration_progress = False
         self._completion_incomplete_reasons: list[str] = []
+        self._candidate_registry = CandidateRegistry()
+        self._repair_transactions: list[RepairTransaction] = []
+        self._active_repair_transaction: RepairTransaction | None = None
+        self._repair_model_call_count = 0
         self._review_repair_attempt_count = 0
         self._repair_format_attempt_count = 0
         self._repair_contract_attempt_count = 0
@@ -461,7 +466,12 @@ class AgentOrchestrator:
                 decision.event_payload(original_index=original_index),
             )
 
-        candidates = build_candidates(submitted_report, iteration=self._iteration)
+        candidates = build_candidates(
+            submitted_report,
+            iteration=self._iteration,
+            registry=self._candidate_registry,
+        )
+        state.candidate_registrations = self._candidate_registry.snapshot()
         self._verifier_candidate_count = len(candidates)
         self._risk_candidate_count = len(candidates)
         self._record_event(
@@ -626,6 +636,14 @@ class AgentOrchestrator:
         if incomplete_codes:
             response.completion_status = "incomplete"
             response.incomplete_reasons = incomplete_codes
+        for result in guard_result.results:
+            self._candidate_registry.mark_status(result.candidate_id, result.status)  # type: ignore[arg-type]
+        state.candidate_registrations = self._candidate_registry.snapshot()
+        self._persist_final_candidate_states(
+            response=response,
+            guard_result=guard_result,
+            state=state,
+        )
         return response
 
     @staticmethod
@@ -649,6 +667,214 @@ class AgentOrchestrator:
             return "use the single primary_anchor; the runtime will derive location"
         return "do not guess identity or bind an untrusted path; leave this candidate unresolved"
 
+    def _build_repair_transaction(
+        self,
+        results: list[Any],
+        gaps: list[dict[str, Any]],
+    ) -> RepairTransaction:
+        """Build a repair transaction without consuming budget yet."""
+
+        candidate_ids = [
+            str(getattr(result, "candidate_id", "")).strip()
+            for result in results
+            if str(getattr(result, "candidate_id", "")).strip()
+        ]
+        gap_codes = {
+            candidate_id: sorted(
+                {
+                    str(item.get("code", "")).strip()
+                    for item in gap.get("gaps", [])
+                    if isinstance(item, dict) and str(item.get("code", "")).strip()
+                }
+            )
+            for candidate_id, gap in zip(candidate_ids, gaps, strict=False)
+        }
+        base_versions = {
+            str(item.get("candidate_id", "")).strip(): str(
+                item.get("candidate_content_version", item.get("content_hash", ""))
+            ).strip()
+            for item in gaps
+            if str(item.get("candidate_id", "")).strip()
+        }
+        source_gap = any(
+            failure_class == "source_gap"
+            for result in results
+            for failure_class in (
+                classify_integrity_failure(failure)
+                for failure in getattr(result, "failures", ())
+            )
+        )
+        required_steps = ["submit"]
+        if source_gap:
+            required_steps.insert(0, "source_exploration")
+        return RepairTransaction(
+            candidate_ids=candidate_ids,
+            base_versions=base_versions,
+            gap_codes=gap_codes,
+            required_steps=required_steps,
+            token_budget=max(
+                0,
+                len(required_steps) * self._settings.submit_max_output_tokens,
+            ),
+            time_budget_seconds=(
+                len(required_steps)
+                * min(self._settings.model_request_timeout_seconds, 30.0)
+            ),
+        )
+
+    def _open_repair_transaction(
+        self,
+        transaction: RepairTransaction,
+        *,
+        state: ContextState | None = None,
+    ) -> None:
+        """Consume one shared repair transaction budget and persist its opening."""
+
+        if self._active_repair_transaction is not None:
+            return
+        self._review_repair_attempt_count += 1
+        self._active_repair_transaction = transaction
+        self._repair_transactions.append(transaction)
+        if state is not None:
+            state.repair_transactions = [
+                item.model_dump(mode="json") for item in self._repair_transactions
+            ]
+        self._persist_repair_transaction(transaction, state=state)
+        self._record_event(
+            EventType.REPAIR_TRANSACTION,
+            "repair",
+            {
+                "stage": "opened",
+                **transaction.model_dump(mode="json"),
+                "repair_transaction_count": self._review_repair_attempt_count,
+                "repair_model_call_count": self._repair_model_call_count,
+            },
+        )
+
+    def _record_repair_transaction_step(self, step: str) -> None:
+        """Persist one executed repair step on the active transaction."""
+
+        transaction = self._active_repair_transaction
+        if transaction is None:
+            return
+        transaction.record_step(step)
+        self._persist_repair_transaction(transaction)
+
+    def _record_repair_model_call(self, step: str) -> None:
+        """Count a model call separately from the shared transaction count."""
+
+        self._repair_model_call_count += 1
+        transaction = self._active_repair_transaction
+        if transaction is None:
+            return
+        transaction.model_call_count += 1
+        transaction.record_step(step)
+        self._persist_repair_transaction(transaction)
+
+    def _finish_repair_transaction(
+        self,
+        *,
+        status: Literal[
+            "accepted",
+            "partially_accepted",
+            "rejected",
+            "incomplete",
+            "deferred",
+        ],
+        target_results: dict[str, str],
+        reasons: list[str] | None = None,
+        state: ContextState | None = None,
+    ) -> None:
+        """Close the active transaction after final target validation."""
+
+        transaction = self._active_repair_transaction
+        if transaction is None:
+            return
+        transaction.status = status
+        transaction.target_results = dict(target_results)
+        transaction.rejection_reasons = list(dict.fromkeys(reasons or []))
+        self._persist_repair_transaction(transaction, state=state)
+        self._record_event(
+            EventType.REPAIR_TRANSACTION,
+            "repair",
+            {
+                "stage": "closed",
+                **transaction.model_dump(mode="json"),
+                "repair_transaction_count": self._review_repair_attempt_count,
+                "repair_model_call_count": self._repair_model_call_count,
+            },
+        )
+        self._active_repair_transaction = None
+
+    def _persist_repair_transaction(
+        self,
+        transaction: RepairTransaction,
+        *,
+        state: ContextState | None = None,
+    ) -> None:
+        """Write repair facts to the event log, journal, and response state."""
+
+        if state is not None:
+            state.repair_transactions = [
+                item.model_dump(mode="json") for item in self._repair_transactions
+            ]
+        if self._run_journal is not None:
+            self._run_journal.append(
+                PendingRunJournalEntry(
+                    type="repair_transaction",
+                    payload={"transaction": transaction.model_dump(mode="json")},
+                )
+            )
+
+    def _persist_final_candidate_states(
+        self,
+        *,
+        response: ReviewResponse,
+        guard_result: Any,
+        state: ContextState,
+    ) -> None:
+        """Persist final candidate dispositions without leaking source secrets."""
+
+        statuses = {
+            result.candidate_id: result.status for result in guard_result.results
+        }
+        if self._active_repair_transaction is not None:
+            target_results = {
+                candidate_id: statuses.get(candidate_id, "not_returned")
+                for candidate_id in self._active_repair_transaction.candidate_ids
+            }
+            accepted = sum(value == "verified" for value in target_results.values())
+            final_status = (
+                "accepted"
+                if accepted == len(target_results) and target_results
+                else "partially_accepted"
+                if accepted
+                else "rejected"
+            )
+            self._finish_repair_transaction(
+                status=final_status,  # type: ignore[arg-type]
+                target_results=target_results,
+                reasons=[
+                    code
+                    for values in self._integrity_failure_codes.values()
+                    for code in values
+                ],
+                state=state,
+            )
+        state.candidate_registrations = self._candidate_registry.snapshot()
+        if self._run_journal is not None:
+            self._run_journal.append(
+                PendingRunJournalEntry(
+                    type="finding_finalization",
+                    payload={
+                        "candidate_statuses": statuses,
+                        "final_published_count": len(response.report.issues),
+                        "finding_run_status": response.completion_status,
+                        "review_outcome": self._review_outcome,
+                    },
+                )
+            )
+
     @classmethod
     def _integrity_result_gap_payload(
         cls,
@@ -665,7 +891,10 @@ class AgentOrchestrator:
             # message may select fewer atomic targets under a budget, but the
             # runtime always retains the complete original issue here.
             original_contents = issue.model_dump(mode="json")
-        content_hash = str(getattr(candidate, "content_hash", ""))
+        content_hash = str(
+            getattr(candidate, "candidate_content_version", "")
+            or getattr(candidate, "content_hash", "")
+        )
         return {
             "candidate_id": str(getattr(result, "candidate_id", "")),
             "target_candidate_id": str(getattr(result, "candidate_id", "")),
@@ -712,7 +941,11 @@ class AgentOrchestrator:
             return response
         if self._review_repair_attempt_count >= self._settings.review_repair_max_attempts:
             return response
-        candidates = build_candidates(submitted_report, iteration=self._iteration)
+        candidates = build_candidates(
+            submitted_report,
+            iteration=self._iteration,
+            registry=self._candidate_registry,
+        )
         if not candidates:
             return response
         observed_tool_evidence = self._observed_tool_evidence(state)
@@ -809,6 +1042,7 @@ class AgentOrchestrator:
             )
             for result in needs
         ]
+        transaction = self._build_repair_transaction(needs, gaps)
         self._last_validator_result = {
             "validator_passed": False,
             "submit_allowed": False,
@@ -827,6 +1061,7 @@ class AgentOrchestrator:
                 "or symbol lookup; after it returns, submit again and let validation "
                 "decide whether the candidate is repaired."
             ),
+            "repair_transaction": transaction.model_dump(mode="json"),
         }
         source_gap_present = any(
             classify_integrity_failure(failure) == "source_gap"
@@ -834,7 +1069,10 @@ class AgentOrchestrator:
             for failure in result.failures
         )
         required_repair_steps = 2 if source_gap_present else 1
-        repair_capacity = self._repair_sequence_capacity(required_repair_steps)
+        repair_capacity = self._repair_sequence_capacity(
+            required_repair_steps,
+            transaction_scoped=True,
+        )
         if not repair_capacity["allowed"]:
             reason = str(
                 repair_capacity.get(
@@ -842,6 +1080,9 @@ class AgentOrchestrator:
                 )
             )
             self._add_incomplete_reason(state, reason)
+            transaction.status = "deferred"
+            transaction.rejection_reasons.append(reason)
+            self._persist_repair_transaction(transaction, state=state)
             self._record_event(
                 EventType.DECISION,
                 "finding_repair",
@@ -856,7 +1097,11 @@ class AgentOrchestrator:
                 },
             )
             return response
-        self._review_repair_attempt_count += 1
+        self._open_repair_transaction(transaction, state=state)
+        self._last_validator_result["repair_transaction"] = transaction.model_dump(
+            mode="json"
+        )
+        self._record_repair_transaction_step("preflight")
         self._record_event(
             EventType.DECISION,
             "finding_repair",
@@ -884,6 +1129,7 @@ class AgentOrchestrator:
                 force_submit=False,
                 allow_exploration=True,
             )
+            self._record_repair_model_call("source_exploration")
             self._account_latest_model_usage()
             self._observe_review_submission(exploration_plan)
             self._observe_incomplete_plan(exploration_plan, state)
@@ -894,7 +1140,11 @@ class AgentOrchestrator:
             )
             self._observe_workflow_tools(exploration_plan, repair_results)
             self._refresh_evidence_ledger(state)
-            submit_capacity = self._repair_sequence_capacity(1)
+            submit_capacity = self._repair_sequence_capacity(
+                1,
+                transaction_scoped=True,
+                allow_active_transaction=True,
+            )
             if not submit_capacity["allowed"]:
                 reason = str(
                     submit_capacity.get("reason", "repair_budget_exhausted")
@@ -913,7 +1163,6 @@ class AgentOrchestrator:
                     },
                 )
                 return response
-            self._review_repair_attempt_count += 1
             self._record_event(
                 EventType.DECISION,
                 "finding_repair",
@@ -936,6 +1185,7 @@ class AgentOrchestrator:
                 tool_specs=[],
                 force_submit=True,
             )
+            self._record_repair_model_call("submit")
             self._account_latest_model_usage()
             self._observe_review_submission(repair_plan)
             self._observe_incomplete_plan(repair_plan, state)
@@ -947,6 +1197,7 @@ class AgentOrchestrator:
                 tool_specs=[],
                 force_submit=True,
             )
+            self._record_repair_model_call("submit")
             self._account_latest_model_usage()
             self._observe_review_submission(repair_plan)
             self._observe_incomplete_plan(repair_plan, state)
@@ -985,6 +1236,7 @@ class AgentOrchestrator:
             submitted_report,
             repair_plan.draft_review,
             preview,
+            registry=self._candidate_registry,
             diagnostics=merge_diagnostics,
         )
         if merge_diagnostics:
@@ -1004,7 +1256,12 @@ class AgentOrchestrator:
         # the final integrity guard sees every original candidate and can
         # preserve unresolved failures truthfully.
         response.report = ResultProcessor.merge_review_reports([merged])
-        repaired_candidates = build_candidates(merged, iteration=self._iteration)
+        repaired_candidates = build_candidates(
+            merged,
+            iteration=self._iteration,
+            registry=self._candidate_registry,
+            register=False,
+        )
         repaired_tool_evidence = self._observed_tool_evidence(state)
         repaired_result = FindingIntegrityGuard(self._workspace_root).validate(
             repaired_candidates,
@@ -1051,6 +1308,19 @@ class AgentOrchestrator:
                 strict=False,
             )
         )
+        for candidate, result in zip(
+            repaired_result.bound_candidates,
+            repaired_result.results,
+            strict=False,
+        ):
+            if (
+                candidate.source_issue_index in needs_source_indexes
+                and result.status == "verified"
+            ):
+                self._candidate_registry.commit_verified_version(
+                    candidate.candidate_id,
+                    candidate.issue,
+                )
         self._review_repair_succeeded_count = repaired_verified_count
         self._record_event(
             EventType.DECISION,
@@ -1074,6 +1344,7 @@ class AgentOrchestrator:
         repaired: ReviewReport,
         preview: Any,
         *,
+        registry: CandidateRegistry | None = None,
         diagnostics: list[dict[str, Any]] | None = None,
     ) -> ReviewReport:
         """Replace only explicit runtime targets and retain every other issue."""
@@ -1107,7 +1378,12 @@ class AgentOrchestrator:
                 if diagnostics is not None:
                     diagnostics.append(
                         {
-                            "code": "repair_target_unknown",
+                            "code": (
+                                "repair_target_cross_candidate"
+                                if registry is not None
+                                and registry.registration(target_id) is not None
+                                else "repair_target_unknown"
+                            ),
                             "target_candidate_id": target_id,
                             "message": (
                                 "Repair target is unknown, passed, duplicated, or belongs "
@@ -1138,11 +1414,31 @@ class AgentOrchestrator:
                     )
                 continue
             expected_version = str(
-                getattr(repairable_candidates[target_index], "content_hash", "")
+                getattr(
+                    repairable_candidates[target_index],
+                    "candidate_content_version",
+                    "",
+                )
+                or getattr(repairable_candidates[target_index], "content_hash", "")
             ).strip()
             provided_version = str(
                 getattr(repaired_issue, "candidate_content_version", "")
             ).strip()
+            legacy_preview = not expected_version
+            if expected_version and not provided_version:
+                if diagnostics is not None:
+                    diagnostics.append(
+                        {
+                            "code": "repair_target_version_missing",
+                            "target_candidate_id": target_id,
+                            "expected_candidate_content_version": expected_version,
+                            "message": (
+                                "Repair must copy the exact non-empty candidate "
+                                "content version from the runtime feedback."
+                            ),
+                        }
+                    )
+                continue
             if provided_version and expected_version and provided_version != expected_version:
                 if diagnostics is not None:
                     diagnostics.append(
@@ -1159,6 +1455,30 @@ class AgentOrchestrator:
                     )
                 continue
             repair_status = str(getattr(repaired_issue, "repair_status", "") or "")
+            if repair_status not in {"", "repaired", "unchanged", "incomplete"}:
+                if diagnostics is not None:
+                    diagnostics.append(
+                        {
+                            "code": "repair_status_invalid",
+                            "target_candidate_id": target_id,
+                            "repair_status": repair_status,
+                            "message": "Repair status is not an allowed target disposition.",
+                        }
+                    )
+                continue
+            if not repair_status and not legacy_preview:
+                if diagnostics is not None:
+                    diagnostics.append(
+                        {
+                            "code": "repair_status_missing",
+                            "target_candidate_id": target_id,
+                            "message": (
+                                "Repair must explicitly return repaired, unchanged, "
+                                "or incomplete for the exact target."
+                            ),
+                        }
+                    )
+                continue
             if repair_status in {"unchanged", "incomplete"}:
                 if diagnostics is not None:
                     diagnostics.append(
@@ -1405,9 +1725,15 @@ class AgentOrchestrator:
             "validated_draft_ids", []
         )
         validator_payload.setdefault("validated_finding_ids", [])
+        validator_payload.setdefault("repair_transaction_open", False)
+        validator_payload.setdefault(
+            "candidate_binding_state", "not_registered_initial_submission"
+        )
         if not result.ok:
             validator_payload["validator_passed"] = False
             validator_payload["submit_allowed"] = False
+            validator_payload["repair_transaction_open"] = False
+            validator_payload["initial_submission_required"] = True
             validator_payload.setdefault(
                 "unresolved_evidence_gaps", [result.error or "validator_tool_error"]
             )
@@ -1479,10 +1805,29 @@ class AgentOrchestrator:
                 "policy_warnings": summary_warnings,
                 "validator_passed": passed,
                 "submit_allowed": passed,
+                "repair_transaction_open": False,
+                "initial_submission_required": bool(unresolved),
+                "candidate_binding_state": "not_registered_initial_submission",
             }
         )
         self._last_validator_result = validator_payload
         self._validator_passed = passed
+        self._record_event(
+            EventType.PREFLIGHT_COMPLETED,
+            "preflight",
+            {
+                "candidate_identity_checked": bool(
+                    validator_payload.get("candidate_identity_checked", False)
+                ),
+                "candidate_version_checked": bool(
+                    validator_payload.get("candidate_version_checked", False)
+                ),
+                "repair_transaction_open": False,
+                "initial_submission_required": bool(unresolved),
+                "unresolved_gap_count": len(unresolved),
+                "validator_passed": passed,
+            },
+        )
         if passed:
             self._review_stage = "submit_ready"
             self._investigation_ready = True
@@ -1928,13 +2273,7 @@ class AgentOrchestrator:
                 # the initial deferred round may have had validator in the full
                 # registry but intentionally removes it before serialization.
                 logical_stage = call_stage
-                repair_submit_schema = bool(
-                    isinstance(self._last_validator_result, dict)
-                    and (
-                        self._last_validator_result.get("unresolved_evidence_gaps")
-                        or self._last_validator_result.get("rejected_candidates")
-                    )
-                )
+                repair_submit_schema = self._repair_schema_open()
                 if force_submit:
                     serialized_tools = build_submit_tool_schemas(
                         model_input=True,
@@ -1992,9 +2331,17 @@ class AgentOrchestrator:
                     self._repair_format_attempt_count += (
                         result.schema_repair_attempted_count
                     )
-                    self._review_repair_attempt_count += (
-                        result.schema_repair_attempted_count
-                    )
+                    if self._active_repair_transaction is None:
+                        format_transaction = RepairTransaction(
+                            required_steps=["format"],
+                            token_budget=self._settings.submit_max_output_tokens,
+                            time_budget_seconds=min(
+                                self._settings.model_request_timeout_seconds,
+                                30.0,
+                            ),
+                        )
+                        self._open_repair_transaction(format_transaction, state=state)
+                    self._record_repair_model_call("format")
                     self._record_event(
                         EventType.DECISION,
                         "finding_repair",
@@ -3074,6 +3421,10 @@ class AgentOrchestrator:
         self._iteration_state_action_applied = False
         self._iteration_progress = False
         self._completion_incomplete_reasons = []
+        self._candidate_registry = CandidateRegistry()
+        self._repair_transactions = []
+        self._active_repair_transaction = None
+        self._repair_model_call_count = 0
         self._review_repair_attempt_count = 0
         self._repair_format_attempt_count = 0
         self._repair_contract_attempt_count = 0
@@ -3192,8 +3543,20 @@ class AgentOrchestrator:
         )
         return min(self._settings.token_budget, reserve_ceiling)
 
-    def _repair_sequence_capacity(self, required_steps: int) -> dict[str, Any]:
-        """Preflight the complete repair sequence before spending its first call."""
+    def _repair_sequence_capacity(
+        self,
+        required_steps: int,
+        *,
+        transaction_scoped: bool = False,
+        allow_active_transaction: bool = False,
+    ) -> dict[str, Any]:
+        """Preflight a complete repair sequence before spending its first call.
+
+        The compatibility default keeps the old helper semantics for direct
+        callers.  The orchestrator uses ``transaction_scoped=True`` so one
+        source-exploration-plus-submit sequence consumes one transaction while
+        retaining separate model-call telemetry.
+        """
 
         steps = max(1, int(required_steps))
         remaining_attempts = max(
@@ -3221,7 +3584,15 @@ class AgentOrchestrator:
         reason = ""
         if self._budget_state == "hard_capped":
             reason = "repair_budget_exhausted"
-        elif remaining_attempts < steps:
+        elif transaction_scoped and not allow_active_transaction and remaining_attempts < 1:
+            reason = "repair_transaction_budget_exhausted"
+        elif (
+            transaction_scoped
+            and allow_active_transaction
+            and getattr(self, "_active_repair_transaction", None) is None
+        ):
+            reason = "repair_transaction_missing"
+        elif not transaction_scoped and remaining_attempts < steps:
             reason = "repair_sequence_attempt_budget_insufficient"
         elif remaining_tokens < required_tokens:
             reason = "repair_sequence_token_budget_insufficient"
@@ -3232,6 +3603,10 @@ class AgentOrchestrator:
             "reason": reason,
             "required_steps": steps,
             "remaining_repair_attempts": remaining_attempts,
+            "transaction_scoped": transaction_scoped,
+            "active_transaction": getattr(self, "_active_repair_transaction", None)
+            is not None,
+            "remaining_repair_transactions": remaining_attempts,
             "required_token_reserve": required_tokens,
             "remaining_token_budget": remaining_tokens,
             "required_time_reserve_seconds": required_seconds,
@@ -3792,8 +4167,60 @@ class AgentOrchestrator:
         if plan.draft_review is not None and self._submit_iteration is None:
             self._submit_iteration = self._iteration
         if plan.draft_review is not None:
+            if not self._repair_schema_open():
+                self._register_initial_candidates(plan.draft_review)
             self._submitted_attempt_count += 1
             self._review_stage = "complete"
+
+    def _register_initial_candidates(self, report: ReviewReport) -> None:
+        """Register the initial report before any identity-sensitive repair."""
+
+        registrations = self._candidate_registry.register_report(
+            report,
+            iteration=self._iteration,
+        )
+        if not registrations:
+            return
+        payload = {
+            "iteration": self._iteration,
+            "registrations": self._candidate_registry.snapshot(),
+            "registered_candidate_ids": [item.candidate_id for item in registrations],
+            "duplicate_source_indexes": {
+                item.candidate_id: list(
+                    self._candidate_registry.duplicate_sources(item.candidate_id)
+                )
+                for item in registrations
+                if self._candidate_registry.duplicate_sources(item.candidate_id)
+            },
+        }
+        self._record_event(EventType.CANDIDATE_REGISTERED, "preflight", payload)
+        if self._run_journal is not None:
+            self._run_journal.append(
+                PendingRunJournalEntry(
+                    type="candidate_registration",
+                    payload={
+                        "iteration": self._iteration,
+                        "registrations": self._candidate_registry.snapshot(),
+                        "duplicate_sources": payload["duplicate_source_indexes"],
+                    },
+                )
+            )
+
+    def _repair_schema_open(self) -> bool:
+        """Return true only when a runtime-created repair transaction is open."""
+
+        result = self._last_validator_result
+        if not isinstance(result, dict):
+            return False
+        transaction = result.get("repair_transaction")
+        if not isinstance(transaction, dict):
+            return False
+        if str(transaction.get("status", "")).strip() != "open":
+            return False
+        targets = transaction.get("candidate_ids")
+        return isinstance(targets, list) and bool(
+            [str(item).strip() for item in targets if str(item).strip()]
+        )
 
     @staticmethod
     def _plan_action_fingerprint(plan: AnalysisPlan | None) -> str:

@@ -115,6 +115,13 @@ class EvidenceProvenance(BaseModel):
         default="",
         description="System-owned delivered-source artifact identity.",
     )
+    evidence_id: str = Field(
+        default="",
+        description=(
+            "Single model-facing evidence identity selected from the delivered "
+            "catalog; never a Graph span, candidate id, content hash, or revision."
+        ),
+    )
     reference_id: str = Field(
         default="",
         description=(

@@ -37,6 +37,13 @@ class ObservedEvidence(BaseModel):
     """One source artifact and its request-visible lifecycle."""
 
     artifact_id: str = Field(min_length=1)
+    evidence_id: str = Field(
+        default="",
+        description=(
+            "Single model-facing evidence identity. It is distinct from source "
+            "artifact, Graph span/candidate ids, content hashes, and revisions."
+        ),
+    )
     snapshot_id: str = ""
     revision: str = ""
     path: str = Field(min_length=1)
@@ -47,6 +54,7 @@ class ObservedEvidence(BaseModel):
     content_hash: str = ""
     source_type: str = Field(min_length=1)
     source_tool_call_id: str = ""
+    delivery_request_id: str = ""
     lifecycle: EvidenceLifecycle = "delivered"
     displayed_ranges: list[EvidenceRange] = Field(default_factory=list)
     displayed_line_numbers: list[int] = Field(default_factory=list)
@@ -64,6 +72,23 @@ class ObservedEvidence(BaseModel):
             self.content_hash = hashlib.sha256(self.content.encode("utf-8")).hexdigest()
         if self.content and not self.body_hash:
             self.body_hash = hashlib.sha256(self.content.encode("utf-8")).hexdigest()
+        if not self.evidence_id:
+            identity = "|".join(
+                (
+                    self.artifact_id,
+                    self.path,
+                    str(self.start_line),
+                    str(self.end_line),
+                    self.side,
+                    self.content_hash,
+                    self.source_type,
+                    self.snapshot_id,
+                    self.revision,
+                )
+            )
+            self.evidence_id = "ev_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+        if self.artifact_id and self.artifact_id != self.evidence_id:
+            self.aliases = sorted(set(self.aliases) | {self.artifact_id})
         displayed_lines: set[int] = set()
         for line in self.displayed_line_numbers:
             parsed_line = _as_int(line)
@@ -122,7 +147,12 @@ class EvidenceLedger(BaseModel):
                     "aliases": sorted(
                         set(existing.aliases)
                         | set(record.aliases)
-                        | {record.artifact_id, existing.artifact_id}
+                        | {
+                            record.artifact_id,
+                            existing.artifact_id,
+                            record.evidence_id,
+                            existing.evidence_id,
+                        }
                     ),
                     # A later clipped representation must not poison an
                     # already-complete representation of the same body.  A
@@ -154,6 +184,7 @@ class EvidenceLedger(BaseModel):
         revision: str = "",
         content_hash: str = "",
         source_type: str = "",
+        evidence_id: str = "",
     ) -> bool:
         """Check full coverage, never mere overlap, for a cited range."""
 
@@ -164,6 +195,12 @@ class EvidenceLedger(BaseModel):
                 continue
             if artifact_id and artifact_id not in {
                 record.artifact_id,
+                record.evidence_id,
+                *record.aliases,
+            }:
+                continue
+            if evidence_id and evidence_id not in {
+                record.evidence_id,
                 *record.aliases,
             }:
                 continue

@@ -219,6 +219,9 @@ class ValidateReviewDraftTool(BaseTool):
             "validation_scope": "policy_and_canonical_contract_preflight",
             "candidate_identity_checked": False,
             "candidate_version_checked": False,
+            "repair_transaction_open": False,
+            "initial_submission_required": bool(unresolved_evidence_gaps),
+            "candidate_binding_state": "not_registered_initial_submission",
             "policy_warnings": list(summary_warnings),
             "validator_passed": bool(
                 not summary_warnings

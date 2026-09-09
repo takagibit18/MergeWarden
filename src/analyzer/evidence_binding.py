@@ -48,6 +48,7 @@ class TrustedEvidenceBinding:
     context_hash: str = ""
     symbol_id: str = ""
     artifact_id: str = ""
+    evidence_id: str = ""
     snapshot_id: str = ""
     revision: str = ""
     side: EvidenceSide = "new"
@@ -202,6 +203,7 @@ def _trusted_bindings_for_evidence(
                     artifact_id=str(
                         span.get("span_id", f"{manifest_id}:{file}:{line}")
                     ).strip(),
+                    evidence_id=str(span.get("evidence_id", "")).strip(),
                     snapshot_id=str(
                         span.get(
                             "snapshot_id",
@@ -237,6 +239,20 @@ def _select_binding(
     declared_manifest = evidence.context_manifest_id.strip()
     declared_hash = evidence.context_hash.strip()
     declared_artifact = evidence.artifact_id.strip()
+    declared_evidence_id = evidence.evidence_id.strip()
+    if declared_evidence_id:
+        evidence_matches = [
+            item
+            for item in matches
+            if declared_evidence_id
+            in {
+                item.evidence_id,
+                item.artifact_id,
+                item.context_manifest_id,
+                item.context_hash,
+            }
+        ]
+        return evidence_matches[0] if len(evidence_matches) == 1 else None
     if declared_artifact:
         artifact_matches = [
             item
@@ -294,6 +310,7 @@ def _apply_binding(
     evidence.context_manifest_id = binding.context_manifest_id
     evidence.context_hash = binding.context_hash
     evidence.artifact_id = binding.artifact_id
+    evidence.evidence_id = binding.evidence_id
     evidence.snapshot_id = binding.snapshot_id
     evidence.revision = binding.revision
     evidence.side = binding.side
@@ -447,11 +464,18 @@ def _ledger_bindings_for_evidence(
     declared_manifest = evidence.context_manifest_id.strip()
     declared_hash = evidence.context_hash.strip()
     declared_artifact = evidence.artifact_id.strip()
+    declared_evidence_id = evidence.evidence_id.strip()
     for record in ledger.records:
         if record.path != file or not record.covers(line, end_line):
             continue
         if declared_artifact and declared_artifact not in {
             record.artifact_id,
+            record.evidence_id,
+            *record.aliases,
+        }:
+            continue
+        if declared_evidence_id and declared_evidence_id not in {
+            record.evidence_id,
             *record.aliases,
         }:
             continue
@@ -479,6 +503,7 @@ def _ledger_bindings_for_evidence(
                     ),
                     context_hash=record.content_hash,
                     artifact_id=record.artifact_id,
+                    evidence_id=record.evidence_id,
                     snapshot_id=record.snapshot_id,
                     revision=record.revision,
                     side=record.side,
@@ -498,6 +523,7 @@ def _ledger_bindings_for_evidence(
                 kind="tool",
                 retrieval_source=source,
                 artifact_id=record.artifact_id,
+                evidence_id=record.evidence_id,
                 snapshot_id=record.snapshot_id,
                 revision=record.revision,
                 side=record.side,
@@ -511,6 +537,7 @@ def _ledger_bindings_for_evidence(
             item.context_manifest_id,
             item.context_hash,
             item.artifact_id,
+            item.evidence_id,
         ),
     )
 

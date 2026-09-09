@@ -128,6 +128,22 @@ snapshot/revision 和 serialized-request 记录。
 | Repair | 目标 candidate_id/version、原 finding、完整 gap、修复动作 | 每个目标候选 `repaired` / `unchanged` / `incomplete` | 目标精确、无重复/未知/跨候选覆盖，且重新通过同一 canonical rule | 保留原 finding，记录 repair transaction 与失败原因 | 先预留完整序列（source→submit 或 contract→submit），不足则不启动 |
 | Publish | 已验证的最终 candidate、serialized delivered evidence、最终 guard | publisher payload、发布审计记录 | integrity=`verified` 且全部交付字段可回放 | `publish_blocked`；不得以 draft/preflight/review_complete 替代 | 与探索/修复共用总预算和审计 journal |
 
+## 2.8 本轮交付契约（身份、预检与修复事务）
+
+本节是 `ba5d443` 之后本轮实现所遵循的阶段边界。模型只能提供语义内容和已交付证据引用；运行时身份、证据快照、仓库 revision 和事务状态由编排层登记并持久化。
+
+| 阶段 | 权威输入及持有者 | runtime candidate ID | candidate content version | 允许输出 | 状态语义 | 预算与持久化事件 |
+| --- | --- | --- | --- | --- | --- | --- |
+| draft | 模型可见内容；`DraftFindingStore` 持有 `draft_id` | 否；draft_id 不是候选身份 | 否 | 最小假设、状态更新、精确 evidence 引用 | `pending` / `evidence_sufficient` / `disproved` / `incomplete` 仅表示调查检查点，不表示交付完成 | 不消耗 finding repair transaction；journal 保存 draft/state |
+| preflight | 当前提交 payload、实际 delivered evidence catalog；validator 只做策略和 canonical contract 检查 | 初次 preflight 不检查，也不生成 target；缺口是初次补全反馈 | 初次 preflight 不检查 | policy/contract gaps、合法 evidence_id 目录和初次提交反馈 | `not_checked`、`contract_gap`、`evidence_gap`；不得打开 repair schema 或制造占位 target | validator 单次工具调用；记录 `preflight_completed` |
+| initial submit | provider 返回的结构化 `ReviewReport`；编排层登记候选 | 是。运行时生成 `cand_...`；模型的 finding_id、draft_id、Graph ID、SHA 均不能替代它 | 是。由 canonical finding 内容生成短版本摘要；语义字段/引用变化使版本失效，候选 ID 不变 | 初始 finding、summary、精确 evidence_id 引用 | `registered` 后进入 integrity；是否收到提交与是否通过校验分开 | 记一笔 `candidate_registration` journal 和 `candidate_registered` 事件 |
+| repair | 已登记 candidate_id、当前版本、完整 gap 和同一事务；`CandidateRegistry` 与 `RepairTransaction` 持有 | 必须精确命中当前事务中的一个 target；unknown、cross-candidate、passed、duplicate 都拒绝 | 必须非空且与事务基础版本完全相等；旧/错/Graph/hash/revision/draft 值拒绝 | 绑定 target/version 的字段级修复，或 `unchanged` / `incomplete` | `repaired` 仍需完整 canonical/integrity 复验；`unchanged`、`incomplete`、`deferred` 不覆盖原候选 | format/source/contract 共用报告级事务上限；事务数与模型调用数分开记；journal 保存每一步和拒绝原因 |
+| finalize | 原始候选、修复后候选、实际 delivered evidence ledger、最终 guard 结果 | 沿用登记 ID | 沿用通过最终 guard 的版本；失败修复不推进版本 | 仅发布 `integrity=verified` 的候选和审计摘要 | `complete` 只表示流程没有未解决交付缺口；`incomplete` 表示仍有 needs_repair/invalid/deferred/预算或证据问题。`review_complete` 是校验阶段事实，不等价于发布成功 | 保存 `finding_finalization` journal、最终 candidate status、`finding_funnel_completed` |
+
+身份字段职责固定如下：`draft_id` 是调查检查点，runtime `candidate_id` 是本次运行的逻辑候选，`finding_id` 是运行时生成/legacy 兼容的 finding 标签，Graph candidate/span 只属于上下文元数据，`evidence_id` 是唯一模型引用，repository revision/snapshot 是版本元数据，`candidate_content_version` 只绑定同一候选的可变内容版本。字段内容改变不能通过重新登记绕过失败；只有完整验证通过才能推进版本。
+
+初次提交缺少 runtime 身份时，反馈明确标记 `initial_submission_required`，不会出现 `<missing-target-0>` 一类可执行占位符。只有编排层先登记候选并启动合法 `RepairTransaction(status=open)` 后，submit schema 才要求 target、版本和非空 repair status。
+
 ## 3. 评测口径
 
 历史 semantic-v2 和已使用的 semantic-v3 行为保持不变。新的 `semantic-v4` 只显式 opt-in：

@@ -368,6 +368,13 @@ class FindingCandidate(BaseModel):
         default="",
         description="Version hash of the candidate content at registration time.",
     )
+    candidate_content_version: str = Field(
+        default="",
+        description=(
+            "Runtime-owned mutable content version used to bind a repair response. "
+            "It is distinct from candidate_id and repository revision."
+        ),
+    )
     issue: ReviewIssue
     claim: str
     evidence_locations: list[str] = Field(default_factory=list)

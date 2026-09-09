@@ -78,6 +78,20 @@ class ContextState(BaseModel):
             "are intentionally excluded."
         ),
     )
+    candidate_registrations: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Runtime-owned candidate identities and content versions used for replay; "
+            "model-authored draft or graph ids are not authoritative here."
+        ),
+    )
+    repair_transactions: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Bounded repair transaction facts, including target versions, executed "
+            "steps, budget, and per-target disposition."
+        ),
+    )
     draft_findings: list[DraftFindingState] = Field(
         default_factory=list,
         description=(

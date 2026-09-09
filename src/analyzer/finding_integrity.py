@@ -18,6 +18,7 @@ from uuid import uuid4
 from src.analyzer.diff_lines import changed_new_lines_by_file
 from src.analyzer.evidence_ledger import EvidenceLedger
 from src.analyzer.evidence_binding import bind_candidate_evidence, bind_issue_candidate_id
+from src.analyzer.finding_delivery import CandidateRegistry, candidate_content_version
 from src.analyzer.finding_contract import canonical_contract_gaps
 from src.analyzer.finding_schema import EvidenceSide, normalize_repo_path
 from src.analyzer.location import LocationParseResult, normalize_location
@@ -92,18 +93,46 @@ def build_candidates(
     report: ReviewReport,
     *,
     iteration: int,
+    registry: CandidateRegistry | None = None,
+    register: bool = True,
 ) -> list[FindingCandidate]:
-    """Build stable risk candidates for the integrity stage."""
+    """Build runtime-registered risk candidates for the integrity stage.
+
+    ``registry`` is the authoritative identity store for orchestrated runs.
+    The optional argument keeps standalone legacy callers source-compatible;
+    those callers still receive a program-generated candidate id.
+    """
 
     candidates: list[FindingCandidate] = []
     seen: set[str] = set()
+    if registry is not None and register:
+        registry.register_report(report, iteration=iteration)
     for source_issue_index, issue in enumerate(report.issues):
         if issue.severity not in _RISK_SEVERITIES:
             continue
-        candidate_id = _runtime_candidate_id(issue, seen)
+        registration = (
+            registry.registration(issue.candidate_id)
+            if registry is not None and issue.candidate_id.strip()
+            else None
+        )
+        if registry is not None and issue.target_candidate_id.strip():
+            # Repair payloads are only materialized after the merge validator
+            # has checked their target.  Treating one as a fresh registration
+            # here would silently make a repair target unbound.
+            candidate_id = issue.candidate_id.strip()
+        else:
+            candidate_id = (
+                registration.candidate_id
+                if registration is not None
+                else _runtime_candidate_id(issue, seen)
+            )
         seen.add(candidate_id)
         if not issue.finding_id:
-            issue.finding_id = "F-" + candidate_id[len("cand_") :].upper()
+            issue.finding_id = (
+                registration.finding_id
+                if registration is not None
+                else "F-" + candidate_id[len("cand_") :].upper()
+            )
         bound_issue = bind_issue_candidate_id(issue, candidate_id)
         issue.candidate_id = candidate_id
         for evidence in issue.all_evidence():
@@ -115,7 +144,18 @@ def build_candidates(
                 logical_identity_hash=_logical_identity_hash(
                     issue, candidate_id=candidate_id
                 ),
-                content_hash=_candidate_content_hash(issue),
+                content_hash=(
+                    registration.candidate_content_version
+                    if registration is not None
+                    and not issue.target_candidate_id.strip()
+                    else _candidate_content_hash(issue)
+                ),
+                candidate_content_version=(
+                    registration.candidate_content_version
+                    if registration is not None
+                    and not issue.target_candidate_id.strip()
+                    else candidate_content_version(issue)
+                ),
                 issue=bound_issue,
                 claim=issue.suggestion.strip(),
                 evidence_locations=(

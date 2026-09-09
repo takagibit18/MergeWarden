@@ -1416,6 +1416,7 @@ class InferenceEngine:
         # budget accounting; exploration still exposes the complete catalog so
         # the model can select an exact id without nearest-span guessing.
         for record in records:
+            evidence_id = str(record.get("evidence_id", "")).strip()
             artifact_id = str(record.get("artifact_id", "")).strip()
             path = str(record.get("path", record.get("file", ""))).strip()
             start = record.get("start_line", record.get("line", ""))
@@ -1425,14 +1426,15 @@ class InferenceEngine:
             ).strip()
             snapshot = str(record.get("snapshot_id", "")).strip()
             revision = str(record.get("revision", "")).strip()
-            if not artifact_id or not path:
+            if not evidence_id or not path:
                 continue
             range_text = f"{path}:{start}"
             if end not in (None, "", start):
                 range_text += f"-{end}"
             lines.append(
-                f"- id={artifact_id} location={range_text} source={source} "
+                f"- evidence_id={evidence_id} location={range_text} source={source} "
                 f"snapshot={snapshot} revision={revision}"
+                + (f" aliases={artifact_id}" if artifact_id and artifact_id != evidence_id else "")
             )
         return Message(role="user", content="\n".join(lines))
 
@@ -1763,30 +1765,31 @@ class InferenceEngine:
         exact_refs = selected_refs | gap_refs
 
         catalog_candidates: list[tuple[int, bool, bool, dict[str, Any], str]] = []
-        reference_to_artifact: dict[str, str] = {}
+        reference_to_evidence: dict[str, str] = {}
         for record in delivered_catalog:
+            evidence_id = str(record.get("evidence_id", "")).strip()
             artifact_id = str(record.get("artifact_id", "")).strip()
             path = str(record.get("path", record.get("file", ""))).strip()
             start = record.get("start_line", record.get("line", ""))
             end = record.get("end_line", start)
-            if not artifact_id or not path:
+            if not evidence_id or not path:
                 continue
             aliases = {
                 str(item).strip()
                 for item in record.get("aliases", [])
                 if str(item).strip()
             }
-            ids = {artifact_id, *aliases}
+            ids = {evidence_id, artifact_id, *aliases}
             normalized_path = normalize_repo_path(path)
             for reference_id in ids:
-                reference_to_artifact[reference_id] = artifact_id
+                reference_to_evidence[reference_id] = evidence_id
             exact_ref = bool(ids & exact_refs)
             path_ref = normalized_path in draft_paths or normalized_path in gap_paths
             # Lower score is higher priority. Only an explicit id/reference is
             # required; a same-file record is optional context and never a
             # substitute for an unresolved or missing exact reference.
             score = 0 if exact_ref else 1 if path_ref else 2
-            catalog_candidates.append((score, exact_ref, path_ref, record, artifact_id))
+            catalog_candidates.append((score, exact_ref, path_ref, record, evidence_id))
 
         catalog_candidates.sort(
             key=lambda item: (item[0], item[3].get("source_type", ""), item[4])
@@ -1806,7 +1809,7 @@ class InferenceEngine:
                 alias_labels = [
                     str(item).strip()
                     for item in record.get("aliases", [])
-                    if str(item).strip() and str(item).strip() != artifact_id
+                    if str(item).strip() and str(item).strip() != evidence_id
                 ]
                 body = str(record.get("content", "") or "").replace("\n", "\\n")
                 if len(body) > 720:
@@ -1814,7 +1817,7 @@ class InferenceEngine:
                 candidates.append(
                     (
                         "catalog_required",
-                        f"- evidence_catalog id={artifact_id}"
+                        f"- evidence_catalog evidence_id={evidence_id}"
                         + (f" aliases={','.join(alias_labels)}" if alias_labels else "")
                         + f" location={location} "
                         f"source={record.get('source_type', '')} "
@@ -1833,7 +1836,7 @@ class InferenceEngine:
                 candidates.append(
                     (
                         "catalog_optional",
-                        f"- optional_evidence_catalog id={artifact_id} "
+                        f"- optional_evidence_catalog evidence_id={evidence_id} "
                         f"location={location} source={record.get('source_type', '')} "
                         f"snapshot={record.get('snapshot_id', '')} "
                         f"revision={record.get('revision', '')}",
@@ -1856,7 +1859,7 @@ class InferenceEngine:
                 candidates.append(
                     (
                         "catalog_optional",
-                        f"- optional_evidence_catalog id={artifact_id} "
+                        f"- optional_evidence_catalog evidence_id={evidence_id} "
                         f"location={location} source={record.get('source_type', '')} "
                         f"snapshot={record.get('snapshot_id', '')} "
                         f"revision={record.get('revision', '')}",
@@ -1870,7 +1873,7 @@ class InferenceEngine:
             if refs
         }
         telemetry["unresolved_required_catalog_refs"] = sorted(
-            reference for reference in exact_refs if reference not in reference_to_artifact
+            reference for reference in exact_refs if reference not in reference_to_evidence
         )
         unresolved_refs = telemetry["unresolved_required_catalog_refs"]
         if unresolved_refs:
@@ -2077,13 +2080,34 @@ class InferenceEngine:
         if not raw_items:
             return None
 
+        if not any(
+            str(item.get("target_candidate_id") or item.get("candidate_id") or "").strip()
+            for item in raw_items
+        ):
+            return Message(
+                role="user",
+                content=(
+                    "initial_submission_feedback (this is not a repair transaction): "
+                    "the runtime has not registered a candidate identity yet. "
+                    "Complete the initial submit_review using the semantic fields and "
+                    "delivered evidence catalog. Do not invent a candidate id, finding "
+                    "id, content version, Graph id, draft id, hash, or repository "
+                    "revision; target_candidate_id and candidate_content_version are "
+                    "not active until the runtime returns an exact repair transaction.\n"
+                    + serialize_json({"gaps": raw_items})
+                ),
+                preserve_on_trim=True,
+            )
+
         protocols: list[tuple[str, str]] = []
         seen_targets: set[str] = set()
         for index, item in enumerate(raw_items):
             target = str(
                 item.get("target_candidate_id") or item.get("candidate_id") or ""
             ).strip()
-            dedupe_target = target or f"<missing-target-{index}>"
+            if not target:
+                continue
+            dedupe_target = target
             if dedupe_target in seen_targets:
                 continue
             seen_targets.add(dedupe_target)

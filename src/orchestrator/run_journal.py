@@ -26,6 +26,10 @@ RunJournalEntryType = Literal[
     "draft_finding",
     "draft_finding_state",
     "length_recovery",
+    "candidate_registration",
+    "evidence_catalog",
+    "repair_transaction",
+    "finding_finalization",
 ]
 LengthRecoveryStatus = Literal["required", "attempted", "succeeded", "failed"]
 
@@ -104,6 +108,45 @@ class LengthRecoveryJournalPayload(BaseModel):
     draft_finding_ids: list[str] = Field(default_factory=list)
     submit_response_id: str = ""
     reason: str = ""
+
+
+class CandidateRegistrationJournalPayload(BaseModel):
+    """Runtime candidate identities and versions persisted for replay."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    iteration: int = Field(default=0, ge=0)
+    registrations: list[dict[str, Any]] = Field(default_factory=list)
+    duplicate_sources: dict[str, list[int]] = Field(default_factory=dict)
+
+
+class EvidenceCatalogJournalPayload(BaseModel):
+    """Exact evidence catalog snapshot available to later integrity checks."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    snapshot_id: str = ""
+    revision: str = ""
+    records: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class RepairTransactionJournalPayload(BaseModel):
+    """One bounded repair transaction and its latest target decisions."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    transaction: dict[str, Any] = Field(default_factory=dict)
+
+
+class FindingFinalizationJournalPayload(BaseModel):
+    """Final candidate dispositions needed to replay publication decisions."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_statuses: dict[str, str] = Field(default_factory=dict)
+    final_published_count: int = Field(default=0, ge=0)
+    finding_run_status: Literal["complete", "incomplete"] = "incomplete"
+    review_outcome: str = ""
 
 
 class DraftFindingStateJournalPayload(BaseModel):
@@ -294,6 +337,10 @@ class RunJournal:
             | DraftFinding
             | DraftFindingStateJournalPayload
             | LengthRecoveryJournalPayload
+            | CandidateRegistrationJournalPayload
+            | EvidenceCatalogJournalPayload
+            | RepairTransactionJournalPayload
+            | FindingFinalizationJournalPayload
         )
         if entry_type == "model_response":
             model = ModelResponseJournalPayload.model_validate(payload)
@@ -303,8 +350,16 @@ class RunJournal:
             model = DraftFinding.model_validate(payload)
         elif entry_type == "draft_finding_state":
             model = DraftFindingStateJournalPayload.model_validate(payload)
-        else:
+        elif entry_type == "length_recovery":
             model = LengthRecoveryJournalPayload.model_validate(payload)
+        elif entry_type == "candidate_registration":
+            model = CandidateRegistrationJournalPayload.model_validate(payload)
+        elif entry_type == "evidence_catalog":
+            model = EvidenceCatalogJournalPayload.model_validate(payload)
+        elif entry_type == "repair_transaction":
+            model = RepairTransactionJournalPayload.model_validate(payload)
+        else:
+            model = FindingFinalizationJournalPayload.model_validate(payload)
         return model.model_dump(mode="json")
 
 

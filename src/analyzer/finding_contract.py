@@ -261,7 +261,7 @@ def normalize_model_finding_payload(
 def _evidence_catalog_by_reference(
     catalog: list[dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
-    """Index only unambiguous exact artifact/alias ids."""
+    """Index only unambiguous exact delivered evidence ids and aliases."""
 
     candidates: dict[str, list[dict[str, Any]]] = {}
     for raw in catalog:
@@ -274,7 +274,10 @@ def _evidence_catalog_by_reference(
             continue
         if bool(raw.get("truncated", False)):
             continue
-        ids = [str(raw.get("artifact_id", "")).strip()]
+        ids = [
+            str(raw.get("evidence_id", "")).strip(),
+            str(raw.get("artifact_id", "")).strip(),
+        ]
         aliases = raw.get("aliases", [])
         if isinstance(aliases, list):
             ids.extend(str(item).strip() for item in aliases)
@@ -296,7 +299,10 @@ def _evidence_catalog_reference_status(
     for raw in catalog:
         if not isinstance(raw, dict):
             continue
-        ids = [str(raw.get("artifact_id", "")).strip()]
+        ids = [
+            str(raw.get("evidence_id", "")).strip(),
+            str(raw.get("artifact_id", "")).strip(),
+        ]
         aliases = raw.get("aliases", [])
         if isinstance(aliases, list):
             ids.extend(str(item).strip() for item in aliases)
@@ -335,6 +341,7 @@ def _evidence_payload_from_catalog_record(
             # non-trusted and prevents binding/identity validation from using
             # it as an artifact.
             "artifact_id": reference,
+            "evidence_id": "",
             "reference_id": reference,
             "resolution_status": resolution_status or "unresolved",
             "retrieval_source": "",
@@ -354,6 +361,7 @@ def _evidence_payload_from_catalog_record(
         )
     return {
         "artifact_id": str(record.get("artifact_id", reference)).strip() or reference,
+        "evidence_id": str(record.get("evidence_id", "")).strip(),
         "reference_id": reference,
         "resolution_status": resolution_status or "resolved",
         "snapshot_id": str(record.get("snapshot_id", "")).strip(),
@@ -389,6 +397,8 @@ def normalize_producer_issue_payload(payload: Any) -> Any:
 def evidence_reference(evidence: EvidenceProvenance) -> str:
     """Return a stable reference that can be compared with a ClaimSupport ref."""
 
+    if evidence.evidence_id:
+        return evidence.evidence_id
     if evidence.context_hash:
         return evidence.context_hash
     if evidence.context_manifest_id:
@@ -598,6 +608,7 @@ def _evidence_reference_options(evidence: EvidenceProvenance) -> set[str]:
     return {
         value
         for value in (
+            evidence.evidence_id,
             evidence.location,
             evidence.context_hash,
             evidence.context_manifest_id,
