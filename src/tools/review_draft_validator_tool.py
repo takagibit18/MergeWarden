@@ -10,7 +10,6 @@ from pydantic import BaseModel, Field
 from src.analyzer.finding_contract import (
     canonical_contract_gaps,
     ModelFindingInput,
-    ModelRepairIssueInput,
     normalize_model_finding_payload,
     normalize_producer_issue_payload,
 )
@@ -128,18 +127,22 @@ class ValidateReviewDraftTool(BaseTool):
         model_issue_schema = _inline_json_schema_refs(
             ModelFindingInput.model_json_schema()
         )
-        repair_issue_schema = _inline_json_schema_refs(
-            ModelRepairIssueInput.model_json_schema()
-        )
         model_issue_schema["additionalProperties"] = False
         properties = model_issue_schema.setdefault("properties", {})
         if isinstance(properties, dict):
             properties.pop("finding_id", None)
-        repair_properties = repair_issue_schema.get("properties", {})
-        if isinstance(properties, dict) and isinstance(repair_properties, dict):
-            for field in ("repair_reason", "repair_patch"):
-                if field in repair_properties:
-                    properties[field] = repair_properties[field]
+        # The validator is an initial model preflight.  It must not expose the
+        # identity-bound repair protocol; repairs use the separate
+        # ``repair_review`` tool after the runtime opens a transaction.
+        if isinstance(properties, dict):
+            for field in (
+                "target_candidate_id",
+                "candidate_content_version",
+                "repair_status",
+                "repair_reason",
+                "repair_patch",
+            ):
+                properties.pop(field, None)
         return ToolSpec(
             name="validate_review_draft",
             description=(
@@ -205,12 +208,10 @@ class ValidateReviewDraftTool(BaseTool):
             if index >= len(issue_results)
             or not issue_results[index]["passes_submit_preflight"]
         ]
-        validated_finding_ids = [
-            str(item.get("finding_id", "")).strip()
-            for item in issue_results
-            if item.get("passes_submit_preflight")
-            and str(item.get("finding_id", "")).strip()
-        ]
+        # Initial preflight is deliberately identity-free.  Any reviewer-local
+        # finding_id supplied through a compatibility payload is ignored until
+        # CandidateRegistry allocates runtime identity after submission.
+        validated_finding_ids: list[str] = []
         unresolved_evidence_gaps = [
             {
                 "original_index": item["original_index"],
@@ -314,6 +315,7 @@ class ValidateReviewDraftTool(BaseTool):
                 issue,
                 strict=issue.is_structured_hypothesis
                 and issue.severity in {Severity.CRITICAL, Severity.WARNING},
+                require_runtime_identity=False,
             )
         passes_contract = not contract_gaps
         passes_submit_preflight = passes_filter and passes_contract

@@ -7,6 +7,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from src.analyzer.context_state import ContextState
+from src.analyzer.finding_contract import ModelRepairResponse
 from src.analyzer.output_formatter import ReviewIssue, ReviewReport
 from src.models.schemas import DraftFindingInput, DraftFindingUpdateInput
 
@@ -305,6 +306,10 @@ class AnalysisPlan(BaseModel):
         default=False,
         description="Whether a truncated response without valid submit needs recovery",
     )
+    repair_response: ModelRepairResponse | None = Field(
+        default=None,
+        description="Patch-only response from the dedicated runtime repair tool.",
+    )
     schema_repair_attempted_count: int = Field(
         default=0,
         ge=0,
@@ -353,7 +358,11 @@ class AnalysisPlan(BaseModel):
     def has_explicit_submit(self) -> bool:
         """Whether the model produced a valid completion action this turn."""
 
-        return self.draft_review is not None or self.draft_debug is not None
+        return (
+            self.draft_review is not None
+            or self.draft_debug is not None
+            or self.repair_response is not None
+        )
 
     @property
     def has_state_action(self) -> bool:

@@ -172,6 +172,44 @@ class ModelRepairIssueInput(BaseModel):
     )
 
 
+class ModelRepairTargetInput(BaseModel):
+    """Model-facing repair item bound to an opaque runtime handle.
+
+    The handle is deliberately not a candidate id or content hash.  The
+    runtime resolves it inside the currently open transaction and checks the
+    transaction's base version/context before applying the patch.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    target_handle: str = Field(
+        ...,
+        min_length=1,
+        description="Opaque target handle from the active repair transaction.",
+    )
+    repair_status: Literal["repaired", "unchanged", "incomplete", "deferred"]
+    repair_reason: str = ""
+    repair_patch: FindingRepairPatch | None = Field(
+        default=None,
+        description=(
+            "Only changed semantic fields. Omitted fields inherit the runtime-owned "
+            "candidate; use delete_fields for explicit deletion."
+        ),
+    )
+
+
+class ModelRepairResponse(BaseModel):
+    """Patch-only response returned by the dedicated repair tool."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    repairs: list[ModelRepairTargetInput] = Field(
+        ...,
+        min_length=1,
+        description="One or more opaque target dispositions or semantic patches.",
+    )
+
+
 def is_structured_issue_payload(payload: Any) -> bool:
     """Tell producer boundaries whether a payload uses the v2 field family."""
 
@@ -195,7 +233,9 @@ def is_model_repair_payload(payload: Any) -> bool:
 
     if not isinstance(payload, dict):
         return False
-    target = str(payload.get("target_candidate_id", "") or "").strip()
+    target = str(
+        payload.get("target_candidate_id", payload.get("target_handle", "")) or ""
+    ).strip()
     return bool(target and ("repair_status" in payload or "repair_patch" in payload))
 
 
@@ -240,6 +280,42 @@ def validate_model_repair_payload(payload: Any) -> str:
         return (
             "repair_patch is allowed only when repair_status is repaired; "
             f"got {model_input.repair_status}"
+        )
+    return ""
+
+
+def validate_model_repair_target_payload(payload: Any) -> str:
+    """Validate one dedicated repair item without legacy identity fields."""
+
+    if not isinstance(payload, dict):
+        return f"repair item must be an object, got {type(payload).__name__}"
+    try:
+        item = ModelRepairTargetInput.model_validate(payload)
+    except ValidationError as exc:
+        return str(exc)
+    patch = item.repair_patch
+    if item.repair_status == "repaired":
+        if patch is None:
+            return "repaired repair_status requires a non-empty repair_patch"
+        if not (
+            patch.model_fields_set - {"delete_fields"}
+            or patch.delete_fields
+        ):
+            return "repaired repair_status requires a non-empty repair_patch"
+        null_fields = sorted(
+            field
+            for field in patch.model_fields_set
+            if field != "delete_fields" and getattr(patch, field) is None
+        )
+        if null_fields:
+            return (
+                "null is not an omission or deletion for repair fields: "
+                + ", ".join(null_fields)
+            )
+    elif patch is not None:
+        return (
+            "repair_patch is allowed only when repair_status is repaired; "
+            f"got {item.repair_status}"
         )
     return ""
 
@@ -396,6 +472,17 @@ def normalize_model_finding_payload(
             }
         else:
             normalized = model_input.model_dump(mode="json")
+            # These fields remain on the compatibility Pydantic model for old
+            # callers, but the initial wire schema does not expose them and a
+            # model-supplied value must never open or retarget a repair.
+            for runtime_field in (
+                "target_candidate_id",
+                "repair_status",
+                "candidate_content_version",
+                "repair_reason",
+                "repair_patch",
+            ):
+                normalized.pop(runtime_field, None)
         normalized["schema_version"] = FINDING_SCHEMA_VERSION
     else:
         # Old structured producers may still send both fields.  Keep the
@@ -646,6 +733,7 @@ def canonical_contract_gaps(
     issue: ReviewIssue,
     *,
     strict: bool = False,
+    require_runtime_identity: bool = True,
 ) -> list[FindingContractGap]:
     """Return structural gaps without silently upgrading legacy findings.
 
@@ -692,7 +780,7 @@ def canonical_contract_gaps(
                 )
             )
     if strict:
-        if not issue.finding_id.strip():
+        if require_runtime_identity and not issue.finding_id.strip():
             gaps.append(
                 FindingContractGap(
                     "finding_contract_incomplete",

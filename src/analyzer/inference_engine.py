@@ -18,8 +18,10 @@ from src.analyzer.event_log import EventType
 from src.analyzer.finding_contract import (
     is_model_repair_payload,
     issue_supports,
+    ModelRepairResponse,
     normalize_model_finding_payload,
     validate_model_repair_payload,
+    validate_model_repair_target_payload,
 )
 from src.analyzer.diff_lines import ParsedDiffHunk, parse_unified_diff_hunks
 from src.analyzer.finding_schema import normalize_repo_path
@@ -29,6 +31,7 @@ from src.analyzer.review_skills import SkillSelection
 from src.analyzer.prompts import (
     FINALIZE_REVIEW_NOTICE,
     FINALIZE_DEBUG_NOTICE,
+    REPAIR_REVIEW_NOTICE,
     USER_PREFIX_REVIEW,
     build_debug_messages,
     build_debug_messages_async,
@@ -138,6 +141,8 @@ class InferenceEngine:
         skill_telemetry: dict[str, Any] | None = None,
         repair_attempt_budget: int | None = None,
         allow_exploration: bool = False,
+        repair_mode: bool = False,
+        submit_tool_name: str | None = None,
     ) -> tuple[AnalysisPlan, TokenUsage]:
         file_contents = file_contents or {}
         settings = get_settings()
@@ -157,7 +162,13 @@ class InferenceEngine:
         )
         # A final/near-limit call is submit-only even when an older caller did
         # not pass the newer explicit stage label.
-        call_stage = "submit_only" if submit_only else (stage or inferred_stage)
+        call_stage = (
+            "repair"
+            if repair_mode
+            else "submit_only"
+            if submit_only
+            else (stage or inferred_stage)
+        )
         requested_budget = (
             prompt_input_token_budget
             if prompt_input_token_budget is not None
@@ -341,7 +352,9 @@ class InferenceEngine:
                 messages.append(failure_guidance)
         if submit_only:
             notice = (
-                FINALIZE_REVIEW_NOTICE
+                REPAIR_REVIEW_NOTICE
+                if repair_mode and isinstance(request, ReviewRequest)
+                else FINALIZE_REVIEW_NOTICE
                 if isinstance(request, ReviewRequest)
                 else FINALIZE_DEBUG_NOTICE
             )
@@ -359,7 +372,14 @@ class InferenceEngine:
             )
 
         tools = (
-            self._submit_only_tools(tool_schemas or [], request)
+            self._submit_only_tools(
+                tool_schemas or [],
+                request,
+                expected_name=(
+                    submit_tool_name
+                    or ("repair_review" if repair_mode else None)
+                ),
+            )
             if submit_only
             else tool_schemas or []
         )
@@ -383,7 +403,12 @@ class InferenceEngine:
                 config.model = request.model_name
         policy = ModelCallPolicy(
             thinking="off" if submit_only else "high",
-            forced_tool=self._submit_tool_name(request) if submit_only else None,
+            forced_tool=(
+                submit_tool_name
+                or ("repair_review" if repair_mode else self._submit_tool_name(request))
+            )
+            if submit_only
+            else None,
         )
         # Once deterministic validation has passed, the submit-only call is a
         # fresh, bounded handoff.  Replaying every prior assistant/tool turn
@@ -552,6 +577,7 @@ class InferenceEngine:
             request,
             force_submit=submit_only,
             evidence_catalog=state.evidence_ledger,
+            repair_mode=repair_mode,
         )
         self._complete_invalid_draft_tool_calls(response.tool_calls, parse_meta)
         format_recovery_raw_payload = parse_meta.get("format_recovery_raw_payload")
@@ -565,6 +591,7 @@ class InferenceEngine:
         parse_meta["thinking_disabled"] = policy.thinking == "off"
         if (
             isinstance(request, ReviewRequest)
+            and not repair_mode
             and plan.draft_review is None
             and response.finish_reason != "length"
             and parse_meta.get("submit_review_seen")
@@ -958,8 +985,10 @@ class InferenceEngine:
     def _submit_only_tools(
         tool_schemas: list[dict[str, Any]],
         request: ReviewRequest | DebugRequest,
+        *,
+        expected_name: str | None = None,
     ) -> list[dict[str, Any]]:
-        expected = (
+        expected = expected_name or (
             "submit_review" if isinstance(request, ReviewRequest) else "submit_debug"
         )
         return [
@@ -982,11 +1011,13 @@ class InferenceEngine:
         *,
         force_submit: bool = False,
         evidence_catalog: list[dict[str, Any]] | None = None,
+        repair_mode: bool = False,
     ) -> tuple[AnalysisPlan, dict[str, Any]]:
         tool_calls: list[dict[str, Any]] = []
         draft_finding_calls: list[DraftFindingInput] = []
         draft_finding_updates: list[DraftFindingUpdateInput] = []
         draft_review: ReviewReport | None = None
+        repair_response: ModelRepairResponse | None = None
         draft_debug: DebugResponse | None = None
         parse_meta: dict[str, Any] = {
             "submit_review_seen": False,
@@ -994,6 +1025,8 @@ class InferenceEngine:
             "submit_review_validation_error": "",
             "submit_review_arguments_normalized": False,
             "submit_debug_validation_error": "",
+            "repair_review_seen": False,
+            "repair_review_validation_error": "",
             "draft_finding_validation_errors": [],
             "draft_finding_update_validation_errors": [],
             "valid_draft_call_ids": [],
@@ -1068,6 +1101,12 @@ class InferenceEngine:
                 continue
             if name == "submit_review":
                 parse_meta["submit_review_seen"] = True
+                if repair_mode:
+                    parse_meta["repair_review_validation_error"] = (
+                        "repair transaction requires the dedicated repair_review tool; "
+                        "full submit_review payloads are forbidden"
+                    )
+                    continue
                 if argument_error or not isinstance(payload, dict):
                     error = (
                         argument_error
@@ -1118,6 +1157,33 @@ class InferenceEngine:
                         parse_meta["format_recovery_validation_error"] = str(exc)
                     continue
                 continue
+            if name == "repair_review":
+                parse_meta["repair_review_seen"] = True
+                if argument_error or not isinstance(payload, dict):
+                    error = argument_error or (
+                        "Invalid repair_review arguments type: "
+                        f"{type(payload).__name__}"
+                    )
+                    parse_meta["repair_review_validation_error"] = error
+                    continue
+                if not repair_mode:
+                    parse_meta["repair_review_validation_error"] = (
+                        "repair_review is only valid inside an active repair transaction"
+                    )
+                    continue
+                try:
+                    repairs = payload.get("repairs")
+                    if not isinstance(repairs, list):
+                        raise ValueError("repair_review requires a repairs list")
+                    for index, item in enumerate(repairs):
+                        error = validate_model_repair_target_payload(item)
+                        if error:
+                            raise ValueError(f"repairs[{index}]: {error}")
+                    repair_response = ModelRepairResponse.model_validate(payload)
+                except (ValidationError, ValueError) as exc:
+                    parse_meta["repair_review_validation_error"] = str(exc)
+                    logger.warning("Invalid repair_review payload ignored: %s", exc)
+                continue
             if name == "submit_debug":
                 parse_meta["submit_debug_seen"] = True
                 if argument_error or not isinstance(payload, dict):
@@ -1157,6 +1223,7 @@ class InferenceEngine:
                     draft_finding_calls=draft_finding_calls,
                     draft_finding_updates=draft_finding_updates,
                     draft_review=draft_review,
+                    repair_response=repair_response,
                 ),
                 parse_meta,
             )
@@ -1165,6 +1232,7 @@ class InferenceEngine:
                 needs_tools=bool(tool_calls),
                 tool_calls=tool_calls,
                 draft_debug=draft_debug,
+                repair_response=repair_response,
             ),
             parse_meta,
         )
@@ -2144,6 +2212,75 @@ class InferenceEngine:
         ]
         if not raw_items:
             return None
+
+        opaque_handle_items = [
+            item
+            for item in raw_items
+            if str(item.get("target_handle", "") or "").strip()
+        ]
+        if opaque_handle_items:
+            opaque_protocols: list[tuple[str, str]] = []
+            seen_handles: set[str] = set()
+            for item in opaque_handle_items:
+                handle = str(item.get("target_handle", "") or "").strip()
+                if not handle or handle in seen_handles:
+                    continue
+                seen_handles.add(handle)
+                gaps = item.get("gaps", [])
+                action_lines = [
+                    str(gap.get("required_action", "")).strip()
+                    for gap in gaps
+                    if isinstance(gap, dict)
+                    and str(gap.get("required_action", "")).strip()
+                ]
+                action = " ".join(dict.fromkeys(action_lines)) or (
+                    "Preserve the runtime-owned finding if this target cannot be repaired."
+                )
+                protocol = "\n".join(
+                    [
+                        "opaque_repair_target:",
+                        f"target_handle={handle}",
+                        f"status={str(item.get('status', '')).strip()}",
+                        "candidate_content="
+                        + serialize_json(item.get("candidate_content", {})),
+                        "gaps=" + serialize_json(gaps),
+                        "required_action=" + action,
+                    ]
+                )
+                opaque_protocols.append((handle, protocol))
+            if not opaque_protocols:
+                return None
+            prefix = (
+                "repair_review_feedback (this is not completion): address only the "
+                "listed opaque target_handle values, then call repair_review. Each "
+                "item must include repair_status. For repaired, include only the "
+                "semantic fields that changed under repair_patch; omitted fields "
+                "inherit the runtime-owned candidate. Use delete_fields for an "
+                "explicit deletion and never use null to mean omission. Do not "
+                "emit candidate ids, finding ids, content versions, snapshots, "
+                "hashes, or a full finding object.\n"
+            )
+            builder = ContextBuilder()
+            opaque_selected: list[str] = []
+            opaque_deferred: list[str] = []
+            limit = None if token_budget is None else max(1, int(token_budget))
+            for handle, protocol in opaque_protocols:
+                proposed = prefix + "\n".join([*opaque_selected, protocol])
+                if opaque_selected and limit is not None and builder.estimate_tokens(proposed) > limit:
+                    opaque_deferred.append(handle)
+                    continue
+                opaque_selected.append(protocol)
+            if opaque_deferred:
+                opaque_selected.append(
+                    "deferred_target_handles=" + ",".join(opaque_deferred) + "\n"
+                    "These targets were not included in this model-facing repair "
+                    "message; the runtime preserves their original findings."
+                )
+            return Message(
+                role="user",
+                content=prefix + "\n".join(opaque_selected),
+                preserve_on_trim=True,
+            )
 
         if not any(
             str(item.get("target_candidate_id") or item.get("candidate_id") or "").strip()

@@ -18,7 +18,11 @@ from uuid import uuid4
 from src.analyzer.diff_lines import changed_new_lines_by_file
 from src.analyzer.evidence_ledger import EvidenceLedger
 from src.analyzer.evidence_binding import bind_candidate_evidence, bind_issue_candidate_id
-from src.analyzer.finding_delivery import CandidateRegistry, candidate_content_version
+from src.analyzer.finding_delivery import (
+    CandidateRegistry,
+    candidate_content_version,
+    evidence_context_digest,
+)
 from src.analyzer.finding_contract import canonical_contract_gaps
 from src.analyzer.finding_schema import EvidenceSide, normalize_repo_path
 from src.analyzer.location import LocationParseResult, normalize_location
@@ -208,6 +212,7 @@ def _candidate_content_hash(issue: ReviewIssue) -> str:
     payload = issue.model_dump(mode="json")
     for key in (
         "candidate_id",
+        "finding_id",
         "target_candidate_id",
         "repair_status",
         "candidate_content_version",
@@ -286,6 +291,8 @@ class FindingIntegrityResult:
     candidate_id: str
     passed: bool
     failures: tuple[IntegrityFailure, ...] = ()
+    content_version: str = ""
+    evidence_context_digest: str = ""
 
     @property
     def status(self) -> Literal["verified", "needs_repair", "invalid"]:
@@ -311,6 +318,7 @@ class IntegrityGuardResult:
 
     results: tuple[FindingIntegrityResult, ...] = ()
     bound_candidates: tuple[FindingCandidate, ...] = ()
+    evidence_context_digest: str = ""
 
     @property
     def checked_count(self) -> int:
@@ -394,6 +402,12 @@ class FindingIntegrityGuard:
         if not candidates:
             return IntegrityGuardResult()
 
+        validation_context_digest = evidence_context_digest(
+            evidence_ledger.to_payload() if evidence_ledger is not None else [],
+            snapshot_id=snapshot_id,
+            revision=revision,
+        )
+
         evidence = tool_evidence or []
         manifests = context_manifests or []
         binding_failures = {
@@ -451,6 +465,7 @@ class FindingIntegrityGuard:
                     *binding_failures.get(candidate.candidate_id, ()),
                     *preparation_failures.get(candidate.candidate_id, ()),
                 ),
+                validation_context_digest=validation_context_digest,
             )
             for candidate in prepared_candidates
         )
@@ -487,6 +502,7 @@ class FindingIntegrityGuard:
         return IntegrityGuardResult(
             results=results,
             bound_candidates=finalized_candidates,
+            evidence_context_digest=validation_context_digest,
         )
 
     def _prepare_candidate_evidence(
@@ -743,6 +759,7 @@ class FindingIntegrityGuard:
         context: dict[str, Any] | None,
         evidence_ledger: EvidenceLedger | None,
         initial_failures: tuple[IntegrityFailure, ...],
+        validation_context_digest: str = "",
     ) -> FindingIntegrityResult:
         issue = candidate.issue
         failures: list[IntegrityFailure] = list(initial_failures)
@@ -764,7 +781,13 @@ class FindingIntegrityGuard:
                     field="issue",
                 )
             )
-            return FindingIntegrityResult(candidate_id, False, tuple(failures))
+            return FindingIntegrityResult(
+                candidate_id,
+                False,
+                tuple(failures),
+                content_version=candidate.candidate_content_version,
+                evidence_context_digest=validation_context_digest,
+            )
 
         for gap in canonical_contract_gaps(
             issue,
@@ -941,7 +964,13 @@ class FindingIntegrityGuard:
                 )
 
         unique_failures = tuple(dict.fromkeys(failures))
-        return FindingIntegrityResult(candidate_id, not unique_failures, unique_failures)
+        return FindingIntegrityResult(
+            candidate_id,
+            not unique_failures,
+            unique_failures,
+            content_version=candidate.candidate_content_version,
+            evidence_context_digest=validation_context_digest,
+        )
 
     @staticmethod
     def _candidate_binding_failures(

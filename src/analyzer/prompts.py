@@ -45,7 +45,8 @@ REVIEW_SEVERITY_CALIBRATION_GUIDANCE = (
 
 SYSTEM_PROMPT_REVIEW = (
     "You are a senior code reviewer. Analyze the provided diff/files and return structured, "
-    "actionable findings. The final answer must be submitted via the submit_review tool. "
+    "actionable findings. Initial/final findings are submitted via submit_review; an "
+    "active runtime repair transaction uses the separate repair_review tool. "
     "Use only these severity values: critical, warning, info, style. "
     "Each issue is a structured finding hypothesis. The current model-input contract "
     "requires severity, one primary_anchor, evidence, suggestion, and confidence; "
@@ -252,6 +253,16 @@ FINALIZE_REVIEW_NOTICE = (
     "If uncertain, return whatever partial findings are supported by what was already read; "
     "an empty issues list is acceptable with an honest summary. "
     + REVIEW_SEVERITY_CALIBRATION_GUIDANCE
+)
+REPAIR_REVIEW_NOTICE = (
+    "RUNTIME REPAIR CALL — this is a bounded patch transaction, not a new review. "
+    "You MUST call repair_review as your FIRST and ONLY action. Do not call submit_review, "
+    "do not return summary/issues, and do not emit prose before the tool call. Address "
+    "only the opaque target_handle values in the active transaction. For repaired targets, "
+    "return a non-empty repair_patch containing only changed semantic fields; omitted fields "
+    "are preserved by the runtime. Return unchanged, incomplete, or deferred with a reason "
+    "when the target cannot be repaired. Never emit candidate ids, finding ids, content "
+    "versions, snapshots, hashes, or guessed paths."
 )
 FINALIZE_DEBUG_NOTICE = (
     "FINAL CALL — this is your last opportunity to respond. You MUST call submit_debug "

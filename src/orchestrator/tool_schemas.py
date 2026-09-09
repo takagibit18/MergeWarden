@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from src.analyzer.finding_contract import ModelFindingInput, ModelRepairIssueInput
+from src.analyzer.finding_contract import (
+    ModelFindingInput,
+    ModelRepairIssueInput,
+    ModelRepairResponse,
+)
 from src.models.schemas import DraftFindingInput, DraftFindingUpdateInput
 from src.tools.base import ToolSpec
 
@@ -104,6 +108,38 @@ def build_model_submit_tool_schemas(*, repair: bool = False) -> list[dict[str, A
     """Return the current semantic model-input submit contract."""
 
     return build_submit_tool_schemas(model_input=True, repair=repair)
+
+
+def build_repair_tool_schemas() -> list[dict[str, Any]]:
+    """Return the dedicated patch-only repair interface.
+
+    This is intentionally a different tool from ``submit_review``.  Keeping
+    the wire envelopes separate prevents a repair call from being interpreted
+    as a fresh finding report or being format-recovered into one.
+    """
+
+    response_schema = _llm_facing_schema(
+        _inline_json_schema_refs(ModelRepairResponse.model_json_schema())
+    )
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "repair_review",
+                "description": (
+                    "Repair only the exact opaque targets listed in the active "
+                    "runtime transaction. Return one item per target you address. "
+                    "This is not a new finding submission: do not include summary, "
+                    "issues, finding ids, candidate ids, content versions, paths, "
+                    "snapshots, hashes, or full finding objects. For repaired, put "
+                    "only changed semantic fields in repair_patch; omitted fields "
+                    "are preserved. Use delete_fields for explicit deletion and "
+                    "never use null to mean omission."
+                ),
+                "parameters": response_schema,
+            },
+        }
+    ]
 
 
 def _build_model_submit_tool_schemas(*, repair: bool = False) -> list[dict[str, Any]]:

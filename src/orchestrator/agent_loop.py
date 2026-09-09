@@ -29,10 +29,13 @@ from src.analyzer.finding_delivery import (
     CandidateRegistry,
     RepairTransaction,
     candidate_content_version,
+    evidence_context_digest,
 )
 from src.analyzer.finding_contract import (
     canonical_contract_gaps,
+    issue_supports,
     normalize_model_finding_payload,
+    normalize_model_repair_payload,
 )
 from src.analyzer.finding_schema import SourceAnchor
 from src.analyzer.inference_engine import InferenceEngine
@@ -87,6 +90,7 @@ from src.orchestrator.review_workflow import ReviewWorkflowTracker
 from src.orchestrator.tool_schemas import (
     build_draft_finding_tool_schema,
     build_draft_finding_update_tool_schema,
+    build_repair_tool_schemas,
     build_submit_tool_schemas,
     build_tool_schemas,
 )
@@ -633,6 +637,13 @@ class AgentOrchestrator:
             issues=output_issues,
             schema_version=submitted_report.schema_version,
         )
+        validation_context = str(
+            getattr(guard_result, "evidence_context_digest", "")
+        ).strip() or evidence_context_digest(
+            state.evidence_ledger,
+            snapshot_id=self._evidence_snapshot_id,
+            revision=self._evidence_revision,
+        )
         incomplete_code_set = {
             failure.code
             for failures in guard_result.failures.values()
@@ -671,6 +682,21 @@ class AgentOrchestrator:
             response.finding_run_status = "incomplete"
             response.incomplete_reasons = incomplete_codes
         for result in guard_result.results:
+            if result.status == "verified":
+                candidate = next(
+                    (
+                        item
+                        for item in guard_result.bound_candidates
+                        if item.candidate_id == result.candidate_id
+                    ),
+                    None,
+                )
+                if candidate is not None:
+                    self._candidate_registry.commit_verified_version(
+                        result.candidate_id,
+                        candidate.issue,
+                        evidence_context_digest=validation_context,
+                    )
             self._candidate_registry.mark_status(result.candidate_id, result.status)  # type: ignore[arg-type]
         state.candidate_registrations = self._candidate_registry.snapshot()
         self._persist_final_candidate_states(
@@ -705,6 +731,8 @@ class AgentOrchestrator:
         self,
         results: list[Any],
         gaps: list[dict[str, Any]],
+        *,
+        evidence_catalog: list[dict[str, Any]] | None = None,
     ) -> RepairTransaction:
         """Build a repair transaction without consuming budget yet."""
 
@@ -713,15 +741,20 @@ class AgentOrchestrator:
             for result in results
             if str(getattr(result, "candidate_id", "")).strip()
         ]
+        gaps_by_candidate = {
+            str(gap.get("candidate_id", "")).strip(): gap
+            for gap in gaps
+            if str(gap.get("candidate_id", "")).strip()
+        }
         gap_codes = {
             candidate_id: sorted(
                 {
                     str(item.get("code", "")).strip()
-                    for item in gap.get("gaps", [])
+                    for item in gaps_by_candidate.get(candidate_id, {}).get("gaps", [])
                     if isinstance(item, dict) and str(item.get("code", "")).strip()
                 }
             )
-            for candidate_id, gap in zip(candidate_ids, gaps, strict=False)
+            for candidate_id in candidate_ids
         }
         base_versions = {
             str(item.get("candidate_id", "")).strip(): (
@@ -737,6 +770,16 @@ class AgentOrchestrator:
             for item in gaps
             if str(item.get("candidate_id", "")).strip()
         }
+        target_handles = {
+            candidate_id: "repair_target_" + uuid4().hex[:16]
+            for candidate_id in candidate_ids
+        }
+        # The model sees handle -> no runtime id mapping.  The runtime keeps
+        # the inverse in the transaction for exact routing.
+        model_handles = {
+            handle: candidate_id
+            for candidate_id, handle in target_handles.items()
+        }
         source_gap = any(
             failure_class == "source_gap"
             for result in results
@@ -750,7 +793,17 @@ class AgentOrchestrator:
             required_steps.insert(0, "source_exploration")
         return RepairTransaction(
             candidate_ids=candidate_ids,
+            target_handles=model_handles,
             base_versions=base_versions,
+            base_snapshot_id=self._evidence_snapshot_id,
+            base_revision=self._evidence_revision,
+            base_evidence_context_digest=evidence_context_digest(
+                evidence_catalog
+                if evidence_catalog is not None
+                else self._live_evidence_catalog,
+                snapshot_id=self._evidence_snapshot_id,
+                revision=self._evidence_revision,
+            ),
             gap_codes=gap_codes,
             required_steps=required_steps,
             token_budget=max(
@@ -762,6 +815,86 @@ class AgentOrchestrator:
                 * min(self._settings.model_request_timeout_seconds, 30.0)
             ),
         )
+
+    @staticmethod
+    def _model_safe_candidate_content(issue: Any) -> dict[str, Any]:
+        """Expose only semantic repair context, never runtime/provenance ids."""
+
+        if not isinstance(issue, ReviewIssue):
+            return {}
+        payload = issue.model_dump(mode="json")
+        for field in (
+            "candidate_id",
+            "target_candidate_id",
+            "repair_status",
+            "candidate_content_version",
+            "repair_reason",
+            "repair_patch",
+            "finding_id",
+            "root_cause_id",
+            "integrity_status",
+            "context_manifest_id",
+            "context_hash",
+        ):
+            payload.pop(field, None)
+        for field in (
+            "cause_evidence",
+            "contract_evidence",
+            "trigger_evidence",
+            "impact_evidence",
+        ):
+            items = payload.get(field)
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                for key in (
+                    "candidate_id",
+                    "artifact_id",
+                    "snapshot_id",
+                    "revision",
+                    "context_manifest_id",
+                    "retrieval_source",
+                    "context_hash",
+                ):
+                    item.pop(key, None)
+        return payload
+
+    @classmethod
+    def _model_safe_repair_gap(
+        cls,
+        gap: dict[str, Any],
+        *,
+        target_handle: str,
+    ) -> dict[str, Any]:
+        """Convert runtime gap evidence into the model-facing repair envelope."""
+
+        safe = {
+            "target_handle": target_handle,
+            "status": str(gap.get("status", "")),
+            "candidate_content": cls._model_safe_candidate_content(
+                ReviewIssue.model_validate(gap["original_contents"])
+                if isinstance(gap.get("original_contents"), dict)
+                else None
+            ),
+            "gaps": gap.get("gaps", []),
+        }
+        # Failure details contain source locations needed to choose an existing
+        # delivered catalog entry, but never runtime target/version metadata.
+        return safe
+
+    @staticmethod
+    def _model_safe_transaction(transaction: RepairTransaction) -> dict[str, Any]:
+        """Return transaction facts safe to place in a model prompt."""
+
+        return {
+            "transaction_id": transaction.transaction_id,
+            "target_handles": sorted(transaction.target_handles),
+            "required_steps": list(transaction.required_steps),
+            "executed_steps": list(transaction.executed_steps),
+            "status": transaction.status,
+        }
 
     def _open_repair_transaction(
         self,
@@ -1116,26 +1249,51 @@ class AgentOrchestrator:
             )
             for result in needs
         ]
-        transaction = self._build_repair_transaction(needs, gaps)
+        transaction = self._build_repair_transaction(
+            needs,
+            gaps,
+            evidence_catalog=state.evidence_ledger,
+        )
+        model_gaps = [
+            self._model_safe_repair_gap(
+                gap,
+                target_handle=next(
+                    (
+                        handle
+                        for handle, candidate_id in transaction.target_handles.items()
+                        if candidate_id == str(gap.get("candidate_id", "")).strip()
+                    ),
+                    "",
+                ),
+            )
+            for gap in gaps
+        ]
         self._last_validator_result = {
             "validator_passed": False,
             "submit_allowed": False,
-            "unresolved_evidence_gaps": gaps,
-            "rejected_candidates": invalid_gaps,
+            "unresolved_evidence_gaps": model_gaps,
+            "rejected_candidates": [
+                self._model_safe_repair_gap(
+                    gap,
+                    target_handle="",
+                )
+                for gap in invalid_gaps
+            ],
             "repair_instruction": (
                 "Repair only the listed candidates. Preserve every candidate that "
                 "already passed. Fill each missing role with a real delivered-source "
                 "reference; never invent evidence, ids, hashes, or locations. "
-                "For every repaired issue set target_candidate_id to exactly one "
-                "target_candidate_id from the feedback. Preserve each target's original "
+                "For every repaired issue set target_handle to exactly one opaque "
+                "target_handle from the feedback. Preserve each target's original "
                 "contents unless repairing that same target. Do not use finding_id, "
-                "text, location, position, or a one-candidate assumption as a fallback. "
+                "candidate id, content version, text, location, position, or a one-candidate "
+                "assumption as a fallback. "
                 "If a target cannot be repaired, return that finding unchanged instead "
                 "of omitting it. Source evidence gaps may request one targeted read "
                 "or symbol lookup; after it returns, submit again and let validation "
                 "decide whether the candidate is repaired."
             ),
-            "repair_transaction": transaction.model_dump(mode="json"),
+            "repair_transaction": self._model_safe_transaction(transaction),
         }
         source_gap_present = any(
             classify_integrity_failure(failure) == "source_gap"
@@ -1172,8 +1330,8 @@ class AgentOrchestrator:
             )
             return response
         self._open_repair_transaction(transaction, state=state)
-        self._last_validator_result["repair_transaction"] = transaction.model_dump(
-            mode="json"
+        self._last_validator_result["repair_transaction"] = self._model_safe_transaction(
+            transaction
         )
         self._record_repair_transaction_step("preflight")
         self._record_event(
@@ -1214,6 +1372,23 @@ class AgentOrchestrator:
             )
             self._observe_workflow_tools(exploration_plan, repair_results)
             self._refresh_evidence_ledger(state)
+            # Source exploration intentionally advances the delivered evidence
+            # snapshot. Rebind the still-open transaction at this explicit
+            # second preflight; otherwise every legitimate source-gap repair
+            # would be rejected as a stale context while an old candidate
+            # version remains safely unchanged.
+            transaction.base_snapshot_id = self._evidence_snapshot_id
+            transaction.base_revision = self._evidence_revision
+            transaction.base_evidence_context_digest = evidence_context_digest(
+                state.evidence_ledger,
+                snapshot_id=self._evidence_snapshot_id,
+                revision=self._evidence_revision,
+            )
+            transaction.record_step("preflight_refresh")
+            self._persist_repair_transaction(transaction, state=state)
+            self._last_validator_result["repair_transaction"] = (
+                self._model_safe_transaction(transaction)
+            )
             submit_capacity = self._repair_sequence_capacity(
                 1,
                 transaction_scoped=True,
@@ -1258,6 +1433,7 @@ class AgentOrchestrator:
                 request,
                 tool_specs=[],
                 force_submit=True,
+                repair_mode=True,
             )
             self._record_repair_model_call("submit")
             self._account_latest_model_usage()
@@ -1270,12 +1446,13 @@ class AgentOrchestrator:
                 request,
                 tool_specs=[],
                 force_submit=True,
+                repair_mode=True,
             )
             self._record_repair_model_call("submit")
             self._account_latest_model_usage()
             self._observe_review_submission(repair_plan)
             self._observe_incomplete_plan(repair_plan, state)
-        if repair_plan.draft_review is None:
+        if repair_plan.repair_response is None:
             self._record_event(
                 EventType.DECISION,
                 "finding_repair",
@@ -1288,7 +1465,7 @@ class AgentOrchestrator:
                 },
             )
             return response
-        if not repair_plan.draft_review.issues:
+        if not repair_plan.repair_response.repairs:
             # An empty repair response is not evidence that any target was
             # repaired. Preserve the original candidates for the full guard.
             self._add_incomplete_reason(state, "empty_repair_submission")
@@ -1306,11 +1483,15 @@ class AgentOrchestrator:
             )
             return response
         merge_diagnostics: list[dict[str, Any]] = []
-        merged = self._merge_repaired_report(
+        merged = self._merge_repair_response(
             submitted_report,
-            repair_plan.draft_review,
+            repair_plan.repair_response,
             preview,
+            transaction=transaction,
             registry=self._candidate_registry,
+            evidence_catalog=state.evidence_ledger,
+            snapshot_id=self._evidence_snapshot_id,
+            revision=self._evidence_revision,
             diagnostics=merge_diagnostics,
         )
         if merge_diagnostics:
@@ -1435,6 +1616,288 @@ class AgentOrchestrator:
             },
         )
         return response
+
+    @staticmethod
+    def _merge_repair_response(
+        original: ReviewReport,
+        repair_response: Any,
+        preview: Any,
+        *,
+        transaction: RepairTransaction,
+        registry: CandidateRegistry,
+        evidence_catalog: list[dict[str, Any]] | None = None,
+        snapshot_id: str = "",
+        revision: str = "",
+        diagnostics: list[dict[str, Any]] | None = None,
+    ) -> ReviewReport:
+        """Apply one opaque-handle repair response atomically.
+
+        No position, finding text, candidate id, or model-supplied version is
+        used for routing.  The transaction resolves the handle, verifies the
+        current base version/context, and only then materializes the explicit
+        semantic patch.  The returned report is a runtime-derived view.
+        """
+
+        def add(code: str, **payload: Any) -> None:
+            if diagnostics is not None:
+                diagnostics.append({"code": code, **payload})
+
+        if transaction.status != "open":
+            add(
+                "repair_transaction_not_open",
+                message="The repair transaction is no longer open; no patch was applied.",
+            )
+            return original
+
+        current_context = evidence_context_digest(
+            evidence_catalog or [], snapshot_id=snapshot_id, revision=revision
+        )
+        if (
+            transaction.base_evidence_context_digest
+            and current_context != transaction.base_evidence_context_digest
+        ):
+            add(
+                "repair_transaction_context_stale",
+                message=(
+                    "The evidence snapshot changed after preflight; the repair "
+                    "response was rejected without applying any target patch."
+                ),
+                expected_context=transaction.base_evidence_context_digest,
+                actual_context=current_context,
+            )
+            return original
+
+        repairable_candidates = {
+            candidate.source_issue_index: candidate
+            for candidate, result in zip(
+                preview.bound_candidates, preview.results, strict=False
+            )
+            if result.status == "needs_repair"
+        }
+        target_indexes = {
+            candidate.candidate_id: index
+            for index, candidate in repairable_candidates.items()
+            if candidate.candidate_id.strip()
+        }
+        if not isinstance(getattr(repair_response, "repairs", None), list):
+            add(
+                "repair_protocol_invalid",
+                message="Dedicated repair response did not contain a repairs list.",
+            )
+            return original
+
+        replacements: dict[int, ReviewIssue] = {}
+        dispositions: dict[int, str] = {}
+        seen_handles: set[str] = set()
+        for item in repair_response.repairs:
+            handle = str(getattr(item, "target_handle", "") or "").strip()
+            if not handle:
+                add(
+                    "repair_target_handle_missing",
+                    message="Repair item omitted target_handle; no target was guessed.",
+                )
+                continue
+            fingerprint = hashlib.sha256(
+                _json.dumps(
+                    item.model_dump(mode="json"),
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    default=str,
+                ).encode("utf-8")
+            ).hexdigest()[:24]
+            if fingerprint in transaction.applied_response_fingerprints:
+                add(
+                    "repair_response_replay",
+                    target_handle=handle,
+                    message="The same repair item was already applied; it is idempotently ignored.",
+                )
+                continue
+            if fingerprint in transaction.rejected_response_fingerprints:
+                add(
+                    "repair_response_replay_rejected",
+                    target_handle=handle,
+                    message="The same rejected repair item was already seen.",
+                )
+                continue
+            if handle in seen_handles:
+                add(
+                    "repair_target_duplicate",
+                    target_handle=handle,
+                    message="The same opaque repair target was submitted more than once.",
+                )
+                transaction.rejected_response_fingerprints.append(fingerprint)
+                continue
+            seen_handles.add(handle)
+            candidate_id = str(transaction.target_handles.get(handle, "")).strip()
+            target_index = target_indexes.get(candidate_id)
+            if not candidate_id or target_index is None:
+                add(
+                    "repair_target_handle_unknown",
+                    target_handle=handle,
+                    message="Repair target handle is unknown, passed, or belongs to another transaction.",
+                )
+                transaction.rejected_response_fingerprints.append(fingerprint)
+                continue
+            expected_version = str(transaction.base_versions.get(candidate_id, "")).strip()
+            current_version = registry.expected_version(candidate_id).strip()
+            if not expected_version or current_version != expected_version:
+                add(
+                    "repair_target_expired",
+                    target_handle=handle,
+                    target_candidate_id=candidate_id,
+                    message="The runtime candidate version changed after repair preflight.",
+                )
+                transaction.rejected_response_fingerprints.append(fingerprint)
+                continue
+            status = str(getattr(item, "repair_status", "") or "").strip()
+            if status in {"unchanged", "incomplete", "deferred"}:
+                dispositions[target_index] = status
+                transaction.target_results[candidate_id] = status
+                add(
+                    f"repair_target_{status}",
+                    target_handle=handle,
+                    target_candidate_id=candidate_id,
+                    repair_reason=str(getattr(item, "repair_reason", "") or "").strip(),
+                    message="The original runtime-owned finding remains unchanged.",
+                )
+                transaction.applied_response_fingerprints.append(fingerprint)
+                continue
+            if status != "repaired":
+                add(
+                    "repair_status_invalid",
+                    target_handle=handle,
+                    target_candidate_id=candidate_id,
+                    message="Repair status is not an allowed target disposition.",
+                )
+                transaction.rejected_response_fingerprints.append(fingerprint)
+                continue
+
+            patch = getattr(item, "repair_patch", None)
+            if patch is None:
+                add(
+                    "repair_patch_missing",
+                    target_handle=handle,
+                    target_candidate_id=candidate_id,
+                    message="repaired requires a non-empty semantic repair_patch.",
+                )
+                transaction.rejected_response_fingerprints.append(fingerprint)
+                continue
+            fields_set = set(getattr(patch, "model_fields_set", set()))
+            null_fields = sorted(
+                field
+                for field in fields_set
+                if field != "delete_fields" and getattr(patch, field, None) is None
+            )
+            if null_fields:
+                add(
+                    "repair_patch_null_ambiguous",
+                    target_handle=handle,
+                    target_candidate_id=candidate_id,
+                    fields=null_fields,
+                    message="Null is rejected explicitly; it is neither omission nor deletion.",
+                )
+                transaction.rejected_response_fingerprints.append(fingerprint)
+                continue
+            if not (fields_set - {"delete_fields"} or patch.delete_fields):
+                add(
+                    "repair_patch_missing",
+                    target_handle=handle,
+                    target_candidate_id=candidate_id,
+                    message="repaired requires a non-empty semantic repair_patch.",
+                )
+                transaction.rejected_response_fingerprints.append(fingerprint)
+                continue
+
+            original_issue = original.issues[target_index]
+            patch_payload = patch.model_dump(mode="json", exclude_none=True)
+            delete_fields = list(patch_payload.pop("delete_fields", []))
+            envelope = {
+                "target_candidate_id": candidate_id,
+                "candidate_content_version": expected_version,
+                "repair_status": "repaired",
+                "repair_reason": str(getattr(item, "repair_reason", "") or ""),
+                "repair_patch": patch_payload,
+            }
+            try:
+                normalized = normalize_model_repair_payload(
+                    envelope,
+                    evidence_catalog=evidence_catalog or [],
+                )
+                repair_issue = ReviewIssue.model_validate(normalized)
+                support_error = AgentOrchestrator._repair_support_patch_error(
+                    original_issue, repair_issue
+                )
+                if support_error is not None:
+                    raise ValueError(support_error[1])
+                replacement = AgentOrchestrator._apply_repair_patch(
+                    original_issue,
+                    repair_issue,
+                    candidate_id=candidate_id,
+                )
+                replacement = AgentOrchestrator._apply_explicit_repair_deletes(
+                    replacement,
+                    delete_fields,
+                )
+            except ValueError as exc:
+                add(
+                    "repair_patch_rejected",
+                    target_handle=handle,
+                    target_candidate_id=candidate_id,
+                    message=str(exc),
+                )
+                transaction.rejected_response_fingerprints.append(fingerprint)
+                continue
+            except Exception as exc:  # noqa: BLE001
+                add(
+                    "repair_patch_invalid",
+                    target_handle=handle,
+                    target_candidate_id=candidate_id,
+                    message=f"Repair patch could not be materialized: {exc}",
+                )
+                transaction.rejected_response_fingerprints.append(fingerprint)
+                continue
+            if candidate_content_version(replacement) == expected_version:
+                dispositions[target_index] = "no_progress"
+                transaction.target_results[candidate_id] = "no_progress"
+                add(
+                    "repair_no_progress",
+                    target_handle=handle,
+                    target_candidate_id=candidate_id,
+                    message="The repair patch produced no semantic change.",
+                )
+                transaction.rejected_response_fingerprints.append(fingerprint)
+                continue
+            replacements[target_index] = replacement
+            dispositions[target_index] = "repaired"
+            transaction.target_results[candidate_id] = "repaired"
+            transaction.applied_response_fingerprints.append(fingerprint)
+
+        for target_index, candidate in repairable_candidates.items():
+            if target_index not in replacements and target_index not in dispositions:
+                add(
+                    "repair_target_not_returned",
+                    target_handle=next(
+                        (
+                            handle
+                            for handle, candidate_id in transaction.target_handles.items()
+                            if candidate_id == candidate.candidate_id
+                        ),
+                        "",
+                    ),
+                    target_candidate_id=candidate.candidate_id,
+                    message="The target was omitted; the original finding remains visible.",
+                )
+                transaction.target_results[candidate.candidate_id] = "not_returned"
+
+        merged = [
+            replacements.get(index, issue)
+            for index, issue in enumerate(original.issues)
+        ]
+        return ReviewReport(
+            summary=original.summary,
+            issues=merged,
+            schema_version=original.schema_version,
+        )
 
     @staticmethod
     def _merge_repaired_report(
@@ -1735,22 +2198,15 @@ class AgentOrchestrator:
             return None
         patch_roles = {item.role for item in patch.supports}
         original_by_role: dict[str, set[str]] = {}
-        for item in original_issue.all_evidence():
-            role = ""
-            for candidate_role, field in (
-                ("cause", "cause_evidence"),
-                ("contract", "contract_evidence"),
-                ("trigger", "trigger_evidence"),
-                ("impact", "impact_evidence"),
-            ):
-                if item in getattr(original_issue, field):
-                    role = candidate_role
-                    break
-            if not role or role not in patch_roles:
+        for support in issue_supports(original_issue):
+            role = str(support.role)
+            if role not in patch_roles:
                 continue
-            reference = str(item.evidence_id or item.reference_id).strip()
-            if reference and item.resolution_status == "resolved":
-                original_by_role.setdefault(role, set()).add(reference)
+            original_by_role.setdefault(role, set()).update(
+                str(reference).strip()
+                for reference in support.evidence_refs
+                if str(reference).strip()
+            )
 
         patched_by_role: dict[str, set[str]] = {}
         for role, field in (
@@ -1761,16 +2217,14 @@ class AgentOrchestrator:
         ):
             if role not in patch_roles:
                 continue
-            for item in getattr(repaired_issue, field):
-                if item.resolution_status != "resolved" or not item.evidence_id:
-                    return (
-                        "repair_patch_unresolved_evidence",
-                        (
-                            "repair_patch.supports contains an evidence reference "
-                            "that is not resolved in the delivered evidence catalog."
-                        ),
-                    )
-                patched_by_role.setdefault(role, set()).add(item.evidence_id)
+            for support in issue_supports(repaired_issue):
+                if support.role != role:
+                    continue
+                patched_by_role.setdefault(role, set()).update(
+                    str(reference).strip()
+                    for reference in support.evidence_refs
+                    if str(reference).strip()
+                )
 
         for role, required in original_by_role.items():
             if not required.issubset(patched_by_role.get(role, set())):
@@ -1797,6 +2251,7 @@ class AgentOrchestrator:
         if patch is None:
             return repaired_issue
         updates = patch.model_dump(mode="json", exclude_none=True)
+        updates.pop("delete_fields", None)
         if "supports" in updates:
             # normalize_model_repair_payload has already resolved these refs
             # into the live evidence catalog on the temporary envelope.
@@ -1805,21 +2260,37 @@ class AgentOrchestrator:
                 for item in updates["supports"]
                 if isinstance(item, dict)
             }
-            inherited_supports = [
-                item
-                for item in original_issue.supports
-                if item.role not in patch_roles
-            ]
-            updates["supports"] = [*inherited_supports, *repaired_issue.supports]
-            for field in (
-                "cause_evidence",
-                "contract_evidence",
-                "trigger_evidence",
-                "impact_evidence",
-            ):
-                role = field.removesuffix("_evidence")
-                if role in patch_roles:
-                    updates[field] = getattr(repaired_issue, field)
+            if not patch_roles:
+                # An explicitly supplied empty collection means clear, not
+                # "field omitted".  Clear the compatibility role arrays too,
+                # otherwise issue_supports() would silently resurrect them.
+                updates["supports"] = []
+                for field in (
+                    "cause_evidence",
+                    "contract_evidence",
+                    "trigger_evidence",
+                    "impact_evidence",
+                ):
+                    updates[field] = []
+            else:
+                inherited_supports = [
+                    item
+                    for item in issue_supports(original_issue)
+                    if item.role not in patch_roles
+                ]
+                updates["supports"] = [
+                    *inherited_supports,
+                    *repaired_issue.supports,
+                ]
+                for field in (
+                    "cause_evidence",
+                    "contract_evidence",
+                    "trigger_evidence",
+                    "impact_evidence",
+                ):
+                    role = field.removesuffix("_evidence")
+                    if role in patch_roles:
+                        updates[field] = getattr(repaired_issue, field)
         if "primary_anchor" in updates:
             anchor = updates["primary_anchor"]
             if isinstance(anchor, dict):
@@ -1836,6 +2307,39 @@ class AgentOrchestrator:
         )
         payload = original_issue.model_dump(mode="json")
         payload.update(updates)
+        return ReviewIssue.model_validate(payload)
+
+    @staticmethod
+    def _apply_explicit_repair_deletes(
+        issue: ReviewIssue,
+        delete_fields: list[str],
+    ) -> ReviewIssue:
+        """Apply explicit delete semantics before the final integrity guard."""
+
+        if not delete_fields:
+            return issue
+        payload = issue.model_dump(mode="json")
+        for field in delete_fields:
+            if field == "severity":
+                raise ValueError("severity cannot be explicitly deleted")
+            if field in {"primary_anchor"}:
+                payload[field] = None
+            elif field == "repair_intent":
+                payload[field] = {}
+            elif field == "confidence":
+                payload[field] = 0.0
+            elif field in {"related_locations", "supports"}:
+                payload[field] = []
+                if field == "supports":
+                    for evidence_field in (
+                        "cause_evidence",
+                        "contract_evidence",
+                        "trigger_evidence",
+                        "impact_evidence",
+                    ):
+                        payload[evidence_field] = []
+            else:
+                payload[field] = ""
         return ReviewIssue.model_validate(payload)
 
     async def _maybe_recover_review_workflow(
@@ -2108,13 +2612,10 @@ class AgentOrchestrator:
             if isinstance(validated_draft_ids, list)
             else []
         )
-        validated_finding_ids = [
-            str(item.get("finding_id", "")).strip()
-            for item in issue_results
-            if isinstance(item, dict)
-            and item.get("passes_submit_preflight") is True
-            and str(item.get("finding_id", "")).strip()
-        ]
+        # This is initial model preflight, before CandidateRegistry owns the
+        # finding identity.  Never echo a model-supplied finding label as if it
+        # had been validated by the runtime.
+        validated_finding_ids: list[str] = []
         validator_payload.update(
             {
                 "validated_draft_ids": validated_draft_ids,
@@ -2581,6 +3082,7 @@ class AgentOrchestrator:
         *,
         force_submit: bool = False,
         allow_exploration: bool = False,
+        repair_mode: bool = False,
     ) -> AnalysisPlan:
         """Run model analysis and return structured plan."""
         start = perf_counter()
@@ -2600,7 +3102,9 @@ class AgentOrchestrator:
             and not explicit_exploration_allowed
         )
         logical_stage = (
-            "submit_only"
+            "repair"
+            if repair_mode
+            else "submit_only"
             if submit_only_call
             else "validate"
             if any(spec.name == "validate_review_draft" for spec in tool_specs)
@@ -2695,9 +3199,11 @@ class AgentOrchestrator:
                 # The stage must describe the schemas actually sent on the wire;
                 # the initial deferred round may have had validator in the full
                 # registry but intentionally removes it before serialization.
-                logical_stage = call_stage
-                repair_submit_schema = self._repair_schema_open()
-                if force_submit:
+                logical_stage = "repair" if repair_mode else call_stage
+                repair_submit_schema = False
+                if repair_mode:
+                    serialized_tools = build_repair_tool_schemas()
+                elif force_submit:
                     serialized_tools = build_submit_tool_schemas(
                         model_input=True,
                         repair=repair_submit_schema,
@@ -2748,6 +3254,8 @@ class AgentOrchestrator:
                         else None
                     ),
                     allow_exploration=explicit_exploration_allowed,
+                    repair_mode=repair_mode,
+                    submit_tool_name=("repair_review" if repair_mode else None),
                 )
                 self._prepare_format_recovery(result, state)
                 # The engine updates the ledger only after it has confirmed which

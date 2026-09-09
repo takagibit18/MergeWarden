@@ -20,6 +20,21 @@ EvidenceRole = Literal["cause", "contract", "trigger", "impact", "related"]
 EvidenceSide = Literal["old", "new", "context", "unknown"]
 FindingSeverity = Literal["critical", "warning", "info", "style"]
 RepairPatchRole = Literal["cause", "contract", "trigger", "impact"]
+RepairPatchField = Literal[
+    "severity",
+    "primary_anchor",
+    "evidence",
+    "suggestion",
+    "confidence",
+    "observed_behavior",
+    "causal_mechanism",
+    "violated_invariant",
+    "repair_intent",
+    "trigger",
+    "impact",
+    "supports",
+    "related_locations",
+]
 
 
 class SourceAnchor(BaseModel):
@@ -91,9 +106,11 @@ class FindingRepairPatch(BaseModel):
     """Explicit semantic fields that a bounded repair may replace.
 
     Runtime identity, finding labels, and provenance are deliberately absent.
-    ``None`` means that a field is not part of the patch; an explicitly empty
-    string/list is still a requested change and will be checked by the normal
-    canonical/integrity guard after application.
+    An omitted field is preserved.  An explicitly empty string/list is an
+    actual replacement and is checked by the normal canonical/integrity guard.
+    ``null`` is intentionally not treated as omission by the runtime: it is an
+    invalid ambiguous update.  Explicit deletion uses ``delete_fields`` so the
+    four states (omitted, null, empty value, delete) cannot collapse together.
     """
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -111,6 +128,25 @@ class FindingRepairPatch(BaseModel):
     impact: str | None = None
     supports: list[RepairPatchSupport] | None = None
     related_locations: list[RelatedLocation] | None = None
+    delete_fields: list[RepairPatchField] = Field(
+        default_factory=list,
+        description=(
+            "Explicit semantic deletions. Never use null to mean omission; "
+            "the runtime applies and revalidates these deletions atomically."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _no_duplicate_or_overlapping_deletes(self) -> "FindingRepairPatch":
+        if len(self.delete_fields) != len(set(self.delete_fields)):
+            raise ValueError("delete_fields must not contain duplicates")
+        overlap = set(self.delete_fields).intersection(self.model_fields_set)
+        if overlap:
+            raise ValueError(
+                "delete_fields cannot also carry a value for: "
+                + ", ".join(sorted(overlap))
+            )
+        return self
 
 
 class FindingDraft(BaseModel):

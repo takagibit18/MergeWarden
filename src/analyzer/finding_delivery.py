@@ -49,6 +49,7 @@ def candidate_content_version(issue: ReviewIssue) -> str:
     payload = issue.model_dump(mode="json")
     for key in (
         "candidate_id",
+        "finding_id",
         "target_candidate_id",
         "repair_status",
         "candidate_content_version",
@@ -93,6 +94,65 @@ def logical_identity_hash(candidate_id: str) -> str:
     return hashlib.sha256(candidate_id.encode("utf-8")).hexdigest()[:16]
 
 
+def evidence_context_digest(
+    records: list[dict[str, Any]] | None,
+    *,
+    snapshot_id: str = "",
+    revision: str = "",
+) -> str:
+    """Hash the exact evidence context a validation result observed.
+
+    Bodies are represented by their canonical content/body hashes rather than
+    copied into transaction metadata.  A later ledger addition, replacement,
+    snapshot, or revision therefore invalidates an open repair transaction.
+    """
+
+    stable_records: list[dict[str, Any]] = []
+    for raw in records or []:
+        if not isinstance(raw, dict):
+            continue
+        stable_records.append(
+            {
+                key: raw.get(key, "")
+                for key in (
+                    "evidence_id",
+                    "artifact_id",
+                    "path",
+                    "start_line",
+                    "end_line",
+                    "side",
+                    "content_hash",
+                    "body_hash",
+                    "source_type",
+                    "snapshot_id",
+                    "revision",
+                    "lifecycle",
+                    "truncated",
+                    "displayed_ranges",
+                    "displayed_line_numbers",
+                )
+            }
+        )
+    stable_records.sort(
+        key=lambda item: (
+            str(item.get("evidence_id", "")),
+            str(item.get("artifact_id", "")),
+            str(item.get("path", "")),
+            str(item.get("start_line", "")),
+        )
+    )
+    payload = {
+        "snapshot_id": str(snapshot_id or ""),
+        "revision": str(revision or ""),
+        "records": stable_records,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=True, sort_keys=True, default=str).encode(
+            "utf-8"
+        )
+    ).hexdigest()[:24]
+
+
 class CandidateRegistration(BaseModel):
     """Runtime registration record for one logical candidate."""
 
@@ -107,6 +167,8 @@ class CandidateRegistration(BaseModel):
     created_iteration: int = Field(default=0, ge=0)
     current_content: dict[str, Any] = Field(default_factory=dict)
     previous_content_versions: list[str] = Field(default_factory=list)
+    validated_content_version: str = ""
+    validated_evidence_context_digest: str = ""
 
 
 class CandidateRegistry:
@@ -161,6 +223,20 @@ class CandidateRegistry:
                 iteration=iteration,
                 advance_existing=advance_existing,
             )
+            # A verified/published registration is the authoritative content
+            # version.  A later stale report object must not roll it back just
+            # because it reached the final publication pass again.
+            if (
+                registration.status in {"verified", "published"}
+                and registration.current_content
+            ):
+                try:
+                    issue = ReviewIssue.model_validate(registration.current_content)
+                except Exception:  # noqa: BLE001
+                    # Keep the caller's object if an old journal contained a
+                    # partial compatibility envelope; the guard will report
+                    # that malformed state instead of guessing a replacement.
+                    pass
             if registration.candidate_id in seen_candidate_ids:
                 self._duplicate_sources.setdefault(registration.candidate_id, []).append(
                     source_index
@@ -168,14 +244,15 @@ class CandidateRegistry:
                 continue
             seen_candidate_ids.add(registration.candidate_id)
             issue.candidate_id = registration.candidate_id
-            if not issue.finding_id.strip():
-                issue.finding_id = registration.finding_id
+            issue.finding_id = registration.finding_id
             for evidence in issue.all_evidence():
                 evidence.candidate_id = registration.candidate_id
             unique_issues.append(issue)
             registrations.append(registration)
-        if len(unique_issues) != len(report.issues):
-            report.issues = unique_issues
+        # Reassign even when the length is unchanged: a verified registration
+        # may have replaced a stale report object with the authoritative
+        # content version.
+        report.issues = unique_issues
         return tuple(registrations)
 
     def register_issue(
@@ -210,8 +287,12 @@ class CandidateRegistry:
             return record
 
         candidate_id = "cand_" + uuid4().hex[:20]
-        finding_id = issue.finding_id.strip() or "F-" + uuid4().hex[:12].upper()
+        # Reviewer-local labels are not runtime identity.  Always allocate the
+        # authoritative finding label together with the candidate record.
+        finding_id = "F-" + uuid4().hex[:12].upper()
         payload = issue.model_dump(mode="json")
+        payload["finding_id"] = finding_id
+        payload["candidate_id"] = candidate_id
         record = CandidateRegistration(
             candidate_id=candidate_id,
             finding_id=finding_id,
@@ -235,7 +316,11 @@ class CandidateRegistry:
     ) -> None:
         """Advance a mutable initial version without changing its id."""
 
-        if not allow or issue.target_candidate_id.strip():
+        if (
+            not allow
+            or issue.target_candidate_id.strip()
+            or record.status in {"verified", "published"}
+        ):
             return
         version = candidate_content_version(issue)
         if version == record.candidate_content_version:
@@ -244,7 +329,10 @@ class CandidateRegistry:
         self._content_indexes[version] = record.candidate_id
         record.previous_content_versions.append(record.candidate_content_version)
         record.candidate_content_version = version
-        record.current_content = issue.model_dump(mode="json")
+        payload = issue.model_dump(mode="json")
+        payload["finding_id"] = record.finding_id
+        payload["candidate_id"] = record.candidate_id
+        record.current_content = payload
 
     def registration(self, candidate_id: str) -> CandidateRegistration | None:
         """Return a registration only for an exact runtime candidate id."""
@@ -263,8 +351,28 @@ class CandidateRegistry:
         record = self.registration(candidate_id)
         if record is not None:
             record.status = status
+            if status not in {"verified", "published"}:
+                record.validated_content_version = ""
+                record.validated_evidence_context_digest = ""
 
-    def commit_verified_version(self, candidate_id: str, issue: ReviewIssue) -> str:
+    def authoritative_issue(self, candidate_id: str) -> ReviewIssue | None:
+        """Return the registry-owned content for a known candidate."""
+
+        record = self.registration(candidate_id)
+        if record is None or not record.current_content:
+            return None
+        try:
+            return ReviewIssue.model_validate(record.current_content)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def commit_verified_version(
+        self,
+        candidate_id: str,
+        issue: ReviewIssue,
+        *,
+        evidence_context_digest: str = "",
+    ) -> str:
         """Advance a candidate version only after a complete guard passes."""
 
         record = self.registration(candidate_id)
@@ -277,8 +385,15 @@ class CandidateRegistry:
             self._content_indexes[version] = candidate_id
             record.previous_content_versions.append(old_version)
         record.candidate_content_version = version
-        record.current_content = issue.model_dump(mode="json")
+        payload = issue.model_dump(mode="json")
+        payload["finding_id"] = record.finding_id
+        payload["candidate_id"] = record.candidate_id
+        record.current_content = payload
         record.status = "verified"
+        record.validated_content_version = version
+        record.validated_evidence_context_digest = str(
+            evidence_context_digest or ""
+        )
         return version
 
     def duplicate_sources(self, candidate_id: str) -> tuple[int, ...]:
@@ -311,7 +426,14 @@ class RepairTransaction(BaseModel):
         description="Separate format-recovery identity, never a candidate id.",
     )
     candidate_ids: list[str] = Field(default_factory=list)
+    target_handles: dict[str, str] = Field(
+        default_factory=dict,
+        description="Opaque model-facing handle -> runtime candidate id mapping.",
+    )
     base_versions: dict[str, str] = Field(default_factory=dict)
+    base_snapshot_id: str = ""
+    base_revision: str = ""
+    base_evidence_context_digest: str = ""
     gap_codes: dict[str, list[str]] = Field(default_factory=dict)
     required_steps: list[str] = Field(default_factory=list)
     executed_steps: list[str] = Field(default_factory=list)
@@ -321,6 +443,8 @@ class RepairTransaction(BaseModel):
     status: RepairTransactionStatus = "open"
     target_results: dict[str, str] = Field(default_factory=dict)
     rejection_reasons: list[str] = Field(default_factory=list)
+    applied_response_fingerprints: list[str] = Field(default_factory=list)
+    rejected_response_fingerprints: list[str] = Field(default_factory=list)
 
     def record_step(self, step: str) -> None:
         """Record a step once, preserving the transaction timeline."""
