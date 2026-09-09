@@ -173,7 +173,11 @@ def test_length_with_draft_and_tool_recovers_via_submit_only_context(
     assert "21: return self.obj == other" in final_context
 
     entries = _journal(orchestrator)
-    assert [entry.type for entry in entries] == [
+    assert [
+        entry.type
+        for entry in entries
+        if entry.type not in {"evidence_catalog", "finding_finalization"}
+    ] == [
         "model_response",
         "draft_finding",
         "length_recovery",

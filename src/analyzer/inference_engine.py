@@ -1273,7 +1273,20 @@ class InferenceEngine:
                 f"got {type(payload['issues']).__name__}"
             )
         for index, issue in enumerate(payload["issues"]):
-            if isinstance(issue, dict) and "confidence" not in issue:
+            if (
+                isinstance(issue, dict)
+                and "confidence" not in issue
+                and not (
+                    str(issue.get("target_candidate_id", "")).strip()
+                    and str(issue.get("repair_status", "")).strip()
+                    in {"unchanged", "incomplete", "deferred", "repaired"}
+                    and (
+                        "repair_patch" in issue
+                        or str(issue.get("repair_status", "")).strip()
+                        != "repaired"
+                    )
+                )
+            ):
                 return (
                     "Invalid submit_review payload: "
                     f"issues[{index}] missing required confidence"
@@ -1767,7 +1780,12 @@ class InferenceEngine:
         catalog_candidates: list[tuple[int, bool, bool, dict[str, Any], str]] = []
         reference_to_evidence: dict[str, str] = {}
         for record in delivered_catalog:
-            evidence_id = str(record.get("evidence_id", "")).strip()
+            # Older in-process callers may hand this helper a pre-ledger
+            # artifact record. Treat its exact artifact id as a compatibility
+            # alias only; live ledgers always supply the generated evidence_id.
+            evidence_id = str(
+                record.get("evidence_id") or record.get("artifact_id") or ""
+            ).strip()
             artifact_id = str(record.get("artifact_id", "")).strip()
             path = str(record.get("path", record.get("file", ""))).strip()
             start = record.get("start_line", record.get("line", ""))
@@ -1796,9 +1814,9 @@ class InferenceEngine:
         )
         telemetry["available_catalog_count"] = len(catalog_candidates)
         required_catalog_ids: list[str] = []
-        for score, exact_ref, path_ref, record, artifact_id in catalog_candidates:
+        for score, exact_ref, path_ref, record, evidence_id in catalog_candidates:
             if exact_ref:
-                required_catalog_ids.append(artifact_id)
+                required_catalog_ids.append(evidence_id)
             if exact_ref:
                 path = str(record.get("path", record.get("file", ""))).strip()
                 start = record.get("start_line", record.get("line", ""))
@@ -1847,7 +1865,7 @@ class InferenceEngine:
         # only. This lets the model select an exact id without turning any
         # nearby record into a hidden dependency.
         if not draft_paths and not gap_paths:
-            for _, exact_ref, _, record, artifact_id in catalog_candidates:
+            for _, exact_ref, _, record, evidence_id in catalog_candidates:
                 if exact_ref:
                     continue
                 path = str(record.get("path", record.get("file", ""))).strip()
@@ -1961,7 +1979,9 @@ class InferenceEngine:
                 if kind == "catalog_required":
                     telemetry["required_catalog_missing_count"] += 1
                 if kind in {"catalog_optional", "catalog_required"}:
-                    omitted_id = candidate.split(" id=", 1)[-1].split(" ", 1)[0]
+                    omitted_id = (
+                        candidate.split(" evidence_id=", 1)[-1].split(" ", 1)[0]
+                    )
                     telemetry["omitted_catalog_ids"].append(
                         {
                             "id": omitted_id,
@@ -1986,8 +2006,10 @@ class InferenceEngine:
                 # Catalog entries are identity hints; the full tool-result
                 # counters remain reserved for observed tool payloads.
                 telemetry["included_catalog_count"] += 1
-                artifact_id = candidate.split(" id=", 1)[-1].split(" ", 1)[0]
-                telemetry["included_catalog_ids"].append(artifact_id)
+                evidence_id = (
+                    candidate.split(" evidence_id=", 1)[-1].split(" ", 1)[0]
+                )
+                telemetry["included_catalog_ids"].append(evidence_id)
             entry_tokens = builder.estimate_tokens(candidate)
             if kind in {"catalog_optional", "catalog_required"}:
                 telemetry["catalog_token_count"] += entry_tokens
@@ -2141,9 +2163,12 @@ class InferenceEngine:
         prefix = (
             "candidate_repair_feedback (this is not completion): address only the "
             "listed exact runtime targets, then submit again. Each returned issue "
-            "must carry the exact target_candidate_id and repair_status. Use "
-            "repair_status=repaired only after the same canonical integrity rules "
-            "can pass; otherwise return the target with unchanged or incomplete. "
+            "must carry the exact target_candidate_id, candidate_content_version, "
+            "and repair_status. Prefer a repair_patch containing only changed "
+            "semantic fields; do not rewrite the full finding to add one trigger, "
+            "support role, or evidence reference. Use repair_status=repaired only "
+            "after the same canonical integrity rules can pass; otherwise return "
+            "the target with unchanged, incomplete, or deferred plus a reason. "
             "Never guess an evidence id, path, snapshot, hash, or range.\n"
         )
         builder = ContextBuilder()

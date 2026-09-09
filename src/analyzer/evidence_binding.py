@@ -248,8 +248,6 @@ def _select_binding(
             in {
                 item.evidence_id,
                 item.artifact_id,
-                item.context_manifest_id,
-                item.context_hash,
             }
         ]
         return evidence_matches[0] if len(evidence_matches) == 1 else None

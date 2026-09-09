@@ -10,12 +10,14 @@ from pydantic import BaseModel, Field
 from src.analyzer.finding_contract import (
     canonical_contract_gaps,
     ModelFindingInput,
+    ModelRepairIssueInput,
     normalize_model_finding_payload,
     normalize_producer_issue_payload,
 )
 from src.analyzer.finding_schema import (
     ClaimSupport,
     EvidenceProvenance,
+    FindingRepairPatch,
     RelatedLocation,
     RepairIntent,
     SourceAnchor,
@@ -45,10 +47,10 @@ _SUMMARY_RISK_PATTERN = re.compile(
 class ReviewDraftIssueInput(BaseModel):
     """Candidate review issue submitted by the model for policy feedback."""
 
-    severity: Severity
+    severity: Severity = Severity.INFO
     location: str = ""
-    evidence: str
-    suggestion: str
+    evidence: str = ""
+    suggestion: str = ""
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     schema_version: str | None = Field(
         default=None,
@@ -62,8 +64,12 @@ class ReviewDraftIssueInput(BaseModel):
             "never use finding_id, text, or position as a repair selector."
         ),
     )
-    repair_status: Literal["", "repaired", "unchanged", "incomplete"] = ""
+    repair_status: Literal[
+        "", "repaired", "unchanged", "incomplete", "deferred"
+    ] = ""
     candidate_content_version: str = ""
+    repair_reason: str = ""
+    repair_patch: FindingRepairPatch | None = None
     primary_anchor: SourceAnchor | None = None
     related_locations: list[RelatedLocation] = Field(default_factory=list)
     observed_behavior: str = ""
@@ -122,7 +128,18 @@ class ValidateReviewDraftTool(BaseTool):
         model_issue_schema = _inline_json_schema_refs(
             ModelFindingInput.model_json_schema()
         )
+        repair_issue_schema = _inline_json_schema_refs(
+            ModelRepairIssueInput.model_json_schema()
+        )
         model_issue_schema["additionalProperties"] = False
+        properties = model_issue_schema.setdefault("properties", {})
+        if isinstance(properties, dict):
+            properties.pop("finding_id", None)
+        repair_properties = repair_issue_schema.get("properties", {})
+        if isinstance(properties, dict) and isinstance(repair_properties, dict):
+            for field in ("repair_reason", "repair_patch"):
+                if field in repair_properties:
+                    properties[field] = repair_properties[field]
         return ToolSpec(
             name="validate_review_draft",
             description=(
@@ -240,8 +257,14 @@ class ValidateReviewDraftTool(BaseTool):
     def _validate_issue(
         self, index: int, input_issue: ReviewDraftIssueInput
     ) -> dict[str, Any]:
+        evidence_catalog = (
+            self._context.evidence_catalog_provider()
+            if self._context.evidence_catalog_provider is not None
+            else []
+        )
         issue_payload = normalize_model_finding_payload(
-            input_issue.model_dump(exclude_unset=True)
+            input_issue.model_dump(exclude_unset=True),
+            evidence_catalog=evidence_catalog,
         )
         issue_payload = normalize_producer_issue_payload(issue_payload)
         issue_payload.setdefault("schema_version", "1.0")
@@ -274,11 +297,24 @@ class ValidateReviewDraftTool(BaseTool):
         )
         passes_causality = not causality_required or changed_anchor_present
         passes_filter = passes_output_filter and passes_causality
-        contract_gaps = canonical_contract_gaps(
-            issue,
-            strict=issue.is_structured_hypothesis
-            and issue.severity in {Severity.CRITICAL, Severity.WARNING},
+        disposition_only = (
+            issue.repair_status in {"unchanged", "incomplete", "deferred"}
+            and bool(issue.target_candidate_id.strip())
+            and bool(issue.candidate_content_version.strip())
         )
+        if disposition_only:
+            # This response does not assert a new finding. The runtime keeps
+            # the original candidate and records the explicit disposition.
+            passes_output_filter = True
+            passes_causality = True
+            passes_filter = True
+            contract_gaps = []
+        else:
+            contract_gaps = canonical_contract_gaps(
+                issue,
+                strict=issue.is_structured_hypothesis
+                and issue.severity in {Severity.CRITICAL, Severity.WARNING},
+            )
         passes_contract = not contract_gaps
         passes_submit_preflight = passes_filter and passes_contract
         fail_reasons: list[str] = []
@@ -337,9 +373,17 @@ class ValidateReviewDraftTool(BaseTool):
             "repair_status": issue.repair_status,
             "evidence_refs": sorted(
                 {
-                    str(evidence.artifact_id).strip()
+                    str(
+                        evidence.evidence_id
+                        or evidence.reference_id
+                        or evidence.artifact_id
+                    ).strip()
                     for evidence in issue.all_evidence()
-                    if str(evidence.artifact_id).strip()
+                    if str(
+                        evidence.evidence_id
+                        or evidence.reference_id
+                        or evidence.artifact_id
+                    ).strip()
                 }
             ),
             "normalized_location": location.canonical,
@@ -374,6 +418,12 @@ class ValidateReviewDraftTool(BaseTool):
             "risk_pattern_matched": filter_decision.risk_pattern_matched,
             "fail_reasons": list(dict.fromkeys(fail_reasons)),
             "repair_hints": list(dict.fromkeys(repair_hints)),
+            "evidence_catalog_count": len(evidence_catalog),
+            "evidence_catalog_snapshot_id": (
+                str(evidence_catalog[0].get("snapshot_id", ""))
+                if evidence_catalog
+                else ""
+            ),
         }
 
     def _location_on_changed_line(

@@ -142,7 +142,41 @@ snapshot/revision 和 serialized-request 记录。
 
 身份字段职责固定如下：`draft_id` 是调查检查点，runtime `candidate_id` 是本次运行的逻辑候选，`finding_id` 是运行时生成/legacy 兼容的 finding 标签，Graph candidate/span 只属于上下文元数据，`evidence_id` 是唯一模型引用，repository revision/snapshot 是版本元数据，`candidate_content_version` 只绑定同一候选的可变内容版本。字段内容改变不能通过重新登记绕过失败；只有完整验证通过才能推进版本。
 
-初次提交缺少 runtime 身份时，反馈明确标记 `initial_submission_required`，不会出现 `<missing-target-0>` 一类可执行占位符。只有编排层先登记候选并启动合法 `RepairTransaction(status=open)` 后，submit schema 才要求 target、版本和非空 repair status。
+初次提交缺少 runtime 身份时，反馈明确标记 initial_submission_required，不会出现 <missing-target-0> 一类可执行占位符。只有编排层先登记候选并启动合法 RepairTransaction(status=open) 后，submit schema 才要求 target、版本和非空 repair status。
+
+### 2.9 阶段三实现：字段级 repair 与共享预算
+
+repair submit 的每个 issue 现在可以只携带：
+
+    {
+      "target_candidate_id": "cand_runtime_owned",
+      "candidate_content_version": "exact_base_version",
+      "repair_status": "repaired",
+      "repair_patch": {
+        "trigger": "只修复这一项语义字段",
+        "supports": [
+          {
+            "role": "trigger",
+            "statement": "说明触发条件与结论的关系",
+            "evidence_refs": ["ev_delivered_exact"]
+          }
+        ]
+      }
+    }
+
+repair_patch 不允许 candidate/finding/Graph/revision/provenance 字段；
+省略字段由 runtime 从原始候选保留。unchanged、incomplete 和 deferred 可以
+只带 target、base version、状态和 repair_reason。runtime 先做 patch 合并，
+再用同一份 canonical contract、evidence ledger 和 integrity guard 完整复验；
+模型声明 repaired 不会跳过校验。语义版本没有变化时记录 repair_no_progress
+并停止该目标，避免重复修复循环。
+
+一次 RepairTransaction 记录所有目标、基础版本、gap 分类、必需/已执行步骤、
+模型调用数、token/time reserve、每 target 的最终处置和拒绝原因。source
+exploration→submit 预先保留完整序列，但只消耗一笔事务额度；format、
+contract、evidence 共用同一报告级上限。预算不足在第一步调用前返回
+repair_sequence_*_insufficient，未启动的目标使用 deferred，不把它们计为
+已修复。
 
 ## 3. 评测口径
 

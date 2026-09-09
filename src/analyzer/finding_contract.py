@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from src.analyzer.finding_schema import (
     ClaimSupport,
     FindingDraft,
+    FindingRepairPatch,
     FINDING_SCHEMA_VERSION,
     EvidenceProvenance,
     EvidenceRole,
@@ -118,7 +119,7 @@ class ModelFindingInput(BaseModel):
             "Omit for an initial submission; never invent or reuse a finding_id here."
         ),
     )
-    repair_status: Literal["", "repaired", "unchanged", "incomplete"] = Field(
+    repair_status: Literal["", "repaired", "unchanged", "incomplete", "deferred"] = Field(
         default="",
         description=(
             "Repair-only: repaired, unchanged, or incomplete for the exact target."
@@ -136,6 +137,51 @@ class ModelFindingInput(BaseModel):
     impact: str = ""
     supports: list[ModelClaimSupport] = Field(default_factory=list)
     related_locations: list[RelatedLocation] = Field(default_factory=list)
+
+
+class ModelRepairIssueInput(BaseModel):
+    """Model-facing repair envelope with optional field-level semantic content.
+
+    The target and base version are mandatory. All finding fields are optional
+    because unchanged, incomplete, and deferred may report only a disposition,
+    while repaired may carry a minimal repair patch. Legacy full-issue repair
+    responses remain parseable for compatibility.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    target_candidate_id: str = Field(
+        ...,
+        min_length=1,
+        description="Exact runtime candidate id from the active repair transaction.",
+    )
+    candidate_content_version: str = Field(
+        ...,
+        min_length=1,
+        description="Exact base version copied from the active repair transaction.",
+    )
+    repair_status: Literal["repaired", "unchanged", "incomplete", "deferred"]
+    repair_reason: str = ""
+    repair_patch: FindingRepairPatch | None = Field(
+        default=None,
+        description=(
+            "Only the semantic fields that changed. Omitted fields remain on the "
+            "runtime-owned original candidate."
+        ),
+    )
+    severity: FindingSeverity | None = None
+    primary_anchor: SourceAnchor | None = None
+    evidence: str | None = None
+    suggestion: str | None = None
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    observed_behavior: str | None = None
+    causal_mechanism: str | None = None
+    violated_invariant: str | None = None
+    repair_intent: RepairIntent | None = None
+    trigger: str | None = None
+    impact: str | None = None
+    supports: list[ModelClaimSupport] | None = None
+    related_locations: list[RelatedLocation] | None = None
 
 
 def is_structured_issue_payload(payload: Any) -> bool:
@@ -156,6 +202,129 @@ def is_model_finding_payload(payload: Any) -> bool:
     return "primary_anchor" in payload and "location" not in payload
 
 
+def is_model_repair_payload(payload: Any) -> bool:
+    """Identify the identity-bound repair envelope before normal finding parsing."""
+
+    if not isinstance(payload, dict):
+        return False
+    target = str(payload.get("target_candidate_id", "") or "").strip()
+    return bool(target and ("repair_status" in payload or "repair_patch" in payload))
+
+
+def normalize_model_repair_payload(
+    payload: dict[str, Any],
+    *,
+    evidence_catalog: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Normalize a patch-only repair into a parseable compatibility envelope."""
+
+    try:
+        model_input = ModelRepairIssueInput.model_validate(payload)
+    except ValidationError:
+        normalized = {
+            key: value
+            for key, value in payload.items()
+            if key in ModelRepairIssueInput.model_fields
+        }
+    else:
+        normalized = model_input.model_dump(mode="json", exclude_none=True)
+
+    direct_patch_fields = {
+        "severity",
+        "primary_anchor",
+        "evidence",
+        "suggestion",
+        "confidence",
+        "observed_behavior",
+        "causal_mechanism",
+        "violated_invariant",
+        "repair_intent",
+        "trigger",
+        "impact",
+        "supports",
+        "related_locations",
+    }
+    if (
+        "repair_patch" not in normalized
+        and not direct_patch_fields.intersection(normalized)
+    ):
+        # Preserve the distinction between a patch-only response and a legacy
+        # full replacement after the temporary ReviewIssue is materialized.
+        normalized["repair_patch"] = {}
+
+    patch = normalized.get("repair_patch")
+    if isinstance(patch, dict):
+        # Lift patch fields into the temporary compatibility envelope so the
+        # existing evidence binding path can resolve its support references.
+        for field, value in patch.items():
+            normalized.setdefault(field, value)
+
+    # ReviewIssue keeps required v0.2.2 fields for downstream publishers.
+    # These placeholders are never published: _merge_repaired_report applies
+    # only the explicit patch to the runtime-owned original candidate.
+    normalized.setdefault("severity", "info")
+    normalized.setdefault(
+        "primary_anchor",
+        {"file": "__repair_target__", "line": 1},
+    )
+    normalized.setdefault("evidence", "")
+    normalized.setdefault("suggestion", "")
+    normalized.setdefault("confidence", 0.0)
+    normalized["schema_version"] = FINDING_SCHEMA_VERSION
+
+    anchor_raw = normalized.get("primary_anchor")
+    try:
+        anchor = SourceAnchor.model_validate(anchor_raw)
+    except Exception:  # noqa: BLE001
+        normalized.setdefault("location", "")
+    else:
+        normalized["primary_anchor"] = anchor.model_dump(mode="json")
+        normalized["location"] = anchor.location
+
+    supports = normalized.get("supports")
+    if not isinstance(supports, list):
+        return normalized
+    role_fields = {
+        "cause": "cause_evidence",
+        "contract": "contract_evidence",
+        "trigger": "trigger_evidence",
+        "impact": "impact_evidence",
+    }
+    catalog = _evidence_catalog_by_reference(evidence_catalog or [])
+    catalog_status = _evidence_catalog_reference_status(evidence_catalog or [])
+    for evidence_field in role_fields.values():
+        normalized[evidence_field] = []
+    for support in supports:
+        if not isinstance(support, dict):
+            continue
+        role = str(support.get("role", "")).strip()
+        field = role_fields.get(role)
+        if field is None:
+            continue
+        statement = str(support.get("statement", "")).strip()
+        refs = support.get("evidence_refs", [])
+        if not isinstance(refs, list):
+            continue
+        for raw_ref in refs:
+            reference = str(raw_ref or "").strip()
+            if not reference:
+                continue
+            record = catalog.get(reference)
+            normalized[field].append(
+                _evidence_payload_from_catalog_record(
+                    record,
+                    reference=reference,
+                    statement=statement,
+                    resolution_status=(
+                        "resolved"
+                        if record is not None
+                        else catalog_status.get(reference, "unresolved")
+                    ),
+                )
+            )
+    return normalized
+
+
 def normalize_model_finding_payload(
     payload: Any,
     *,
@@ -168,9 +337,14 @@ def normalize_model_finding_payload(
     it with a useful reason; it is never replaced by a nearby span.
     """
 
-    model_shape = is_model_finding_payload(payload)
     if not isinstance(payload, dict):
         return normalize_producer_issue_payload(payload)
+    if is_model_repair_payload(payload):
+        return normalize_model_repair_payload(
+            payload,
+            evidence_catalog=evidence_catalog,
+        )
+    model_shape = is_model_finding_payload(payload)
     if not model_shape and "primary_anchor" not in payload:
         return normalize_producer_issue_payload(payload)
     if model_shape:

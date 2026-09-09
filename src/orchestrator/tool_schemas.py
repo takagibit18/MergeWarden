@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from src.analyzer.finding_contract import ModelFindingInput
+from src.analyzer.finding_contract import ModelFindingInput, ModelRepairIssueInput
 from src.models.schemas import DraftFindingInput, DraftFindingUpdateInput
 from src.tools.base import ToolSpec
 
@@ -107,8 +107,9 @@ def build_model_submit_tool_schemas(*, repair: bool = False) -> list[dict[str, A
 
 
 def _build_model_submit_tool_schemas(*, repair: bool = False) -> list[dict[str, Any]]:
+    model_input_type = ModelRepairIssueInput if repair else ModelFindingInput
     model_issue_schema = _llm_facing_schema(
-        _inline_json_schema_refs(ModelFindingInput.model_json_schema())
+        _inline_json_schema_refs(model_input_type.model_json_schema())
     )
     model_issue_properties = model_issue_schema.get("properties")
     if isinstance(model_issue_properties, dict) and not repair:
@@ -118,6 +119,9 @@ def _build_model_submit_tool_schemas(*, repair: bool = False) -> list[dict[str, 
         model_issue_properties.pop("target_candidate_id", None)
         model_issue_properties.pop("repair_status", None)
         model_issue_properties.pop("candidate_content_version", None)
+        model_issue_properties.pop("repair_reason", None)
+        model_issue_properties.pop("repair_patch", None)
+        model_issue_properties.pop("finding_id", None)
     if repair:
         required = model_issue_schema.setdefault("required", [])
         for field in (
@@ -130,13 +134,16 @@ def _build_model_submit_tool_schemas(*, repair: bool = False) -> list[dict[str, 
     # Keep parsing tolerant for the compatibility adapter and bounded repair
     # path, while making the active provider contract explicit for risk issues.
     # The integrity guard checks the same semantic fields and role rules.
+    risk_condition: dict[str, Any] = {
+        "properties": {
+            "severity": {"enum": ["critical", "warning"]}
+        }
+    }
+    if repair:
+        risk_condition["required"] = ["severity"]
     model_issue_schema.setdefault("allOf", []).append(
         {
-            "if": {
-                "properties": {
-                    "severity": {"enum": ["critical", "warning"]}
-                }
-            },
+            "if": risk_condition,
             "then": {
                 "required": [
                     "primary_anchor",
@@ -164,10 +171,13 @@ def _build_model_submit_tool_schemas(*, repair: bool = False) -> list[dict[str, 
                     "and choose exact evidence_refs from the delivered evidence "
                     "catalog. "
                     + (
-                        "This is an atomic repair response: every issue must set "
-                        "target_candidate_id to one exact runtime candidate_id and "
+                        "This is an atomic repair transaction: every issue must set "
+                        "target_candidate_id to one exact runtime candidate_id, "
                         "candidate_content_version copied exactly from the feedback, "
-                        "and repair_status to repaired, unchanged, or incomplete. "
+                        "and repair_status to repaired, unchanged, incomplete, or "
+                        "deferred. For repaired, prefer repair_patch with only the "
+                        "semantic fields that changed. Unchanged, incomplete, and "
+                        "deferred may return only identity, status, and repair_reason. "
                         if repair
                         else "Do not provide runtime candidate identity or repair status. "
                     )

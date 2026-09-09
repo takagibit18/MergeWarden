@@ -24,10 +24,15 @@ from src.analyzer.finding_integrity import (
     build_candidates,
     classify_integrity_failure,
 )
-from src.analyzer.finding_delivery import CandidateRegistry, RepairTransaction
+from src.analyzer.finding_delivery import (
+    CandidateRegistry,
+    RepairTransaction,
+    candidate_content_version,
+)
 from src.analyzer.finding_contract import canonical_contract_gaps
+from src.analyzer.finding_schema import SourceAnchor
 from src.analyzer.inference_engine import InferenceEngine
-from src.analyzer.output_formatter import ReviewReport
+from src.analyzer.output_formatter import ReviewIssue, ReviewReport
 from src.analyzer.persistent_index import repository_identity, revision_identity
 from src.analyzer.review_policy import evaluate_issue_filter
 from src.analyzer.review_skills import (
@@ -67,6 +72,7 @@ from src.orchestrator.run_journal import (
     LengthRecoveryJournalPayload,
     ModelResponseJournalPayload,
     PendingRunJournalEntry,
+    PreflightJournalPayload,
     RunJournal,
     RunJournalError,
     ToolResultJournalPayload,
@@ -292,6 +298,8 @@ class AgentOrchestrator:
         self._final_published_count = 0
         self._evidence_snapshot_id = ""
         self._evidence_revision = ""
+        self._live_evidence_catalog: list[dict[str, Any]] = []
+        self._evidence_catalog_digest = ""
         self._trace_recorder = TraceRecorder(
             detail_mode=self._settings.agent_trace_detail,
             max_chars=self._settings.agent_trace_max_chars,
@@ -536,6 +544,7 @@ class AgentOrchestrator:
             snapshot_id=self._evidence_snapshot_id,
             revision=self._evidence_revision,
         ).to_payload()
+        self._publish_evidence_catalog(state)
         self._sync_draft_states(state)
         self._deterministic_rejected_count = guard_result.rejected_count
         self._verifier_accepted_count = guard_result.passed_count
@@ -544,9 +553,14 @@ class AgentOrchestrator:
             guard_result.needs_repair_candidate_ids
         )
         self._integrity_invalid_count = len(guard_result.invalid_candidate_ids)
-        self._review_outcome = _review_outcome_for_counts(
-            guard_result.checked_count,
-            guard_result.passed_count,
+        self._review_outcome = (
+            "incomplete"
+            if guard_result.needs_repair_candidate_ids
+            or guard_result.invalid_candidate_ids
+            else _review_outcome_for_counts(
+                guard_result.checked_count,
+                guard_result.passed_count,
+            )
         )
         response.review_outcome = self._review_outcome
         self._integrity_failure_codes = {
@@ -632,9 +646,15 @@ class AgentOrchestrator:
             # no-issue review; retain that fact in the run-level result even
             # though the candidate is correctly omitted from publication.
             incomplete_code_set.add("untrusted_finding_candidates")
+        if (
+            guard_result.needs_repair_candidate_ids
+            or guard_result.invalid_candidate_ids
+        ):
+            incomplete_code_set.add("finding_delivery_incomplete")
         incomplete_codes = sorted(incomplete_code_set)
         if incomplete_codes:
             response.completion_status = "incomplete"
+            response.finding_run_status = "incomplete"
             response.incomplete_reasons = incomplete_codes
         for result in guard_result.results:
             self._candidate_registry.mark_status(result.candidate_id, result.status)  # type: ignore[arg-type]
@@ -843,9 +863,32 @@ class AgentOrchestrator:
                 candidate_id: statuses.get(candidate_id, "not_returned")
                 for candidate_id in self._active_repair_transaction.candidate_ids
             }
+            # Preserve explicit protocol dispositions when the final guard
+            # still reports the underlying candidate as unresolved.
+            for candidate_id in self._active_repair_transaction.candidate_ids:
+                registration = self._candidate_registry.registration(candidate_id)
+                if registration is None:
+                    continue
+                if registration.status in {"deferred", "unchanged", "incomplete"}:
+                    if target_results.get(candidate_id) in {
+                        "needs_repair",
+                        "not_returned",
+                    }:
+                        target_results[candidate_id] = registration.status
             accepted = sum(value == "verified" for value in target_results.values())
+            has_deferred = any(
+                value == "deferred" for value in target_results.values()
+            )
+            has_incomplete = any(
+                value in {"incomplete", "needs_repair", "not_returned"}
+                for value in target_results.values()
+            )
             final_status = (
-                "accepted"
+                "deferred"
+                if has_deferred and not accepted
+                else "incomplete"
+                if has_incomplete and not accepted
+                else "accepted"
                 if accepted == len(target_results) and target_results
                 else "partially_accepted"
                 if accepted
@@ -1240,7 +1283,31 @@ class AgentOrchestrator:
             diagnostics=merge_diagnostics,
         )
         if merge_diagnostics:
-            self._add_incomplete_reason(state, "repair_target_unmatched")
+            diagnostic_codes = list(
+                dict.fromkeys(
+                    str(item.get("code", "")).strip()
+                    for item in merge_diagnostics
+                    if str(item.get("code", "")).strip()
+                )
+            )
+            for diagnostic_code in diagnostic_codes:
+                self._add_incomplete_reason(state, diagnostic_code)
+            for diagnostic in merge_diagnostics:
+                target_id = str(
+                    diagnostic.get("target_candidate_id", "")
+                ).strip()
+                code = str(diagnostic.get("code", "")).strip()
+                dispositions: dict[
+                    str, Literal["unchanged", "incomplete", "deferred"]
+                ] = {
+                    "repair_target_unchanged": "unchanged",
+                    "repair_target_incomplete": "incomplete",
+                    "repair_target_deferred": "deferred",
+                    "repair_no_progress": "incomplete",
+                }
+                disposition = dispositions.get(code)
+                if target_id and disposition:
+                    self._candidate_registry.mark_status(target_id, disposition)
             self._record_event(
                 EventType.DECISION,
                 "finding_repair",
@@ -1361,6 +1428,7 @@ class AgentOrchestrator:
                 targets_by_candidate_id.setdefault(candidate_id, []).append(index)
 
         replacements: dict[int, Any] = {}
+        target_dispositions: dict[int, str] = {}
         for repaired_issue in repaired.issues:
             target_id = repaired_issue.target_candidate_id.strip()
             if not target_id:
@@ -1455,7 +1523,13 @@ class AgentOrchestrator:
                     )
                 continue
             repair_status = str(getattr(repaired_issue, "repair_status", "") or "")
-            if repair_status not in {"", "repaired", "unchanged", "incomplete"}:
+            if repair_status not in {
+                "",
+                "repaired",
+                "unchanged",
+                "incomplete",
+                "deferred",
+            }:
                 if diagnostics is not None:
                     diagnostics.append(
                         {
@@ -1479,31 +1553,77 @@ class AgentOrchestrator:
                         }
                     )
                 continue
-            if repair_status in {"unchanged", "incomplete"}:
+            if repair_status in {"unchanged", "incomplete", "deferred"}:
+                target_dispositions[target_index] = repair_status
+                disposition_code = {
+                    "unchanged": "repair_target_unchanged",
+                    "incomplete": "repair_target_incomplete",
+                    "deferred": "repair_target_deferred",
+                }[repair_status]
                 if diagnostics is not None:
                     diagnostics.append(
                         {
-                            "code": "repair_target_unchanged"
-                            if repair_status == "unchanged"
-                            else "repair_target_incomplete",
+                            "code": disposition_code,
                             "target_candidate_id": target_id,
                             "repair_status": repair_status,
+                            "repair_reason": repaired_issue.repair_reason.strip(),
                             "message": (
-                                "The repair protocol kept this exact target unchanged; "
-                                "the original finding remains in the merged report."
+                                "The repair protocol recorded an explicit target "
+                                "disposition; the original finding remains in the "
+                                "merged report."
                             ),
                         }
                     )
                 continue
+            original_issue = original.issues[target_index]
+            replacement = (
+                AgentOrchestrator._apply_repair_patch(
+                    original_issue,
+                    repaired_issue,
+                    candidate_id=target_id,
+                )
+                if repaired_issue.repair_patch is not None
+                else repaired_issue.model_copy(
+                    update={
+                        "candidate_id": target_id,
+                        **(
+                            {"finding_id": original_issue.finding_id}
+                            if registry is not None
+                            else {}
+                        ),
+                        "target_candidate_id": "",
+                        "repair_status": "",
+                        "repair_reason": "",
+                        "repair_patch": None,
+                    }
+                )
+            )
+            if expected_version and candidate_content_version(replacement) == expected_version:
+                target_dispositions[target_index] = "no_progress"
+                if diagnostics is not None:
+                    diagnostics.append(
+                        {
+                            "code": "repair_no_progress",
+                            "target_candidate_id": target_id,
+                            "candidate_content_version": expected_version,
+                            "message": (
+                                "The repair response produced no semantic change "
+                                "for the exact candidate version."
+                            ),
+                        }
+                    )
+                continue
+            target_dispositions[target_index] = "repaired"
             # The runtime rebinds the exact target and clears the selector
             # before the next full integrity validation.
-            replacements[target_index] = repaired_issue.model_copy(
-                update={"candidate_id": target_id, "target_candidate_id": ""}
-            )
+            replacements[target_index] = replacement
 
         if diagnostics is not None:
             for target_index, candidate in repairable_candidates.items():
-                if target_index not in replacements:
+                if (
+                    target_index not in replacements
+                    and target_index not in target_dispositions
+                ):
                     diagnostics.append(
                         {
                             "code": "repair_target_not_returned",
@@ -1528,6 +1648,48 @@ class AgentOrchestrator:
             issues=merged,
             schema_version=repaired.schema_version or original.schema_version,
         )
+
+    @staticmethod
+    def _apply_repair_patch(
+        original_issue: Any,
+        repaired_issue: Any,
+        *,
+        candidate_id: str,
+    ) -> Any:
+        """Apply only explicit semantic patch fields to one original issue."""
+
+        patch = repaired_issue.repair_patch
+        if patch is None:
+            return repaired_issue
+        updates = patch.model_dump(mode="json", exclude_none=True)
+        if "supports" in updates:
+            # normalize_model_repair_payload has already resolved these refs
+            # into the live evidence catalog on the temporary envelope.
+            updates["supports"] = repaired_issue.supports
+            for field in (
+                "cause_evidence",
+                "contract_evidence",
+                "trigger_evidence",
+                "impact_evidence",
+            ):
+                updates[field] = getattr(repaired_issue, field)
+        if "primary_anchor" in updates:
+            anchor = updates["primary_anchor"]
+            if isinstance(anchor, dict):
+                updates["location"] = SourceAnchor.model_validate(anchor).location
+        updates.update(
+            {
+                "candidate_id": candidate_id,
+                "target_candidate_id": "",
+                "repair_status": "",
+                "candidate_content_version": "",
+                "repair_reason": "",
+                "repair_patch": None,
+            }
+        )
+        payload = original_issue.model_dump(mode="json")
+        payload.update(updates)
+        return ReviewIssue.model_validate(payload)
 
     async def _maybe_recover_review_workflow(
         self,
@@ -1689,6 +1851,9 @@ class AgentOrchestrator:
                     len(results) == len(plan.tool_calls)
                     and all(result.ok or result.recoverable for result in results)
                 ),
+                input_payload=self._parse_tool_call(plan.tool_calls[validator_index]).get(
+                    "arguments", {}
+                ),
             )
         if self._workflow_enforcement == "off":
             return
@@ -1716,6 +1881,7 @@ class AgentOrchestrator:
         result: ToolResult,
         *,
         all_tools_succeeded: bool,
+        input_payload: dict[str, Any] | None = None,
     ) -> None:
         """Advance to submit-ready only after deterministic validation really passes."""
 
@@ -1740,6 +1906,11 @@ class AgentOrchestrator:
             self._last_validator_result = validator_payload
             self._validator_passed = False
             self._review_stage = "explore"
+            self._persist_preflight_journal(
+                input_payload=input_payload or {},
+                result_payload=validator_payload,
+                all_tools_succeeded=all_tools_succeeded,
+            )
             self._record_event(
                 EventType.DECISION,
                 "review_stage",
@@ -1812,6 +1983,11 @@ class AgentOrchestrator:
         )
         self._last_validator_result = validator_payload
         self._validator_passed = passed
+        self._persist_preflight_journal(
+            input_payload=input_payload or {},
+            result_payload=validator_payload,
+            all_tools_succeeded=all_tools_succeeded,
+        )
         self._record_event(
             EventType.PREFLIGHT_COMPLETED,
             "preflight",
@@ -1828,6 +2004,7 @@ class AgentOrchestrator:
                 "validator_passed": passed,
             },
         )
+
         if passed:
             self._review_stage = "submit_ready"
             self._investigation_ready = True
@@ -1846,6 +2023,30 @@ class AgentOrchestrator:
                 "policy_warning_count": len(summary_warnings),
                 "failed_issue_count": len(failed_issues),
             },
+        )
+
+    def _persist_preflight_journal(
+        self,
+        *,
+        input_payload: dict[str, Any],
+        result_payload: dict[str, Any],
+        all_tools_succeeded: bool,
+    ) -> None:
+        """Persist the exact validator boundary without runtime credentials."""
+
+        if self._run_journal is None:
+            return
+        payload = PreflightJournalPayload(
+            iteration=self._iteration,
+            all_tools_succeeded=all_tools_succeeded,
+            input=redact_sensitive_values(input_payload),
+            result=redact_sensitive_values(result_payload),
+        )
+        self._run_journal.append(
+            PendingRunJournalEntry(
+                type="preflight",
+                payload=payload.model_dump(mode="json"),
+            )
         )
 
     def _complete_workflow_step(self, step_id: str) -> None:
@@ -2326,6 +2527,11 @@ class AgentOrchestrator:
                     ),
                     allow_exploration=explicit_exploration_allowed,
                 )
+                # The engine updates the ledger only after it has confirmed which
+                # source bodies survived request serialization.  Publish that same
+                # snapshot before execute_tools so preflight sees the exact catalog
+                # that the model just received.
+                self._publish_evidence_catalog(state)
                 self._latest_tokens = usage.total_tokens
                 if result.schema_repair_attempted_count:
                     self._repair_format_attempt_count += (
@@ -3098,6 +3304,14 @@ class AgentOrchestrator:
                 not self._provider_error_seen or self._model_timeout_recovered
             )
         )
+        response.finding_run_status = response.completion_status
+        response.delivery_complete = bool(
+            response.review_complete
+            and response.completion_status == "complete"
+            and not self._integrity_needs_repair_count
+            and not self._integrity_invalid_count
+            and not self._completion_incomplete_reasons
+        )
 
     def should_continue(
         self, state: ContextState, response: ReviewResponse | DebugResponse
@@ -3307,6 +3521,7 @@ class AgentOrchestrator:
             self._evidence_snapshot_id = hashlib.sha256(
                 str(self._workspace_root).encode("utf-8")
             ).hexdigest()[:24]
+        self._live_evidence_catalog = []
         configured_log_dir = Path(self._settings.event_log_dir)
         if not configured_log_dir.is_absolute():
             configured_log_dir = Path(repo_path) / configured_log_dir
@@ -3425,6 +3640,7 @@ class AgentOrchestrator:
         self._repair_transactions = []
         self._active_repair_transaction = None
         self._repair_model_call_count = 0
+        self._evidence_catalog_digest = ""
         self._review_repair_attempt_count = 0
         self._repair_format_attempt_count = 0
         self._repair_contract_attempt_count = 0
@@ -3939,7 +4155,11 @@ class AgentOrchestrator:
             ).hexdigest()[:24]
         except Exception:  # noqa: BLE001
             pass
-        return ReviewToolContext.from_diff(request.repo_path, diff_text)
+        return ReviewToolContext.from_diff(
+            request.repo_path,
+            diff_text,
+            evidence_catalog_provider=lambda: list(self._live_evidence_catalog),
+        )
 
     async def _execute_one_tool(
         self,
@@ -4175,6 +4395,12 @@ class AgentOrchestrator:
     def _register_initial_candidates(self, report: ReviewReport) -> None:
         """Register the initial report before any identity-sensitive repair."""
 
+        # The simplified model input may still carry a legacy finding_id for
+        # replay compatibility, but initial runtime registration owns this
+        # identity and must not allow the model to rename it.
+        for issue in report.issues:
+            if not issue.target_candidate_id.strip():
+                issue.finding_id = ""
         registrations = self._candidate_registry.register_report(
             report,
             iteration=self._iteration,
@@ -4313,6 +4539,10 @@ class AgentOrchestrator:
             self._provider_error_seen and not self._model_timeout_recovered
         ):
             return "blocking_error"
+        if self._completion_incomplete_reasons:
+            return self._completion_incomplete_reasons[0]
+        if self._integrity_needs_repair_count or self._integrity_invalid_count:
+            return "finding_delivery_incomplete"
         for reason in (
             "draft_stagnation",
             "unresolved_draft_findings",
@@ -4391,6 +4621,9 @@ class AgentOrchestrator:
                 response.review_complete
                 if response is not None
                 else self._review_finalized
+            ),
+            "delivery_complete": bool(
+                response.delivery_complete if response is not None else False
             ),
             "provider_timeout_recovered": self._model_timeout_recovered,
             "budget_exhausted": self._budget_exhausted,
@@ -4586,6 +4819,7 @@ class AgentOrchestrator:
             "investigation_ready": bool(response.investigation_ready),
             "submission_received": bool(response.submission_received),
             "review_complete": bool(response.review_complete),
+            "delivery_complete": bool(response.delivery_complete),
         }
         self._record_event(
             EventType.FINDING_FUNNEL_COMPLETED,
@@ -4736,6 +4970,48 @@ class AgentOrchestrator:
             snapshot_id=self._evidence_snapshot_id,
             revision=self._evidence_revision,
         ).to_payload()
+        self._publish_evidence_catalog(state)
+
+    def _publish_evidence_catalog(self, state: ContextState) -> None:
+        """Expose and persist one exact delivered-evidence snapshot."""
+
+        self._live_evidence_catalog[:] = state.evidence_ledger
+        digest = hashlib.sha256(
+            _json.dumps(
+                state.evidence_ledger,
+                ensure_ascii=True,
+                sort_keys=True,
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        if digest == self._evidence_catalog_digest:
+            return
+        self._evidence_catalog_digest = digest
+        self._record_event(
+            EventType.EVIDENCE_LEDGER_UPDATED,
+            "evidence",
+            {
+                "snapshot_id": self._evidence_snapshot_id,
+                "revision": self._evidence_revision,
+                "delivered_count": len(state.evidence_ledger),
+                "evidence_ids": [
+                    str(item.get("evidence_id", ""))
+                    for item in state.evidence_ledger
+                    if str(item.get("evidence_id", "")).strip()
+                ],
+            },
+        )
+        if self._run_journal is not None:
+            self._run_journal.append(
+                PendingRunJournalEntry(
+                    type="evidence_catalog",
+                    payload={
+                        "snapshot_id": self._evidence_snapshot_id,
+                        "revision": self._evidence_revision,
+                        "records": state.evidence_ledger,
+                    },
+                )
+            )
 
     @staticmethod
     def _compute_feedback_digest(tool_call: dict[str, Any]) -> str:

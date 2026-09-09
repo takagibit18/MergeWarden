@@ -215,6 +215,8 @@ def _candidate_content_hash(issue: ReviewIssue) -> str:
         "root_cause_id",
         "context_manifest_id",
         "context_hash",
+        "repair_reason",
+        "repair_patch",
     ):
         payload.pop(key, None)
     for field in (

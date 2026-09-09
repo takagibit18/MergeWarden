@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 FINDING_SCHEMA_VERSION = "2.0"
@@ -19,6 +19,7 @@ EvidenceEligibility = Literal["strong", "exploratory", "none"]
 EvidenceRole = Literal["cause", "contract", "trigger", "impact", "related"]
 EvidenceSide = Literal["old", "new", "context", "unknown"]
 FindingSeverity = Literal["critical", "warning", "info", "style"]
+RepairPatchRole = Literal["cause", "contract", "trigger", "impact"]
 
 
 class SourceAnchor(BaseModel):
@@ -76,6 +77,40 @@ class ClaimSupport(BaseModel):
     role: EvidenceRole
     statement: str = Field(min_length=1)
     evidence_refs: list[str] = Field(min_length=1)
+
+
+class RepairPatchSupport(BaseModel):
+    """Model-facing support replacement allowed inside a field-level patch."""
+
+    role: RepairPatchRole
+    statement: str = Field(min_length=1)
+    evidence_refs: list[str] = Field(min_length=1)
+
+
+class FindingRepairPatch(BaseModel):
+    """Explicit semantic fields that a bounded repair may replace.
+
+    Runtime identity, finding labels, and provenance are deliberately absent.
+    ``None`` means that a field is not part of the patch; an explicitly empty
+    string/list is still a requested change and will be checked by the normal
+    canonical/integrity guard after application.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    severity: FindingSeverity | None = None
+    primary_anchor: SourceAnchor | None = None
+    evidence: str | None = None
+    suggestion: str | None = None
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    observed_behavior: str | None = None
+    causal_mechanism: str | None = None
+    violated_invariant: str | None = None
+    repair_intent: RepairIntent | None = None
+    trigger: str | None = None
+    impact: str | None = None
+    supports: list[RepairPatchSupport] | None = None
+    related_locations: list[RelatedLocation] | None = None
 
 
 class FindingDraft(BaseModel):

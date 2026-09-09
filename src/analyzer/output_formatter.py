@@ -17,6 +17,7 @@ from src.analyzer.finding_schema import (
     FINDING_SCHEMA_VERSION,
     CounterfactualResult,
     EvidenceProvenance,
+    FindingRepairPatch,
     RelatedLocation,
     RepairIntent,
     SourceAnchor,
@@ -61,7 +62,7 @@ class ReviewIssue(BaseModel):
             "not use it to create or rename a candidate."
         ),
     )
-    repair_status: Literal["", "repaired", "unchanged", "incomplete"] = Field(
+    repair_status: Literal["", "repaired", "unchanged", "incomplete", "deferred"] = Field(
         default="",
         description=(
             "Repair-only outcome for the exact target candidate. Use unchanged or "
@@ -71,6 +72,20 @@ class ReviewIssue(BaseModel):
     candidate_content_version: str = Field(
         default="",
         description="Repair-only content version copied from candidate_repair_feedback.",
+    )
+    repair_reason: str = Field(
+        default="",
+        description=(
+            "Repair-only explanation for unchanged, incomplete, or deferred "
+            "target disposition."
+        ),
+    )
+    repair_patch: FindingRepairPatch | None = Field(
+        default=None,
+        description=(
+            "Repair-only field-level semantic patch. Omitted fields remain "
+            "unchanged on the exact runtime candidate."
+        ),
     )
     schema_version: str = Field(
         default="1.0",

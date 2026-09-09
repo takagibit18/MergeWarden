@@ -547,14 +547,18 @@ def test_draft_is_journaled_and_stored_before_ordinary_tool_then_used_by_finaliz
         tmp_path / ".mergewarden" / "runs" / response.run_id / "journal.jsonl"
     )
     entries = RunJournal(response.run_id, journal_path, fsync=False).replay()
-    assert [entry.type for entry in entries] == [
+    assert [
+        entry.type
+        for entry in entries
+        if entry.type not in {"evidence_catalog", "finding_finalization"}
+    ] == [
         "model_response",
         "draft_finding",
         "tool_result",
         "model_response",
         "draft_finding_state",
     ]
-    draft_entry = entries[1]
+    draft_entry = next(entry for entry in entries if entry.type == "draft_finding")
     assert draft_entry.payload["id"].startswith("df_")
     assert draft_entry.payload["source_response_id"] == entries[0].id
     assert draft_entry.payload["file"] == "src/wrapper.py"
@@ -582,7 +586,9 @@ def test_draft_is_journaled_and_stored_before_ordinary_tool_then_used_by_finaliz
     assert "did not support" in response.report.summary
     assert response.completion_status == "incomplete"
     assert "unresolved_draft_findings" in response.incomplete_reasons
-    state_entry = entries[-1]
+    state_entry = next(
+        entry for entry in entries if entry.type == "draft_finding_state"
+    )
     assert state_entry.payload["draft_id"] == draft_entry.payload["id"]
     assert state_entry.payload["status"] == "incomplete"
     assert "record_draft_finding" in _tool_names(client.tools[0])
