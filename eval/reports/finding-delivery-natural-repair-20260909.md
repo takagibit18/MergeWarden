@@ -19,6 +19,8 @@ Discount 的结构性缺口也可以进入一次 repair，合法补入 contract 
 
 - 已核对 HEAD：`3ad48764a73c2f9c61a8c773c47625913ce8252a`
   （`3ad4876 fix: isolate runtime finding repair delivery`）。
+- 本轮实现、回放测试与新实验配置已固化到本地提交
+  `51a7610 fix: close finding repair delivery gates`；未 push。
 - 本轮真实验证没有新 run、没有新 provider 输出目录，没有读取或修改 `.env`，没有 push。
 - 上轮两个正常场景均为 `review_repair_max_attempts=0`、`retry_invalid=false`、
   `attempted_run_count=1`；受控 Discount 缺少 `causal_mechanism` 为
