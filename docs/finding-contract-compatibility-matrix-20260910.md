@@ -1,6 +1,6 @@
 # MergeWarden Harness v3 全链路版本兼容矩阵
 
-日期：2026-09-10  
+日期：2026-09-10
 范围：版本传播、数据适配、消费语义、验收覆盖。未调用真实模型、付费 provider 或真实发布接口；没有修改原始 finding、gold、receipt、.env 或全局 Git 配置。Harness v3 仍保持非默认状态。
 
 ## 先固定各版本轴
