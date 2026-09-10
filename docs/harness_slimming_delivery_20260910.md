@@ -249,5 +249,6 @@ schema 约束”失败；本报告不猜测字段。运行时现已把这些安�
 诊断证据边界；没有重新验证真实模型的因果准确率、provider 兼容性、实际成本，也没有把
 未命中 gold 自动宣称为真实误报。聚焦集合为 101 passed；全量 pytest 在仅当前进程
 禁用宿主 Git signing 后为 1021 passed、1 skipped、3 warnings；ruff check、mypy src、
-compileall 和 diff check 通过。v3 仍保持非默认、非正式外部发布状态；真实发布和真实
-语义质量需要另行授权与独立实验。
+compileall 和 diff check 通过；formatter check 仍是 10 个本轮触及文件的既有基线，
+未做机械重排。v3 仍保持非默认、非正式外部发布状态；真实发布和真实语义质量需要
+另行授权与独立实验。

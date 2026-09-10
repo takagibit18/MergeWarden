@@ -69,6 +69,7 @@
 - 全量 pytest 首轮：`1018 passed, 1 skipped, 3 failed`；3 项均在临时 Git fixture commit 阶段因宿主缺失 `C:/Users/Lenovo/.ssh/id_ed25519` 失败，未进入本轮业务逻辑。
 - 全量 pytest 使用仅当前进程的 `GIT_CONFIG_*` 禁用 signing 后：`1021 passed, 1 skipped, 3 warnings`。
 - `ruff check`（本轮触及文件）：通过。
+- `ruff format --check`（本轮触及集合）：报告 10 个文件沿用仓库既有格式/换行基线，未做机械重排。
 - `python -m mypy src`：通过，94 个 source files。
 - `python -m compileall`（本轮触及 Python 文件）：通过。
 - `git diff --check`：通过；仅有仓库既有 LF/CRLF 提示。

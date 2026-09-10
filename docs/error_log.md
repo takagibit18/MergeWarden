@@ -136,3 +136,4 @@
 | 2026-09-10 | v3 离线评分 / 事件阶段探针 | 第二次 `python -c` 同样保留了字面量换行，触发 SyntaxError | 仍使用了不适合 PowerShell 引号规则的多行内联表达式；不涉及产品代码或实验产物 | 后续改用已提交的离线重评分模块和单行只读命令，避免继续依赖多行 `-c` |
 | 2026-09-10 | v3 评估契约修复 / 全量 pytest 首轮 | 全量回归 1018 passed、1 skipped、3 failed；失败均在临时 Git fixture 的 commit 阶段报 `No private key found for C:/Users/Lenovo/.ssh/id_ed25519` | 宿主 Git signing 配置指向不可用私钥，三个用例未进入本轮评估或 verifier 逻辑 | 保留为环境问题；用仅当前 pytest 进程的 `GIT_CONFIG_*` 禁用 signing 后重跑，不修改全局 Git 配置 |
 | 2026-09-10 | v3 评估契约修复 / 全量 compileall 探针 | 对 `src cli.py eval tests` 递归 compileall 扫描时长异常且无输出，超过约 3 分钟后停止 | `eval/outputs` 含历史运行产物，递归扫描范围远大于本轮 Python 改动；此前触及文件 compileall 已通过 | 终止宽范围扫描，改按本轮源码、评估模块和测试文件的显式集合运行 compileall，避免把运行产物当源码门禁 |
+| 2026-09-10 | v3 评估契约修复 / Ruff formatter check | `ruff format --check` 对本轮触及集合报告 10 个文件需要重排 | 仓库既有 formatter/换行基线仍未统一，机械格式化会扩大本轮 diff；`ruff check` 本身已通过 | 不做无关格式重写；保留 formatter 基线并在交付报告中单独标明，代码 lint、类型和编译继续作为门禁 |
