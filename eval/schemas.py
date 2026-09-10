@@ -466,6 +466,17 @@ class ReviewProcessMetrics(BaseModel):
     consolidator_accepted_cluster_count: int = Field(default=0, ge=0)
     consolidator_rejected_cluster_count: int = Field(default=0, ge=0)
     matcher_version: str = DEFAULT_EVAL_MATCHER_VERSION
+    finding_contract_version: str = "unknown"
+    reviewer_total_tokens: int | None = Field(
+        default=None,
+        ge=0,
+        description="Successful reviewer provider tokens for the measured run; null when usage is unavailable.",
+    )
+    verifier_total_tokens: int | None = Field(
+        default=None,
+        ge=0,
+        description="Successful independent semantic-verifier tokens for the measured run; null when usage is unavailable.",
+    )
     final_root_cause_count: int = Field(default=0, ge=0)
     finding_inflation_ratio: float = Field(default=0.0, ge=0.0)
     event_log_status: Literal["ok", "missing", "parse_error"] = "missing"
@@ -513,6 +524,7 @@ class EvalResult(BaseModel):
     context_mode: ReviewContextMode = "graph_hybrid"
     graph_cache_mode: EvalGraphCacheMode = "warm"
     matcher_version: str = DEFAULT_EVAL_MATCHER_VERSION
+    finding_contract_version: str = "unknown"
     skill_retrieval_mode: EvalSkillRetrievalMode = "sequential"
     skill_bank_digest: str = ""
     skill_top_k: int = Field(default=5, ge=0, le=50)

@@ -118,6 +118,16 @@ class SemanticVerifierReceipt(BaseModel):
     request_estimated_tokens: int = Field(default=0, ge=0)
     response_digest: str = ""
     provider_attempt_count: int = Field(default=0, ge=0)
+    budget_tokens_used: int = Field(
+        default=0,
+        ge=0,
+        description="Cumulative report-level verifier budget consumed when this receipt was produced.",
+    )
+    budget_remaining_tokens: int | None = Field(
+        default=None,
+        ge=0,
+        description="Report-level verifier budget remaining after this receipt's call, when bounded.",
+    )
     model: str = ""
     provider_request_id: str = ""
     verifier_contract_version: str = "3.0"
@@ -220,6 +230,7 @@ class _CallOutcome:
     request_hash: str = ""
     request_estimated_tokens: int = 0
     response_digest: str = ""
+    provider_request_id: str = ""
     provider_attempt_count: int = 0
     failed_provider_attempt_count: int = 0
     failed_unknown_usage_count: int = 0
@@ -428,12 +439,14 @@ class SemanticVerifier:
 
         pending = list(candidate_list)
         first_decisions: dict[str, SemanticVerifierDecision] = {}
-        response_by_handle: dict[str, ModelResponse | None] = {}
         input_digests_by_handle: dict[str, str] = {}
         request_hashes_by_handle: dict[str, str] = {}
         request_tokens_by_handle: dict[str, int] = {}
         response_digests_by_handle: dict[str, str] = {}
         attempt_counts_by_handle: dict[str, int] = {}
+        provider_request_ids_by_handle: dict[str, str] = {}
+        models_by_handle: dict[str, str] = {}
+        budget_tokens_by_handle: dict[str, int] = {}
         investigated_handles: set[str] = set()
         investigation_tools_by_handle: dict[str, int] = {}
         invalid_handles: set[str] = set()
@@ -458,20 +471,34 @@ class SemanticVerifier:
                 used_tokens=result.budget_tokens_used,
             )
             self._record_call_outcome(result, outcome, usage_observer)
+
+            def bind_outcome_metadata(
+                handles: set[str], call: _CallOutcome, *, replace: bool = False
+            ) -> None:
+                """Keep safe request/response linkage even when parsing fails."""
+
+                for handle in handles:
+                    if replace or handle not in input_digests_by_handle:
+                        input_digests_by_handle[handle] = call.input_digest
+                    if replace or handle not in request_hashes_by_handle:
+                        request_hashes_by_handle[handle] = call.request_hash
+                    if replace or handle not in request_tokens_by_handle:
+                        request_tokens_by_handle[handle] = call.request_estimated_tokens
+                    if replace or handle not in response_digests_by_handle:
+                        response_digests_by_handle[handle] = call.response_digest
+                    if replace or handle not in attempt_counts_by_handle:
+                        attempt_counts_by_handle[handle] = call.provider_attempt_count
+                    if replace or handle not in provider_request_ids_by_handle:
+                        provider_request_ids_by_handle[handle] = call.provider_request_id
+                    if replace or handle not in models_by_handle:
+                        models_by_handle[handle] = str(
+                            getattr(call.response, "model", "") or ""
+                        )
+                    if replace or handle not in budget_tokens_by_handle:
+                        budget_tokens_by_handle[handle] = result.budget_tokens_used
+
+            bind_outcome_metadata(batch_handles, outcome)
             if not outcome.sent:
-                for candidate in batch:
-                    handle = candidate.opaque_handle
-                    input_digests_by_handle.setdefault(handle, outcome.input_digest)
-                    request_hashes_by_handle.setdefault(handle, outcome.request_hash)
-                    request_tokens_by_handle.setdefault(
-                        handle, outcome.request_estimated_tokens
-                    )
-                    response_digests_by_handle.setdefault(
-                        handle, outcome.response_digest
-                    )
-                    attempt_counts_by_handle.setdefault(
-                        handle, outcome.provider_attempt_count
-                    )
                 if outcome.error:
                     result.errors.append(outcome.error)
                 if outcome.error == "semantic_verifier_budget_exhausted_before_request":
@@ -492,7 +519,6 @@ class SemanticVerifier:
                 if decision.opaque_handle in invalid_handles:
                     continue
                 first_decisions[decision.opaque_handle] = decision
-                response_by_handle[decision.opaque_handle] = outcome.response
                 input_digests_by_handle[decision.opaque_handle] = outcome.input_digest
                 request_hashes_by_handle[decision.opaque_handle] = outcome.request_hash
                 request_tokens_by_handle[decision.opaque_handle] = (
@@ -575,6 +601,9 @@ class SemanticVerifier:
                         used_tokens=result.budget_tokens_used,
                     )
                     self._record_call_outcome(result, recheck, usage_observer)
+                    bind_outcome_metadata(
+                        {candidate.opaque_handle}, recheck, replace=True
+                    )
                     if recheck.error:
                         result.errors.append(recheck.error)
                         forced_unresolved[candidate.opaque_handle] = recheck.error
@@ -594,9 +623,6 @@ class SemanticVerifier:
                             )
                         else:
                             first_decisions[candidate.opaque_handle] = rechecked[0]
-                            response_by_handle[candidate.opaque_handle] = (
-                                recheck.response
-                            )
                             input_digests_by_handle[candidate.opaque_handle] = (
                                 recheck.input_digest
                             )
@@ -638,6 +664,17 @@ class SemanticVerifier:
                     provider_attempt_count=attempt_counts_by_handle.get(
                         candidate.opaque_handle, 0
                     ),
+                    provider_request_id=provider_request_ids_by_handle.get(
+                        candidate.opaque_handle, ""
+                    ),
+                    budget_tokens_used=budget_tokens_by_handle.get(
+                        candidate.opaque_handle, result.budget_tokens_used
+                    ),
+                    budget_remaining_tokens=self._remaining_total_tokens(
+                        budget_tokens_by_handle.get(
+                            candidate.opaque_handle, result.budget_tokens_used
+                        )
+                    ),
                 )
                 result.receipts.append(receipt)
                 continue
@@ -668,6 +705,17 @@ class SemanticVerifier:
                     ),
                     provider_attempt_count=attempt_counts_by_handle.get(
                         candidate.opaque_handle, 0
+                    ),
+                    provider_request_id=provider_request_ids_by_handle.get(
+                        candidate.opaque_handle, ""
+                    ),
+                    budget_tokens_used=budget_tokens_by_handle.get(
+                        candidate.opaque_handle, result.budget_tokens_used
+                    ),
+                    budget_remaining_tokens=self._remaining_total_tokens(
+                        budget_tokens_by_handle.get(
+                            candidate.opaque_handle, result.budget_tokens_used
+                        )
                     ),
                 )
             else:
@@ -710,21 +758,17 @@ class SemanticVerifier:
                     provider_attempt_count=attempt_counts_by_handle.get(
                         candidate.opaque_handle, 0
                     ),
-                    model=str(
-                        getattr(
-                            response_by_handle.get(candidate.opaque_handle),
-                            "model",
-                            "",
-                        )
-                        or ""
+                    budget_tokens_used=budget_tokens_by_handle.get(
+                        candidate.opaque_handle, result.budget_tokens_used
                     ),
-                    provider_request_id=str(
-                        getattr(
-                            response_by_handle.get(candidate.opaque_handle),
-                            "provider_request_id",
-                            "",
+                    budget_remaining_tokens=self._remaining_total_tokens(
+                        budget_tokens_by_handle.get(
+                            candidate.opaque_handle, result.budget_tokens_used
                         )
-                        or ""
+                    ),
+                    model=models_by_handle.get(candidate.opaque_handle, ""),
+                    provider_request_id=provider_request_ids_by_handle.get(
+                        candidate.opaque_handle, ""
                     ),
                     investigation_calls=int(
                         candidate.opaque_handle in investigated_handles
@@ -1001,6 +1045,7 @@ class SemanticVerifier:
                 request_hash=assembled.request_hash,
                 request_estimated_tokens=assembled.estimated_tokens,
                 response_digest=response_digest,
+                provider_request_id=str(getattr(response, "provider_request_id", "") or ""),
                 provider_attempt_count=attempt_count,
                 failed_provider_attempt_count=failed_count,
                 failed_unknown_usage_count=unknown_count,
@@ -1020,6 +1065,7 @@ class SemanticVerifier:
                     request_hash=assembled.request_hash,
                     request_estimated_tokens=assembled.estimated_tokens,
                     response_digest=response_digest,
+                    provider_request_id=str(getattr(response, "provider_request_id", "") or ""),
                     provider_attempt_count=attempt_count,
                     failed_provider_attempt_count=failed_count,
                     failed_unknown_usage_count=unknown_count,
@@ -1038,6 +1084,7 @@ class SemanticVerifier:
                 request_hash=assembled.request_hash,
                 request_estimated_tokens=assembled.estimated_tokens,
                 response_digest=response_digest,
+                provider_request_id=str(getattr(response, "provider_request_id", "") or ""),
                 provider_attempt_count=attempt_count,
                 failed_provider_attempt_count=failed_count,
                 failed_unknown_usage_count=unknown_count,
@@ -1086,6 +1133,7 @@ class SemanticVerifier:
             request_hash=assembled.request_hash,
             request_estimated_tokens=assembled.estimated_tokens,
             response_digest=response_digest,
+            provider_request_id=str(getattr(response, "provider_request_id", "") or ""),
             provider_attempt_count=attempt_count,
             failed_provider_attempt_count=failed_count,
             failed_unknown_usage_count=unknown_count,
@@ -1204,6 +1252,9 @@ class SemanticVerifier:
         request_estimated_tokens: int = 0,
         response_digest: str = "",
         provider_attempt_count: int = 0,
+        provider_request_id: str = "",
+        budget_tokens_used: int = 0,
+        budget_remaining_tokens: int | None = None,
     ) -> SemanticVerifierReceipt:
         return SemanticVerifierReceipt(
             opaque_handle=candidate.opaque_handle,
@@ -1218,6 +1269,9 @@ class SemanticVerifier:
             request_estimated_tokens=request_estimated_tokens,
             response_digest=response_digest,
             provider_attempt_count=provider_attempt_count,
+            provider_request_id=provider_request_id,
+            budget_tokens_used=budget_tokens_used,
+            budget_remaining_tokens=budget_remaining_tokens,
             error_code=error_code,
         )
 

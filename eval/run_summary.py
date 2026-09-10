@@ -48,6 +48,8 @@ def extract_review_process_metrics(
 ) -> ReviewProcessMetrics:
     """Extract process metrics from one JSONL event timeline."""
     metrics = ReviewProcessMetrics(matcher_version=matcher_version)
+    reviewer_usage_seen = False
+    reviewer_total_tokens = 0
     if not event_log_path:
         return metrics
     path = Path(event_log_path)
@@ -83,6 +85,9 @@ def extract_review_process_metrics(
             metrics.pre_budget_submit_triggered = True
         if event_type == "finding_funnel_completed":
             metrics.finding_funnel = FindingFunnel.model_validate(payload)
+            raw_contract_version = payload.get("finding_contract_version")
+            if isinstance(raw_contract_version, str) and raw_contract_version.strip():
+                metrics.finding_contract_version = raw_contract_version.strip()
             for field_name in (
                 "logical_candidate_count",
                 "submitted_finding_count",
@@ -159,6 +164,15 @@ def extract_review_process_metrics(
             metrics.deterministic_evidence_rejected_count = _non_negative_int(
                 payload.get("deterministic_evidence_rejected_count")
             )
+            if phase == "semantic_verify_findings" and "total_tokens" in payload:
+                unknown_usage = _non_negative_int(
+                    payload.get("failed_unknown_usage_count")
+                )
+                metrics.verifier_total_tokens = (
+                    None
+                    if unknown_usage
+                    else _non_negative_int(payload.get("total_tokens"))
+                )
             metrics.model_raw_issue_count = _non_negative_int(
                 payload.get("model_raw_issue_count", metrics.model_raw_issue_count)
             )
@@ -282,6 +296,10 @@ def extract_review_process_metrics(
                 if payload.get("usage_unknown") is True:
                     metrics.failed_unknown_usage_count += 1
             elif usage_present:
+                reviewer_usage_seen = True
+                reviewer_total_tokens += _non_negative_int(
+                    payload.get("total_tokens")
+                )
                 metrics.successful_prompt_tokens += _non_negative_int(
                     payload.get("prompt_tokens")
                 )
@@ -424,6 +442,9 @@ def extract_review_process_metrics(
                 payload.get("completion_tokens")
             )
             metrics.total_tokens = _non_negative_int(payload.get("total_tokens"))
+            raw_contract_version = payload.get("finding_contract_version")
+            if isinstance(raw_contract_version, str) and raw_contract_version.strip():
+                metrics.finding_contract_version = raw_contract_version.strip()
             for field_name in (
                 "logical_candidate_count",
                 "submitted_finding_count",
@@ -545,6 +566,9 @@ def extract_review_process_metrics(
             )
             metrics.graph_fallback_reason = str(payload.get("fallback_reason", ""))
             _update_graph_selection_metrics(metrics, payload)
+    metrics.reviewer_total_tokens = (
+        reviewer_total_tokens if reviewer_usage_seen else None
+    )
     return metrics
 
 

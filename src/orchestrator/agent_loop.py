@@ -1170,6 +1170,10 @@ class AgentOrchestrator:
                 "completion_tokens": semantic_result.completion_tokens,
                 "reasoning_tokens": semantic_result.reasoning_tokens,
                 "total_tokens": semantic_result.total_tokens,
+                "provider_attempt_count": semantic_result.provider_attempt_count,
+                "failed_provider_attempt_count": semantic_result.failed_provider_attempt_count,
+                "failed_unknown_usage_count": semantic_result.failed_unknown_usage_count,
+                "budget_tokens_used": semantic_result.budget_tokens_used,
                 "cached_prompt_tokens": semantic_result.cached_prompt_tokens,
                 "cache_observation_count": semantic_result.cache_observation_count,
                 "cache_hit_count": semantic_result.cache_hit_count,
@@ -1225,6 +1229,17 @@ class AgentOrchestrator:
                 int(payload.get("provider_attempt_count", 0) or 0)
                 if phase == "receipt"
                 else 0
+            ),
+            budget_tokens_used=(
+                int(payload.get("budget_tokens_used", 0) or 0)
+                if phase == "receipt"
+                else 0
+            ),
+            budget_remaining_tokens=(
+                int(payload["budget_remaining_tokens"])
+                if phase == "receipt"
+                and payload.get("budget_remaining_tokens") is not None
+                else None
             ),
             verdict=(str(payload.get("verdict", "")) if phase == "receipt" else ""),
             status=(str(payload.get("status", "")) if phase == "receipt" else ""),

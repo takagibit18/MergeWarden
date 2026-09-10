@@ -31,6 +31,10 @@ from eval.schemas import (
 )
 from src.analyzer.location import normalize_location
 from src.analyzer.finding_schema import normalize_repo_path
+from src.analyzer.finding_delivery import (
+    candidate_content_version,
+    relevant_evidence_context_digest,
+)
 from src.analyzer.output_formatter import (
     Severity,
     has_specific_code_evidence,
@@ -908,6 +912,7 @@ async def run_single(
                 run_id=parsed_response.run_id,
                 schema_valid=schema_valid,
                 expected_count=expected_count,
+                finding_contract_version=process_metrics.finding_contract_version,
                 actual_count=actual_count,
                 matched_count=matched_count,
                 false_positive_count=false_positive_count,
@@ -1456,10 +1461,10 @@ def _read_total_tokens(repo_root: Path, run_id: str) -> int:
             raw_successful_total = payload.get("successful_total_tokens")
             if isinstance(raw_successful_total, int):
                 completed_successful_total = max(0, raw_successful_total)
-    if provider_attempt_seen:
-        return provider_total
     if completed_successful_total is not None:
         return completed_successful_total
+    if provider_attempt_seen:
+        return provider_total
     return completed_total if completed_total is not None else model_total
 
 
@@ -1596,15 +1601,140 @@ def _structural_issue_metrics(
 
 
 def _effective_review_issues(fixture: Fixture, response: ReviewResponse) -> list[Any]:
-    return [
-        issue
-        for issue in response.report.issues
+    effective: list[Any] = []
+    for issue in response.report.issues:
+        if getattr(issue, "is_v3_finding", False):
+            # v3 has no model confidence/evidence narrative contract.  Its
+            # evaluation eligibility is a runtime binding check instead of a
+            # second copy of the legacy prose heuristic.
+            eligible, _ = _v3_eval_eligibility(issue, response)
+            if eligible:
+                effective.append(issue)
+            continue
         if (
             _is_eval_effective_issue(issue, fixture)
             or _is_eval_expected_location_issue(issue, fixture)
-        )
-        and _meets_expected_severity_floor(issue, fixture)
+        ) and _meets_expected_severity_floor(issue, fixture):
+            effective.append(issue)
+    return effective
+
+
+def _v3_eval_eligibility(issue: Any, response: ReviewResponse) -> tuple[bool, str]:
+    """Check the existing runtime binding before entering an independent matcher.
+
+    This is deliberately an adapter, not a new acceptance gate.  It consumes
+    the runtime-owned candidate registration, integrity version, semantic
+    receipt, and relevant evidence digest already produced by the harness.
+    It never consults gold content, expected locations, or legacy model fields.
+    """
+
+    if not response.semantic_verifier_required:
+        return False, "v3_semantic_verifier_not_required"
+    if not response.semantic_verifier_completed:
+        return False, "v3_semantic_verifier_incomplete"
+    if response.completion_status != "complete":
+        return False, "v3_response_incomplete"
+    if response.finding_run_status != "complete":
+        return False, "v3_finding_run_incomplete"
+    if not response.delivery_complete:
+        return False, "v3_delivery_incomplete"
+    if not response.report_ready:
+        return False, "v3_report_not_ready"
+    if response.semantic_needs_revision_count or response.semantic_unresolved_count:
+        return False, "v3_semantic_unresolved"
+
+    candidate_id = str(getattr(issue, "candidate_id", "") or "").strip()
+    if not candidate_id:
+        return False, "v3_candidate_id_missing"
+    registrations = [
+        item
+        for item in response.context.candidate_registrations
+        if isinstance(item, dict)
+        and str(item.get("candidate_id", "")).strip() == candidate_id
     ]
+    if len(registrations) != 1:
+        return False, "v3_candidate_registration_missing_or_ambiguous"
+    registration = registrations[0]
+    current_version = str(registration.get("candidate_content_version", "")).strip()
+    if not current_version:
+        return False, "v3_content_version_missing"
+    try:
+        issue_version = candidate_content_version(issue)
+    except Exception:  # noqa: BLE001
+        return False, "v3_content_version_uncomputable"
+    if issue_version != current_version:
+        return False, "v3_content_version_mismatch"
+    if str(registration.get("status", "")).strip() not in {"verified", "published"}:
+        return False, "v3_integrity_status_not_verified"
+    if str(registration.get("validated_content_version", "")).strip() != current_version:
+        return False, "v3_integrity_version_mismatch"
+    if str(registration.get("semantic_verdict", "")).strip() != "accept":
+        return False, "v3_semantic_receipt_not_accepted"
+    if (
+        str(registration.get("semantic_validated_content_version", "")).strip()
+        != current_version
+    ):
+        return False, "v3_semantic_version_mismatch"
+
+    receipts = registration.get("semantic_receipts", [])
+    if not isinstance(receipts, list):
+        return False, "v3_semantic_receipts_missing"
+    matching_receipts = [
+        item
+        for item in receipts
+        if isinstance(item, dict)
+        and str(item.get("content_version", "")).strip() == current_version
+    ]
+    if len(matching_receipts) != 1:
+        return False, "v3_semantic_receipt_missing_or_ambiguous"
+    receipt = matching_receipts[0]
+    if str(receipt.get("candidate_id", "")).strip() != candidate_id:
+        return False, "v3_semantic_receipt_candidate_mismatch"
+    if str(receipt.get("verdict", "")).strip() != "accept":
+        return False, "v3_semantic_receipt_not_accept"
+    if str(receipt.get("status", "")).strip() != "completed":
+        return False, "v3_semantic_receipt_incomplete"
+    for field_name in (
+        "input_digest",
+        "request_hash",
+        "response_digest",
+        "provider_request_id",
+    ):
+        if not str(receipt.get(field_name, "")).strip():
+            return False, f"v3_semantic_receipt_{field_name}_missing"
+    try:
+        if int(receipt.get("provider_attempt_count", 0) or 0) < 1:
+            return False, "v3_semantic_receipt_attempt_missing"
+    except (TypeError, ValueError):
+        return False, "v3_semantic_receipt_attempt_invalid"
+
+    receipt_evidence_digest = str(
+        receipt.get("evidence_context_digest", "")
+    ).strip()
+    registered_evidence_digest = str(
+        registration.get("semantic_validated_evidence_context_digest", "")
+    ).strip()
+    if not receipt_evidence_digest or receipt_evidence_digest != registered_evidence_digest:
+        return False, "v3_semantic_evidence_binding_mismatch"
+    evidence_refs = [
+        str(item).strip()
+        for item in getattr(issue, "evidence_refs", [])
+        if str(item).strip()
+    ]
+    if not evidence_refs:
+        return False, "v3_evidence_refs_missing"
+    ledger = response.context.evidence_ledger
+    if not ledger:
+        return False, "v3_evidence_ledger_missing"
+    current_evidence_digest = relevant_evidence_context_digest(
+        ledger,
+        evidence_refs,
+        snapshot_id=response.context.evidence_snapshot_id,
+        revision=response.context.evidence_revision,
+    )
+    if current_evidence_digest != receipt_evidence_digest:
+        return False, "v3_evidence_digest_changed"
+    return True, "eligible"
 
 
 def _root_cause_quality(

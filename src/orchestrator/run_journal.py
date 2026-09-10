@@ -185,6 +185,8 @@ class SemanticVerifierJournalPayload(BaseModel):
     response_digest: str = ""
     provider_request_id: str = ""
     provider_attempt_count: int = Field(default=0, ge=0)
+    budget_tokens_used: int = Field(default=0, ge=0)
+    budget_remaining_tokens: int | None = Field(default=None, ge=0)
     verdict: str = ""
     status: str = ""
     error_code: str = ""
