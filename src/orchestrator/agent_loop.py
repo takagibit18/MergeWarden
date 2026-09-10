@@ -492,7 +492,7 @@ class AgentOrchestrator:
             request,
             state,
         )
-        if any(issue.is_v3_finding for issue in submitted_report.issues):
+        if submitted_report.schema_version == "3.0":
             return await self._run_semantic_verifier(
                 guarded,
                 submitted_report,
@@ -510,7 +510,7 @@ class AgentOrchestrator:
     ) -> ReviewResponse:
         """Run the default thin integrity stage without another model call."""
 
-        v3_mode = any(issue.is_v3_finding for issue in submitted_report.issues)
+        v3_mode = submitted_report.schema_version == "3.0"
         semantic_mode = v3_mode
         self._semantic_verifier_required = semantic_mode
         filter_decisions = [
@@ -2321,9 +2321,7 @@ class AgentOrchestrator:
             submitted_report,
             iteration=self._iteration,
             registry=self._candidate_registry,
-            include_non_risk=any(
-                issue.is_v3_finding for issue in submitted_report.issues
-            ),
+            include_non_risk=submitted_report.schema_version == "3.0",
         )
         if not candidates:
             return response
@@ -2716,7 +2714,7 @@ class AgentOrchestrator:
             iteration=self._iteration,
             registry=self._candidate_registry,
             register=False,
-            include_non_risk=any(issue.is_v3_finding for issue in merged.issues),
+            include_non_risk=merged.schema_version == "3.0",
         )
         repaired_tool_evidence = self._observed_tool_evidence(state)
         repaired_result = FindingIntegrityGuard(self._workspace_root).validate(
@@ -5358,7 +5356,10 @@ class AgentOrchestrator:
         blocking_error: bool
         if self._is_review_mode(state):
             response, blocking_error = self._result_processor.format_review(
-                plan, tool_results, state
+                plan,
+                tool_results,
+                state,
+                contract_version=self._settings.finding_contract_version,
             )
         else:
             response, blocking_error = self._result_processor.format_debug(
@@ -6898,6 +6899,8 @@ class AgentOrchestrator:
         cls,
         plan: AnalysisPlan,
         state: ContextState,
+        *,
+        contract_version: str = "2.0",
     ) -> tuple[bool, list[str], list[dict[str, Any]]]:
         """Ensure format recovery did not mutate semantic/evidence content."""
 
@@ -6996,11 +6999,7 @@ class AgentOrchestrator:
                 if field in allowed_fields:
                     continue
                 raw_field = field
-                if (
-                    field == "primary_anchor"
-                    and field not in raw_issue
-                    and "anchor" in raw_issue
-                ):
+                if field == "primary_anchor" and contract_version == "3.0":
                     raw_field = "anchor"
                 if raw_field not in raw_issue or raw_issue.get(raw_field) in (None, "", []):
                     continue
@@ -7066,6 +7065,8 @@ class AgentOrchestrator:
     def _build_format_recovery_salvage(
         plan: AnalysisPlan,
         state: ContextState,
+        *,
+        contract_version: str = "2.0",
     ) -> ReviewReport:
         """Materialize the original payload with placeholders, never guesses."""
 
@@ -7082,7 +7083,7 @@ class AgentOrchestrator:
                 )
                 if not isinstance(normalized, dict):
                     continue
-                is_v3 = normalized.get("schema_version") == "3.0" or "anchor" in raw_issue
+                is_v3 = contract_version == "3.0"
                 normalized.setdefault("severity", "info")
                 normalized.setdefault(
                     "primary_anchor",
@@ -7092,7 +7093,7 @@ class AgentOrchestrator:
                 normalized.setdefault("evidence", "")
                 normalized.setdefault("suggestion", "")
                 normalized.setdefault("confidence", 0.0)
-                normalized["schema_version"] = "3.0" if is_v3 else "2.0"
+                normalized["schema_version"] = contract_version
                 normalized.update(
                     {
                         "candidate_id": "",
@@ -7161,7 +7162,7 @@ class AgentOrchestrator:
             or "Format recovery rejected; the original candidate was preserved for integrity validation.",
             issues=issues,
             schema_version=(
-                "3.0" if any(issue.is_v3_finding for issue in issues) else "2.0"
+                contract_version
             ),
         )
 
@@ -7180,15 +7181,24 @@ class AgentOrchestrator:
             safe, preserved_refs, diagnostics = self._check_format_recovery_preservation(
                 plan,
                 state,
+                contract_version=self._settings.finding_contract_version,
             )
         else:
             safe = False
-            plan.draft_review = self._build_format_recovery_salvage(plan, state)
+            plan.draft_review = self._build_format_recovery_salvage(
+                plan,
+                state,
+                contract_version=self._settings.finding_contract_version,
+            )
             diagnostics = [{"code": "format_recovery_no_valid_recovered_report"}]
         if safe:
             plan.format_recovery_status = "accepted"
         else:
-            plan.draft_review = self._build_format_recovery_salvage(plan, state)
+            plan.draft_review = self._build_format_recovery_salvage(
+                plan,
+                state,
+                contract_version=self._settings.finding_contract_version,
+            )
             plan.format_recovery_status = "rejected_preserved_input"
             plan.format_recovery_rejected = True
         payload = FormatRecoveryJournalPayload(
@@ -7313,7 +7323,7 @@ class AgentOrchestrator:
         registrations = self._candidate_registry.register_report(
             report,
             iteration=self._iteration,
-            include_non_risk=any(issue.is_v3_finding for issue in report.issues),
+            include_non_risk=report.schema_version == "3.0",
         )
         if not registrations:
             return

@@ -174,8 +174,22 @@ class ReviewResponse(BaseModel):
         """Serialize public output using the report's active finding contract."""
 
         payload = super().model_dump(mode="json")
-        if any(issue.is_v3_finding for issue in self.report.issues):
+        if self.report.schema_version == "3.0":
             payload["report"] = self.report.contract_payload()
+            # Candidate ids, receipt bindings, evidence ledgers, and repair
+            # transactions are runtime/audit state.  A public v3 payload is
+            # displayable and re-importable, but it is not an approval receipt
+            # and must not expose those private identities for convenience.
+            payload["context"] = self.context.model_dump(
+                mode="json",
+                include={
+                    "goal",
+                    "context_mode",
+                    "constraints",
+                    "current_files",
+                    "errors",
+                },
+            )
         return payload
 
     def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:

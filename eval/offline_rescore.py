@@ -20,14 +20,17 @@ from eval.run_summary import extract_review_process_metrics
 from eval.runner import (
     _effective_review_issues,
     _match_issues_for_version,
+    _root_cause_quality_for_version,
+    _v3_duplicate_actual_count,
     _v3_eval_eligibility,
     load_fixtures,
 )
+from eval.schemas import V3_CONTENT_MATCHER_VERSION
 from src.analyzer.location import normalize_location
 from src.analyzer.schemas import ReviewResponse
 
 
-RESCORE_VERSION = "offline-rescore-v1"
+RESCORE_VERSION = "offline-rescore-v2"
 V3_ADAPTER_VERSION = "v3-runtime-boundary-v1"
 
 
@@ -142,12 +145,17 @@ def _finding_decisions(
     actual_issues: list[Any],
     matches: list[Any],
 ) -> list[dict[str, Any]]:
+    assigned_by_actual: dict[int, list[int]] = {}
     matched_by_actual: dict[int, list[int]] = {}
     for match in matches:
         if match.matched_actual_index is not None:
-            matched_by_actual.setdefault(match.matched_actual_index, []).append(
+            assigned_by_actual.setdefault(match.matched_actual_index, []).append(
                 match.expected_index
             )
+            if match.matched:
+                matched_by_actual.setdefault(match.matched_actual_index, []).append(
+                    match.expected_index
+                )
     registrations = {
         str(item.get("candidate_id", "")): item
         for item in response.context.candidate_registrations
@@ -197,6 +205,11 @@ def _finding_decisions(
                     if actual_index is not None
                     else []
                 ),
+                "diagnostic_expected_indexes": (
+                    assigned_by_actual.get(actual_index, [])
+                    if actual_index is not None
+                    else []
+                ),
                 "receipt_binding": receipt,
             }
         )
@@ -226,6 +239,18 @@ def _gold_match_details(fixture: Any, matches: list[Any], actual_issues: list[An
                 "matched_location": (
                     str(getattr(actual, "location", "")) if actual is not None else ""
                 ),
+                "location_matched": match.location_matched,
+                "severity_matched": match.role_match_diagnostics.get(
+                    "severity_floor_met"
+                ),
+                "root_cause_matched": match.root_cause_matched,
+                "semantic_status": match.role_match_diagnostics.get(
+                    "semantic_status", "not_available"
+                ),
+                "repair_unit_status": match.role_match_diagnostics.get(
+                    "repair_unit_status", "not_available"
+                ),
+                "diagnostics": dict(match.role_match_diagnostics),
             }
         )
     return details
@@ -417,7 +442,14 @@ def _run_view(
     result = record.get("result", {})
     raw_output = result.get("raw_output", {})
     response = ReviewResponse.model_validate(raw_output)
-    matcher_version = str(result.get("matcher_version", "semantic-v3"))
+    if response.report.schema_version != "3.0":
+        raise ValueError(
+            "offline v3 rescore requires report schema_version='3.0'"
+        )
+    # A missing source matcher is evidence loss, not permission to infer the
+    # historical default.  The rescore matcher remains explicit below.
+    source_matcher_version = str(result.get("matcher_version", "")).strip() or "unknown"
+    matcher_version = V3_CONTENT_MATCHER_VERSION
     event_path = _resolve_path(str(result.get("event_log_path", "")), repo_root=repo_root)
     journal_path = _resolve_path(
         str(record.get("lifecycle", {}).get("run_journal_path", "")),
@@ -429,9 +461,25 @@ def _run_view(
         event_path,
         matcher_version=matcher_version,
     )
+    process_metrics.matcher_version = matcher_version
+    process_metrics.finding_contract_version = response.report.schema_version
     actual_issues = _effective_review_issues(fixture, response)
     matches, matched_count, unmatched_actual_count = _match_issues_for_version(
         fixture, response, matcher_version
+    )
+    root_cause_quality = _root_cause_quality_for_version(
+        fixture,
+        response,
+        matches,
+        matcher_version,
+    )
+    severity_matched_count = sum(
+        bool(match.role_match_diagnostics.get("severity_floor_met"))
+        for match in matches
+    )
+    semantic_undetermined_count = sum(
+        match.role_match_diagnostics.get("semantic_status") == "undetermined"
+        for match in matches
     )
     funnel = _last_funnel_payload(events)
     external_status = str(response.external_publish_status)
@@ -443,7 +491,8 @@ def _run_view(
         "run_id": str(record.get("run_id", "")),
         "runner_execution_valid": bool(record.get("valid", False)),
         "schema_valid": bool(result.get("schema_valid", False)),
-        "finding_contract_version": process_metrics.finding_contract_version,
+        "finding_contract_version": response.report.schema_version,
+        "source_matcher_version": source_matcher_version,
         "matcher_version": matcher_version,
         "adapter_version": V3_ADAPTER_VERSION,
         "raw_report_finding_count": len(response.report.issues),
@@ -464,11 +513,24 @@ def _run_view(
         "matched_count": matched_count,
         "false_positive_count": unmatched_actual_count,
         "false_positive_metric_definition": "gold_based_unmatched_actual_count; not a semantic false-positive judgment",
+        "approved_finding_count": len(actual_issues),
+        "location_matched_count": sum(bool(match.location_matched) for match in matches),
+        "severity_matched_count": severity_matched_count,
+        "root_cause_matched_count": sum(
+            bool(match.root_cause_matched) for match in matches
+        ),
+        "repair_unit_matched_count": int(
+            root_cause_quality.get("repair_unit_matched_count") or 0
+        ),
+        "semantic_undetermined_count": semantic_undetermined_count,
+        "duplicate_actual_count": _v3_duplicate_actual_count(actual_issues),
+        "root_cause_quality": root_cause_quality,
         "gold_match_details": _gold_match_details(fixture, matches, actual_issues),
         "finding_decisions": _finding_decisions(response, actual_issues, matches),
         "metric_change_reason": (
-            "v3 final findings now use runtime receipt/version/evidence bindings; "
-            "legacy confidence/evidence prose filtering is not applied"
+            "v3 final findings use runtime receipt/version/evidence bindings; "
+            "semantic-v3-content-v1 consumes description, anchor, related_locations, "
+            "suggestion, and evidence_refs. Legacy narrative fields are not consulted."
         ),
         "token_accounting": _token_accounting(
             result, events, journal_rows, process_metrics
@@ -609,7 +671,14 @@ def rescore_experiment(
             }
         ),
         "finding_contract_version": "3.0",
-        "matcher_version": "semantic-v3",
+        "source_matcher_versions": sorted(
+            {
+                str(view.get("source_matcher_version", ""))
+                for view in run_views
+                if str(view.get("source_matcher_version", "")).strip()
+            }
+        ),
+        "matcher_version": V3_CONTENT_MATCHER_VERSION,
         "adapter_version": V3_ADAPTER_VERSION,
         "checkpoint_row_count": len(checkpoint_rows),
         "missing_fixture_ids": sorted(set(missing_fixture_ids)),

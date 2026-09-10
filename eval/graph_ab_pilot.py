@@ -43,6 +43,7 @@ from eval.schemas import (
     Fixture,
     MetricSummary,
     StructuralIssueMetrics,
+    validate_eval_matcher_contract,
 )
 from src.analyzer.context_strategy import GraphHybridContextStrategy
 from src.analyzer.persistent_index import INDEX_SCHEMA_VERSION
@@ -349,6 +350,13 @@ async def run_single_lifecycle(
     deferred_workspace_dir: Path | None = None,
 ) -> tuple[EvalResult, dict[str, Any]]:
     """Run the frozen eval pipeline with phase-two-owned index lifecycle."""
+    active_contract_version = str(get_settings().finding_contract_version).strip()
+    validate_eval_matcher_contract(matcher_version, active_contract_version)
+    if active_contract_version != "2.0":
+        raise ValueError(
+            "Graph A/B pilot is explicitly v2-only; Harness v3 requires the "
+            "main evaluator or offline v3-content rescore"
+        )
     expected_count = len(fixture.expected.issues)
     stage_timings: dict[str, float] = {}
     lifecycle: dict[str, Any] = {}
@@ -393,6 +401,7 @@ async def run_single_lifecycle(
                         **base_runner._variant_result_fields(
                             variant, matcher_version=matcher_version
                         ),
+                        finding_contract_version=active_contract_version,
                         schema_valid=False,
                         expected_count=expected_count,
                         stage_timings=stage_timings,
@@ -576,6 +585,7 @@ async def run_single_lifecycle(
                 **base_runner._variant_result_fields(
                     variant, matcher_version=matcher_version
                 ),
+                finding_contract_version=active_contract_version,
                 run_id=parsed_response.run_id,
                 schema_valid=base_runner._eval_schema_valid(parsed_response),
                 expected_count=expected_count,
@@ -630,6 +640,7 @@ async def run_single_lifecycle(
                 **base_runner._variant_result_fields(
                     variant, matcher_version=matcher_version
                 ),
+                finding_contract_version=active_contract_version,
                 schema_valid=False,
                 expected_count=expected_count,
                 stage_timings=stage_timings,

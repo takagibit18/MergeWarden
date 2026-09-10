@@ -171,7 +171,7 @@ async def review(request: ReviewRequest) -> ReviewResponse:
     orchestrator = AgentOrchestrator()
     try:
         response = await orchestrator.run_review(request)
-        if any(issue.is_v3_finding for issue in response.report.issues):
+        if response.report.schema_version == "3.0":
             return JSONResponse(content=response.contract_payload())  # type: ignore[return-value]
         return response
     except HTTPException:

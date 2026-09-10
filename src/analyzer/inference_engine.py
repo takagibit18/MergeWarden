@@ -628,6 +628,7 @@ class InferenceEngine:
         if (
             isinstance(request, ReviewRequest)
             and not repair_mode
+            and contract_version != "3.0"
             and plan.draft_review is None
             and response.finish_reason != "length"
             and parse_meta.get("submit_review_seen")
@@ -695,6 +696,7 @@ class InferenceEngine:
                     fallback,
                     request,
                     evidence_catalog=state.evidence_ledger,
+                    contract_version=contract_version,
                 )
                 if parsed:
                     fallback_parse_valid = True
@@ -1186,6 +1188,12 @@ class InferenceEngine:
                         "full submit_review payloads are forbidden"
                     )
                     continue
+                if contract_version == "3.0":
+                    parse_meta["submit_review_validation_error"] = (
+                        "submit_review is not supported for finding contract 3.0; "
+                        "call finish_review"
+                    )
+                    continue
                 if argument_error or not isinstance(payload, dict):
                     error = (
                         argument_error
@@ -1201,7 +1209,10 @@ class InferenceEngine:
                     parse_meta["submit_review_arguments_normalized"]
                     or arguments_normalized
                 )
-                payload_error = self._validate_submit_review_payload(payload)
+                payload_error = self._validate_submit_review_payload(
+                    payload,
+                    contract_version=contract_version,
+                )
                 if payload_error:
                     logger.warning(
                         "Invalid submit_review payload ignored: %s", payload_error
@@ -1218,13 +1229,15 @@ class InferenceEngine:
                 normalized_payload, warnings = self._normalize_review_payload(
                     payload,
                     evidence_catalog=evidence_catalog,
+                    contract_version=contract_version,
                 )
                 parse_meta["location_warnings"] = warnings
                 try:
                     draft_review = self._normalize_structured_report(
-                        ReviewReport.model_validate(normalized_payload)
+                        ReviewReport.model_validate(normalized_payload),
+                        contract_version=contract_version,
                     )
-                except ValidationError as exc:
+                except (ValidationError, ValueError) as exc:
                     logger.warning("Invalid submit_review payload ignored: %s", exc)
                     parse_meta["submit_review_validation_error"] = str(exc)
                     if not any(
@@ -1374,24 +1387,32 @@ class InferenceEngine:
         request: ReviewRequest | DebugRequest,
         *,
         evidence_catalog: list[dict[str, Any]] | None = None,
+        contract_version: str = "2.0",
     ) -> AnalysisPlan | None:
         if isinstance(request, ReviewRequest):
-            payload_error = self._validate_submit_review_payload(payload)
+            if contract_version == "3.0":
+                return None
+            payload_error = self._validate_submit_review_payload(
+                payload,
+                contract_version=contract_version,
+            )
             if payload_error:
                 logger.warning("Invalid fallback review JSON ignored: %s", payload_error)
                 return None
             normalized_payload, _ = self._normalize_review_payload(
                 payload,
                 evidence_catalog=evidence_catalog,
+                contract_version=contract_version,
             )
             try:
                 report = self._normalize_structured_report(
-                    ReviewReport.model_validate(normalized_payload)
+                    ReviewReport.model_validate(normalized_payload),
+                    contract_version=contract_version,
                 )
                 return AnalysisPlan(
                     needs_tools=False, tool_calls=[], draft_review=report
                 )
-            except ValidationError as exc:
+            except (ValidationError, ValueError) as exc:
                 logger.warning("Invalid fallback review JSON ignored: %s", exc)
                 return None
         try:
@@ -1409,11 +1430,18 @@ class InferenceEngine:
             return None
 
     @staticmethod
-    def _normalize_structured_report(report: ReviewReport) -> ReviewReport:
+    def _normalize_structured_report(
+        report: ReviewReport,
+        *,
+        contract_version: str = "2.0",
+    ) -> ReviewReport:
         """Populate canonical support envelopes from compatible role arrays."""
 
-        if any(issue.is_v3_finding for issue in report.issues):
-            report.schema_version = "3.0"
+        if report.schema_version != contract_version:
+            raise ValueError(
+                "review report contract/version mismatch: "
+                f"report={report.schema_version!r}, context={contract_version!r}"
+            )
         for issue in report.issues:
             if (
                 issue.is_structured_hypothesis
@@ -1461,7 +1489,11 @@ class InferenceEngine:
         return nested, True
 
     @staticmethod
-    def _validate_submit_review_payload(payload: dict[str, Any]) -> str:
+    def _validate_submit_review_payload(
+        payload: dict[str, Any],
+        *,
+        contract_version: str = "2.0",
+    ) -> str:
         summary = payload.get("summary")
         if isinstance(summary, str) and _DSML_ISSUES_PARAMETER_PATTERN.search(summary):
             return "Invalid submit_review payload: DSML parameter leak for issues in summary"
@@ -1481,6 +1513,11 @@ class InferenceEngine:
                         f"issues[{index}]: {repair_error}"
                     )
             if isinstance(issue, dict) and is_model_finding_v3_payload(issue):
+                if contract_version != "3.0":
+                    return (
+                        "Invalid submit_review payload: v3 finding requires "
+                        "finding contract version '3.0'"
+                    )
                 try:
                     ModelFindingInputV3.model_validate(issue)
                 except ValidationError as exc:
@@ -1523,10 +1560,23 @@ class InferenceEngine:
         payload: Any,
         *,
         evidence_catalog: list[dict[str, Any]] | None = None,
+        contract_version: str = "2.0",
     ) -> tuple[dict[str, Any], list[dict[str, str]]]:
         if not isinstance(payload, dict):
             return {}, []
         normalized = dict(payload)
+        declared_version = str(normalized.get("schema_version", "") or "").strip()
+        if declared_version and declared_version != contract_version:
+            return normalized, [
+                {
+                    "location": "",
+                    "warning": (
+                        "review report schema_version does not match the active "
+                        f"finding contract: {declared_version!r} != {contract_version!r}"
+                    ),
+                }
+            ]
+        normalized["schema_version"] = contract_version
         issues = normalized.get("issues")
         if not isinstance(issues, list):
             return normalized, []

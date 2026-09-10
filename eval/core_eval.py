@@ -8,17 +8,25 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 from collections.abc import Callable
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import click
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
-from eval.runner import run_single
-from eval.schemas import EvalResult, EvalVariant, Fixture
+from eval.runner import _v3_eval_eligibility, run_single
+from eval.schemas import (
+    DEFAULT_EVAL_MATCHER_VERSION,
+    EvalResult,
+    EvalVariant,
+    Fixture,
+    V3_CONTENT_MATCHER_VERSION,
+    validate_eval_matcher_contract,
+)
 from src.analyzer.finding_funnel import FindingFunnel
 from src.analyzer.location import normalize_location
 from src.analyzer.output_formatter import ReviewIssue, Severity
+from src.analyzer.schemas import ReviewResponse
 from src.config import get_settings
 
 CoreFixtureRole = Literal["candidate", "clean_control"]
@@ -33,6 +41,7 @@ RuntimeStatus = Literal[
 ]
 
 CORE_MATCHER_VERSION = "core-semantic-v1"
+CORE_V3_MATCHER_VERSION = "core-semantic-v1-v3"
 _FIXTURE_VALIDATION_MARKERS = (
     "diff added line does not match workspace",
     "expected issue",
@@ -174,6 +183,7 @@ class CoreRuntimeConfig(BaseModel):
     fixture_concurrency: int = Field(default=1, ge=1, le=8)
     repeat_on_instability: bool = False
     max_attempts: int = Field(default=1, ge=1, le=3)
+    finding_contract_version: Literal["2.0", "3.0"] = "2.0"
 
     @model_validator(mode="after")
     def _ordered_token_budgets(self) -> CoreRuntimeConfig:
@@ -246,6 +256,8 @@ class GeneratedFinding(BaseModel):
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     root_cause_id: str = ""
     text: str
+    contract_version: str = "2.0"
+    evidence_refs: list[str] = Field(default_factory=list)
 
 
 class CoreFindingMatch(BaseModel):
@@ -267,6 +279,8 @@ class CoreRunQuality(BaseModel):
     matches: list[CoreFindingMatch] = Field(default_factory=list)
     missed_gold_ids: list[str] = Field(default_factory=list)
     false_generated_indices: list[int] = Field(default_factory=list)
+    matcher_version: str = CORE_MATCHER_VERSION
+    finding_contract_version: str = "2.0"
 
 
 class CoreRunRecord(BaseModel):
@@ -330,6 +344,7 @@ class CoreRuntimeContract(BaseModel):
     """Effective shared model and budget settings recorded with the report."""
 
     model: str
+    finding_contract_version: Literal["2.0", "3.0"] = "2.0"
     temperature: float
     model_max_tokens: int = Field(ge=1)
     prompt_input_token_budget: int = Field(ge=1)
@@ -467,7 +482,12 @@ def assess_run(
         validator_failure=status == "validator_failure",
         result=result,
         quality=(
-            match_review_findings(spec.gold_findings, result.raw_output)
+            match_review_findings(
+                spec.gold_findings,
+                result.raw_output,
+                matcher_version=result.matcher_version,
+                finding_contract_version=result.finding_contract_version,
+            )
             if valid
             else None
         ),
@@ -502,8 +522,54 @@ def _runtime_status(result: EvalResult) -> RuntimeStatus:
 def match_review_findings(
     gold_findings: list[GoldFinding],
     raw_output: dict[str, Any],
+    *,
+    matcher_version: str = CORE_MATCHER_VERSION,
+    finding_contract_version: str | None = None,
 ) -> CoreRunQuality:
-    """Match actionable findings by underlying issue with one-to-one assignment."""
+    """Match actionable findings by underlying issue with one-to-one assignment.
+
+    v2 keeps the original Core Eval matcher.  A v3 payload must carry the
+    complete response envelope so this independent tool can reuse the runtime
+    approval boundary; a slim public issue payload is displayable but not
+    eligible for quality scoring.
+    """
+    report = raw_output.get("report", {})
+    report_version = str(
+        report.get("schema_version", "") if isinstance(report, dict) else ""
+    ).strip()
+    declared_contract_version = str(finding_contract_version or "").strip()
+    if report_version and report_version not in {"1.0", "2.0", "3.0"}:
+        raise ValueError(
+            "Core Eval cannot score an unknown report schema_version: "
+            f"{report_version!r}"
+        )
+    raw_issues = report.get("issues", []) if isinstance(report, dict) else []
+    issue_versions = {
+        str(issue.get("schema_version", "")).strip()
+        for issue in raw_issues
+        if isinstance(issue, dict)
+    }
+    if "3.0" in issue_versions and report_version != "3.0":
+        raise ValueError(
+            "Core Eval v3 findings require an explicit report schema_version='3.0'"
+        )
+    if (
+        declared_contract_version
+        and report_version
+        and declared_contract_version != report_version
+    ):
+        raise ValueError(
+            "Core Eval report and finding contract versions conflict: "
+            f"report={report_version!r}, contract={declared_contract_version!r}"
+        )
+    contract_version = declared_contract_version or report_version or "2.0"
+    if report_version == "3.0" or contract_version == "3.0":
+        return _match_review_findings_v3(
+            gold_findings,
+            raw_output,
+            matcher_version=matcher_version,
+        )
+
     generated = _extract_generated_findings(raw_output)
     unique, duplicate_count = _deduplicate_generated_findings(generated)
     candidates: list[tuple[float, int, int]] = []
@@ -546,6 +612,8 @@ def match_review_findings(
             for index, item in enumerate(unique)
             if index not in used_generated
         ],
+        matcher_version=matcher_version,
+        finding_contract_version=contract_version,
     )
 
 
@@ -587,20 +655,136 @@ def _extract_generated_findings(raw_output: dict[str, Any]) -> list[GeneratedFin
     return findings
 
 
+def _match_review_findings_v3(
+    gold_findings: list[GoldFinding],
+    raw_output: dict[str, Any],
+    *,
+    matcher_version: str,
+) -> CoreRunQuality:
+    """Score only runtime-approved v3 findings and v3-owned text fields."""
+
+    if matcher_version not in {CORE_V3_MATCHER_VERSION, V3_CONTENT_MATCHER_VERSION}:
+        raise ValueError(
+            "Unsupported Core Eval contract/matcher combination: "
+            f"finding_contract_version='3.0', matcher_version={matcher_version!r}; "
+            f"use {CORE_V3_MATCHER_VERSION!r}"
+        )
+    try:
+        response = ReviewResponse.model_validate(raw_output)
+    except ValueError as exc:
+        raise ValueError(
+            "Core Eval v3 scoring requires the full response envelope with "
+            "runtime approval evidence"
+        ) from exc
+    if response.report.schema_version != "3.0":
+        raise ValueError("Core Eval v3 scoring requires report schema_version='3.0'")
+    if response.report_ready is not True or response.delivery_complete is not True:
+        raise ValueError(
+            "Core Eval v3 scoring requires report_ready and delivery_complete"
+        )
+
+    generated: list[GeneratedFinding] = []
+    for index, issue in enumerate(response.report.issues):
+        eligible, _ = _v3_eval_eligibility(issue, response)
+        if not eligible:
+            continue
+        if issue.severity not in {Severity.CRITICAL, Severity.WARNING}:
+            continue
+        generated.append(
+            GeneratedFinding(
+                actual_index=index,
+                severity=issue.severity,
+                location=issue.location,
+                root_cause_id=issue.root_cause_id,
+                text=" ".join(
+                    value
+                    for value in (issue.description, issue.suggestion)
+                    if value.strip()
+                ),
+                contract_version="3.0",
+                evidence_refs=[
+                    str(item).strip()
+                    for item in issue.evidence_refs
+                    if str(item).strip()
+                ],
+            )
+        )
+
+    unique, duplicate_count = _deduplicate_generated_findings(generated)
+    candidates: list[tuple[float, int, int]] = []
+    for gold_index, gold in enumerate(gold_findings):
+        for generated_index, finding in enumerate(unique):
+            score = _underlying_issue_score(gold, finding)
+            if score is not None:
+                candidates.append((score, gold_index, generated_index))
+
+    used_gold: set[int] = set()
+    used_generated: set[int] = set()
+    matches: list[CoreFindingMatch] = []
+    for score, gold_index, generated_index in sorted(candidates, reverse=True):
+        if gold_index in used_gold or generated_index in used_generated:
+            continue
+        used_gold.add(gold_index)
+        used_generated.add(generated_index)
+        matches.append(
+            CoreFindingMatch(
+                gold_id=gold_findings[gold_index].id,
+                generated_index=unique[generated_index].actual_index,
+                score=score,
+            )
+        )
+
+    return CoreRunQuality(
+        gold_count=len(gold_findings),
+        generated_count=len(unique),
+        matched_count=len(matches),
+        false_finding_count=max(0, len(unique) - len(matches)),
+        duplicate_generated_count=duplicate_count,
+        matches=sorted(matches, key=lambda item: item.gold_id),
+        missed_gold_ids=[
+            item.id
+            for index, item in enumerate(gold_findings)
+            if index not in used_gold
+        ],
+        false_generated_indices=[
+            item.actual_index
+            for index, item in enumerate(unique)
+            if index not in used_generated
+        ],
+        matcher_version=CORE_V3_MATCHER_VERSION,
+        finding_contract_version="3.0",
+    )
+
+
 def _deduplicate_generated_findings(
     findings: list[GeneratedFinding],
 ) -> tuple[list[GeneratedFinding], int]:
     unique: list[GeneratedFinding] = []
+    v3_mode = any(item.contract_version == "3.0" for item in findings)
+    sort_key = (
+        (lambda item: (
+            item.severity == Severity.CRITICAL,
+            len(item.evidence_refs),
+            -item.actual_index,
+        ))
+        if v3_mode
+        else (
+            lambda item: (
+                item.severity == Severity.CRITICAL,
+                item.confidence,
+                -item.actual_index,
+            )
+        )
+    )
     for finding in sorted(
         findings,
-        key=lambda item: (
-            item.severity == Severity.CRITICAL,
-            item.confidence,
-            -item.actual_index,
-        ),
+        key=sort_key,
         reverse=True,
     ):
-        if any(_generated_findings_are_duplicates(finding, kept) for kept in unique):
+        if any(
+            _generated_findings_are_duplicates(finding, kept)
+            for kept in unique
+        ):
             continue
         unique.append(finding)
     unique.sort(key=lambda item: item.actual_index)
@@ -611,6 +795,18 @@ def _generated_findings_are_duplicates(
     left: GeneratedFinding,
     right: GeneratedFinding,
 ) -> bool:
+    if left.contract_version == "3.0" or right.contract_version == "3.0":
+        shared_refs = set(left.evidence_refs).intersection(right.evidence_refs)
+        if not shared_refs:
+            return False
+        if (
+            left.root_cause_id
+            and left.root_cause_id == right.root_cause_id
+        ):
+            return True
+        left_tokens = _semantic_tokens(left.text)
+        right_tokens = _semantic_tokens(right.text)
+        return _jaccard(left_tokens, right_tokens) >= 0.35
     if left.root_cause_id and left.root_cause_id == right.root_cause_id:
         return True
     left_location = normalize_location(left.location)
@@ -636,6 +832,8 @@ def _underlying_issue_score(
     gold: GoldFinding,
     generated: GeneratedFinding,
 ) -> float | None:
+    if generated.contract_version == "3.0":
+        return _underlying_issue_score_v3(gold, generated)
     parsed = normalize_location(generated.location)
     if not parsed.valid or parsed.path != gold.file.replace("\\", "/"):
         return None
@@ -687,6 +885,63 @@ def _underlying_issue_score(
     score = 0.45 * location_score + 0.4 * coverage + 0.15 * similarity
     if exact_root:
         score = max(score, 0.95)
+    return min(1.0, round(score, 6))
+
+
+def _underlying_issue_score_v3(
+    gold: GoldFinding,
+    generated: GeneratedFinding,
+) -> float | None:
+    """Use v3 description text, with a conservative semantic-tag guard."""
+
+    parsed = normalize_location(generated.location)
+    if not parsed.valid or parsed.path != gold.file.replace("\\", "/"):
+        return None
+    from eval.runner import _v3_semantic_tag
+
+    expected_text = " ".join((gold.description, gold.root_cause))
+    expected_tag = _v3_semantic_tag(expected_text)
+    actual_tag = _v3_semantic_tag(generated.text)
+    if expected_tag and actual_tag and expected_tag != actual_tag:
+        return None
+    expected_tokens = _semantic_tokens(expected_text)
+    actual_tokens = _semantic_tokens(generated.text)
+    common_count = len(expected_tokens & actual_tokens)
+    coverage = common_count / len(expected_tokens) if expected_tokens else 0.0
+    similarity = _jaccard(expected_tokens, actual_tokens)
+    semantic_match = (
+        bool(expected_tag and actual_tag and expected_tag == actual_tag)
+        or (common_count >= 3 and coverage >= 0.2 and similarity >= 0.12)
+    )
+    if not semantic_match:
+        return None
+    if parsed.line is None:
+        location_score = 0.45
+    elif _ranges_near(
+        parsed.line,
+        parsed.end_line,
+        gold.location.start_line,
+        gold.location.end_line,
+        tolerance=0,
+    ):
+        location_score = 1.0
+    elif _ranges_near(
+        parsed.line,
+        parsed.end_line,
+        gold.location.start_line,
+        gold.location.end_line,
+        tolerance=gold.location.tolerance_lines,
+    ):
+        location_score = 0.8
+    else:
+        location_score = 0.2
+    if location_score < 0.8 and not (
+        expected_tag and actual_tag and expected_tag == actual_tag
+    ):
+        return None
+    score = 0.45 * location_score + 0.4 * coverage + 0.15 * similarity
+    if expected_tag and actual_tag and expected_tag == actual_tag:
+        score = max(score, 0.9)
     return min(1.0, round(score, 6))
 
 
@@ -743,6 +998,15 @@ async def run_core_eval(
     progress: Callable[[str], None] | None = None,
 ) -> CoreEvalReport:
     """Run one balanced A/B pass under the configured attempt policy."""
+    active_matcher_version = (
+        V3_CONTENT_MATCHER_VERSION
+        if config.runtime.finding_contract_version == "3.0"
+        else DEFAULT_EVAL_MATCHER_VERSION
+    )
+    validate_eval_matcher_contract(
+        active_matcher_version,
+        config.runtime.finding_contract_version,
+    )
     loaded = load_core_fixtures(config, repo_root=repo_root)
     semaphore = asyncio.Semaphore(config.runtime.fixture_concurrency)
 
@@ -769,6 +1033,7 @@ async def run_core_eval(
                         temperature=config.runtime.temperature,
                         review_max_iterations=config.runtime.review_max_iterations,
                         variant=variant.as_eval_variant(),
+                        matcher_version=active_matcher_version,
                     )
                     record = assess_run(spec, variant, result, attempt=attempt)
                     records.append(record)
@@ -802,6 +1067,7 @@ async def run_core_eval(
             config.runtime.final_submit_feedback_token_budget
         ),
         "EVAL_REVIEW_MAX_ITERATIONS_CAP": str(config.runtime.review_max_iterations),
+        "FINDING_CONTRACT_VERSION": config.runtime.finding_contract_version,
     }
     original_env = {key: os.environ.get(key) for key in env_overrides}
     os.environ.update(env_overrides)
@@ -826,6 +1092,11 @@ async def run_core_eval(
                 os.environ[key] = original_value
     report = CoreEvalReport(
         experiment_id=config.experiment_id,
+        matcher_version=(
+            CORE_V3_MATCHER_VERSION
+            if config.runtime.finding_contract_version == "3.0"
+            else CORE_MATCHER_VERSION
+        ),
         config_path=Path(config_path).as_posix(),
         core_fixture_count=len(config.fixtures),
         candidate_fixture_count=sum(
@@ -836,6 +1107,7 @@ async def run_core_eval(
         ),
         runtime_contract=CoreRuntimeContract(
             model=settings.model_name,
+            finding_contract_version=config.runtime.finding_contract_version,
             temperature=config.runtime.temperature,
             model_max_tokens=settings.model_max_tokens,
             prompt_input_token_budget=settings.prompt_input_token_budget,
@@ -871,8 +1143,44 @@ def build_core_report_from_runs(
 ) -> CoreEvalReport:
     """Build a report from measured records for tests and offline rerendering."""
     settings = get_settings()
+    raw_contracts = {
+        str(item.result.finding_contract_version).strip() or "unknown"
+        for item in runs
+    }
+    observed_contracts = {
+        value
+        for value in raw_contracts
+        if value in {"2.0", "3.0"}
+    }
+    unsupported_contracts = raw_contracts - {"unknown", "2.0", "3.0"}
+    if unsupported_contracts:
+        raise ValueError(
+            "Core Eval cannot use unknown finding contract versions: "
+            f"{sorted(unsupported_contracts)}"
+        )
+    unspecified_contracts = raw_contracts - {"2.0", "3.0"}
+    if observed_contracts and unspecified_contracts:
+        raise ValueError(
+            "Core Eval cannot combine explicit and unspecified finding contract "
+            f"versions: {sorted(unspecified_contracts)}"
+        )
+    if len(observed_contracts) > 1:
+        raise ValueError(
+            "Core Eval cannot build a report from mixed finding contract versions: "
+            f"{sorted(observed_contracts)}"
+        )
+    observed_contract = next(iter(observed_contracts), None)
+    report_contract_version = cast(
+        Literal["2.0", "3.0"],
+        observed_contract or config.runtime.finding_contract_version,
+    )
     report = CoreEvalReport(
         experiment_id=config.experiment_id,
+        matcher_version=(
+            CORE_V3_MATCHER_VERSION
+            if report_contract_version == "3.0"
+            else CORE_MATCHER_VERSION
+        ),
         config_path=config_path,
         core_fixture_count=len(config.fixtures),
         candidate_fixture_count=sum(
@@ -883,6 +1191,7 @@ def build_core_report_from_runs(
         ),
         runtime_contract=CoreRuntimeContract(
             model=settings.model_name,
+            finding_contract_version=report_contract_version,
             temperature=config.runtime.temperature,
             model_max_tokens=config.runtime.model_max_tokens,
             prompt_input_token_budget=config.runtime.prompt_input_token_budget,
@@ -1031,6 +1340,7 @@ def render_core_report(report: CoreEvalReport) -> str:
         f"- Successful workspace setups：{successful_setups}/{len(report.runs)} attempts",
         f"- Completion failures：{completion_failures}",
         f"- Matcher：`{report.matcher_version}`（deterministic, one-to-one, duplicate-aware）",
+        f"- Finding contract：`{report.runtime_contract.finding_contract_version}`（runtime envelope, approval-bound）",
         (
             f"- Shared runtime：`{report.runtime_contract.model}`，temperature "
             f"{report.runtime_contract.temperature:g}，{report.runtime_contract.model_max_tokens} output tokens，"

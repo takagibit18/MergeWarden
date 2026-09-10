@@ -151,7 +151,7 @@ def test_v3_report_ready_cannot_replace_receipt_version_or_evidence_binding() ->
 def test_verifier_accept_is_not_a_gold_match() -> None:
     response = _approved_response()
     matches, matched_count, false_positive_count = _match_issues_for_version(
-        _fixture(expected_path="unrelated.py"), response, "semantic-v3"
+        _fixture(expected_path="unrelated.py"), response, "semantic-v3-content-v1"
     )
     assert len(_effective_review_issues(_fixture(), response)) == 1
     assert matches[0].matched is False

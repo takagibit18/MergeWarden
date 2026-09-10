@@ -57,6 +57,22 @@ def validate_v3_publish_binding(response: ReviewResponse) -> tuple[bool, str]:
     """Validate runtime-owned v3 approval material before external writes."""
 
     issues = list(response.report.issues)
+    if response.report.schema_version == "3.0":
+        if any(not issue.is_v3_finding for issue in issues):
+            return False, "mixed_finding_contracts"
+        if response.completion_status != "complete":
+            return False, "finding_run_incomplete"
+        if response.finding_run_status != "complete":
+            return False, "finding_run_incomplete"
+        if not response.report_ready:
+            return False, "report_not_ready"
+        if not response.delivery_complete:
+            return False, "delivery_incomplete"
+        # An empty v3 report is a valid, versioned no-finding result.  It has
+        # no candidate receipt to inspect, but it still needs the same
+        # lifecycle/readiness boundary as a non-empty report.
+        if not issues:
+            return True, "v3_runtime_approval_bound_empty_report"
     v3_issues = [issue for issue in issues if issue.is_v3_finding]
     if not v3_issues:
         return True, "legacy_v2_or_empty_report"
@@ -108,9 +124,9 @@ def validate_v3_publish_binding(response: ReviewResponse) -> tuple[bool, str]:
             if isinstance(item, dict)
             and str(item.get("content_version", "")) == current_version
         ]
-        if not matching:
-            return False, "v3_semantic_receipt_missing"
-        receipt = matching[-1]
+        if len(matching) != 1:
+            return False, "v3_semantic_receipt_missing_or_ambiguous"
+        receipt = matching[0]
         if (
             str(receipt.get("verdict", "")) != "accept"
             or str(receipt.get("status", "")) != "completed"

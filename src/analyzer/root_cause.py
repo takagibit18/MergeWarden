@@ -415,6 +415,30 @@ class RootCauseConsolidator:
             for issue in report.issues
             if issue.severity not in {Severity.CRITICAL, Severity.WARNING}
         ]
+        v3_risk = [issue for issue in risk if issue.is_v3_finding]
+        if v3_risk:
+            # The merger still emits a v2-shaped merged issue.  Do not let a
+            # v3 finding reach that path: changing its body or evidence here
+            # would invalidate the runtime approval receipt.  Keep the
+            # approved report untouched and expose an explicit isolation
+            # rejection for the caller.
+            finding_ids = [_finding_id(issue) for issue in v3_risk]
+            rejection = MergeRejection(
+                member_findings=finding_ids,
+                reasons=["v3_root_cause_consolidation_unsupported"],
+            )
+            return ConsolidationResult(
+                report=report.model_copy(deep=True),
+                blocking=BlockingResult(),
+                causality_graph=FindingCausalityGraph(
+                    nodes={_finding_id(issue): issue for issue in v3_risk}
+                ),
+                rejections=[rejection],
+                metrics=ConsolidationMetrics(
+                    input_verified_findings=len(risk),
+                    rejected_cluster_count=int(bool(v3_risk)),
+                ),
+            )
         by_id = {_finding_id(issue): issue for issue in risk}
         manifest_values = list(manifests)
         manifest_map = _manifest_map(

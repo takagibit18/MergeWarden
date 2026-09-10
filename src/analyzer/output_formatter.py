@@ -256,6 +256,26 @@ class ReviewReport(BaseModel):
         description="Version of the review-output compatibility envelope.",
     )
 
+    @model_validator(mode="after")
+    def _validate_contract_envelope(self) -> ReviewReport:
+        """Keep the report envelope authoritative, including for empty reports."""
+
+        if self.schema_version not in {"1.0", FINDING_SCHEMA_VERSION, FINDING_V3_SCHEMA_VERSION}:
+            raise ValueError(
+                f"Unsupported review report schema_version: {self.schema_version!r}"
+            )
+        issue_versions = {issue.schema_version for issue in self.issues}
+        if self.schema_version == FINDING_V3_SCHEMA_VERSION:
+            if any(version != FINDING_V3_SCHEMA_VERSION for version in issue_versions):
+                raise ValueError(
+                    "mixed finding contracts are not supported in a v3 report"
+                )
+        elif FINDING_V3_SCHEMA_VERSION in issue_versions:
+            raise ValueError(
+                "v3 findings require an explicit report schema_version='3.0'"
+            )
+        return self
+
     def v022_payload(self) -> dict[str, object]:
         """Compatibility conversion for integrations pinned to v0.2.2."""
 
@@ -267,7 +287,7 @@ class ReviewReport(BaseModel):
     def contract_payload(self) -> dict[str, object]:
         """Return the active finding contract for CLI/API/artifact consumers."""
 
-        if not any(issue.is_v3_finding for issue in self.issues):
+        if self.schema_version != FINDING_V3_SCHEMA_VERSION:
             return self.model_dump(mode="json")
         return {
             "schema_version": FINDING_V3_SCHEMA_VERSION,

@@ -17,19 +17,60 @@ FixtureType = Literal["review", "debug"]
 EvalGraphCacheMode = Literal["disabled", "cold", "warm"]
 StructuralScope = Literal["local", "direct_cross_file", "multi_hop"]
 ReviewPatchScope = Literal["legacy", "full_pr", "partial_pr"]
-# ``semantic-v2`` is retained as the frozen baseline matcher.  New evals use
-# the strict matcher by default, while callers can explicitly select v2 when
-# replaying historical artifacts.
-EvalMatcherVersion = Literal["semantic-v2", "semantic-v3", "semantic-v4"]
+# ``semantic-v2`` and ``semantic-v3`` are retained as frozen historical
+# matchers.  ``semantic-v3-content-v1`` is the explicit adapter for the slim
+# 3.0 finding contract; keeping a distinct name prevents an old matcher from
+# silently consuming empty v3 narrative fields.
+V3_CONTENT_MATCHER_VERSION = "semantic-v3-content-v1"
+EvalMatcherVersion = Literal[
+    "semantic-v2",
+    "semantic-v3",
+    "semantic-v4",
+    "semantic-v3-content-v1",
+]
 EVAL_MATCHER_VERSION = "semantic-v2"
 LEGACY_EVAL_MATCHER_VERSION = EVAL_MATCHER_VERSION
 DEFAULT_EVAL_MATCHER_VERSION = "semantic-v3"
 EVAL_MATCHER_VERSIONS = (
     LEGACY_EVAL_MATCHER_VERSION,
     DEFAULT_EVAL_MATCHER_VERSION,
+    V3_CONTENT_MATCHER_VERSION,
     "semantic-v4",
 )
 EvalSkillRetrievalMode = Literal["sequential", "deterministic"]
+
+# This is intentionally a small compatibility declaration, not a generic
+# version framework.  The finding contract and the matcher describe
+# different boundaries and must be selected together before a run starts.
+EVAL_MATCHER_CONTRACT_COMPATIBILITY: dict[str, frozenset[str]] = {
+    "semantic-v2": frozenset({"1.0", "2.0"}),
+    "semantic-v3": frozenset({"1.0", "2.0"}),
+    "semantic-v4": frozenset({"2.0"}),
+    V3_CONTENT_MATCHER_VERSION: frozenset({"3.0"}),
+}
+
+
+def validate_eval_matcher_contract(
+    matcher_version: str,
+    finding_contract_version: str,
+) -> None:
+    """Reject a matcher/contract pair with no declared evaluation semantics."""
+
+    matcher = str(matcher_version or "").strip()
+    contract = str(finding_contract_version or "").strip()
+    allowed_contracts = EVAL_MATCHER_CONTRACT_COMPATIBILITY.get(matcher)
+    if allowed_contracts is None:
+        supported = ", ".join(EVAL_MATCHER_VERSIONS)
+        raise ValueError(
+            f"Unsupported matcher version {matcher!r}; use {supported}"
+        )
+    if contract not in allowed_contracts:
+        allowed = ", ".join(sorted(allowed_contracts))
+        raise ValueError(
+            "Unsupported evaluation contract/matcher combination: "
+            f"finding_contract_version={contract!r}, matcher_version={matcher!r}; "
+            f"{matcher!r} supports contract version(s): {allowed}"
+        )
 
 
 class EvalVariant(BaseModel):
@@ -534,10 +575,18 @@ class EvalResult(BaseModel):
     schema_valid: bool = Field(default=False)
     expected_count: int = Field(default=0, ge=0)
     actual_count: int = Field(default=0, ge=0)
+    approved_finding_count: int = Field(
+        default=0,
+        ge=0,
+        description="v3 findings that passed the runtime approval binding before scoring.",
+    )
     matched_count: int = Field(default=0, ge=0)
     false_positive_count: int = Field(default=0, ge=0)
     location_matched_count: int = Field(default=0, ge=0)
+    severity_matched_count: int = Field(default=0, ge=0)
     root_cause_matched_count: int = Field(default=0, ge=0)
+    semantic_undetermined_count: int = Field(default=0, ge=0)
+    duplicate_actual_count: int = Field(default=0, ge=0)
     expected_root_cause_count: int | None = Field(default=None, ge=0)
     matched_root_cause_count: int | None = Field(default=None, ge=0)
     over_merge_count: int | None = Field(default=None, ge=0)
@@ -625,6 +674,7 @@ class SampledFixtureResult(BaseModel):
     context_mode: ReviewContextMode = "graph_hybrid"
     graph_cache_mode: EvalGraphCacheMode = "warm"
     matcher_version: str = DEFAULT_EVAL_MATCHER_VERSION
+    finding_contract_version: str = "unknown"
     expected_count: int = Field(default=0, ge=0)
     samples: int = Field(default=1, ge=1)
     runs: list[EvalResult] = Field(default_factory=list)
@@ -660,8 +710,12 @@ class MetricSummary(BaseModel):
     )
     root_cause_recall: float | None = Field(default=None, ge=0.0, le=1.0)
     layered_expected_count: int = Field(default=0, ge=0)
+    approved_finding_count: int = Field(default=0, ge=0)
     location_matched_count: int = Field(default=0, ge=0)
+    severity_matched_count: int = Field(default=0, ge=0)
     root_cause_matched_count: int = Field(default=0, ge=0)
+    semantic_undetermined_count: int = Field(default=0, ge=0)
+    duplicate_actual_count: int = Field(default=0, ge=0)
     location_match_rate: float | None = Field(default=None, ge=0.0, le=1.0)
     root_cause_match_rate: float | None = Field(default=None, ge=0.0, le=1.0)
     over_merge_count: int = Field(default=0, ge=0)
@@ -882,7 +936,9 @@ def _aggregate_structural_metrics(
         return numerator / denominator if denominator else None
 
     layered_results = [
-        item for item in results if item.matcher_version == "semantic-v4"
+        item
+        for item in results
+        if item.matcher_version in {"semantic-v4", V3_CONTENT_MATCHER_VERSION}
     ]
     layered_expected = sum(item.expected_count for item in layered_results)
     layered_location_matches = sum(
@@ -1281,6 +1337,14 @@ def _aggregate_quality_metrics(results: list[EvalResult]) -> dict[str, int | flo
             final_findings / expected_roots if expected_roots else 0.0
         ),
         "final_finding_count": final_findings,
+        "approved_finding_count": sum(
+            item.approved_finding_count for item in results
+        ),
+        "severity_matched_count": sum(item.severity_matched_count for item in results),
+        "semantic_undetermined_count": sum(
+            item.semantic_undetermined_count for item in results
+        ),
+        "duplicate_actual_count": sum(item.duplicate_actual_count for item in results),
     }
 
 
@@ -1290,6 +1354,7 @@ class EvalReport(BaseModel):
     suite: str = Field(default="golden")
     variant: EvalVariant | None = None
     matcher_version: str = DEFAULT_EVAL_MATCHER_VERSION
+    finding_contract_version: str = "unknown"
     skill_bank_digest: str = ""
     generated_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
     fixture_count: int = Field(default=0, ge=0)

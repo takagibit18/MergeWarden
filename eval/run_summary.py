@@ -22,6 +22,7 @@ class EvalRunSummaryReport(BaseModel):
     suite: str
     generated_at: str
     matcher_version: str = DEFAULT_EVAL_MATCHER_VERSION
+    finding_contract_version: str = "unknown"
     report_path: str = ""
     runs: list[RunSummary] = Field(default_factory=list)
 
@@ -36,6 +37,7 @@ def summarize_eval_report(
         suite=report.suite,
         generated_at=report.generated_at,
         matcher_version=report.matcher_version,
+        finding_contract_version=report.finding_contract_version,
         report_path=str(report_path or ""),
         runs=[summarize_event_log(item.event_log_path) for item in report.results],
     )

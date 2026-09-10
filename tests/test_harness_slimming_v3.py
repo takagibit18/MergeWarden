@@ -167,6 +167,7 @@ def _approved_v3_response() -> ReviewResponse:
         semantic_verifier_required=True,
         semantic_verifier_completed=True,
         report_ready=True,
+        delivery_complete=True,
     )
 
 

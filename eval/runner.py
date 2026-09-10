@@ -28,6 +28,8 @@ from eval.schemas import (
     FixtureWorkspace,
     SampledFixtureResult,
     StructuralIssueMetrics,
+    V3_CONTENT_MATCHER_VERSION,
+    validate_eval_matcher_contract,
 )
 from src.analyzer.location import normalize_location
 from src.analyzer.finding_schema import normalize_repo_path
@@ -735,6 +737,19 @@ async def run_single(
     expected_count = len(fixture.expected.issues)
     selected_variant = variant or _default_eval_variant()
     selected_matcher_version = _normalize_matcher_version(matcher_version)
+    # Validate the configured pair before fixture setup or any model/provider
+    # call.  A v3 run must opt into the v3-content matcher explicitly.
+    validate_eval_matcher_contract(
+        selected_matcher_version,
+        str(get_settings().finding_contract_version),
+    )
+    if (
+        selected_matcher_version == V3_CONTENT_MATCHER_VERSION
+        and fixture.type != "review"
+    ):
+        raise ValueError(
+            f"{V3_CONTENT_MATCHER_VERSION} requires a review fixture with a v3 report"
+        )
     skill_contract = _effective_skill_contract(selected_variant)
     stage_timings: dict[str, float] = {}
     try:
@@ -835,6 +850,11 @@ async def run_single(
                 parsed_response = ReviewResponse.model_validate(
                     review_response.model_dump()
                 )
+                response_contract_version = parsed_response.report.schema_version
+                validate_eval_matcher_contract(
+                    selected_matcher_version,
+                    response_contract_version,
+                )
                 actual_count = len(
                     _effective_verified_review_issues(fixture, parsed_response)
                     if selected_matcher_version == "semantic-v4"
@@ -871,6 +891,12 @@ async def run_single(
             location_matched_count, root_cause_matched_count = (
                 _layered_match_counts(matches, selected_matcher_version)
             )
+            dimension_counts = _v3_content_dimension_counts(
+                fixture,
+                parsed_response,
+                matches,
+                selected_matcher_version,
+            )
             structural_metrics = _structural_issue_metrics(fixture, matches)
             root_cause_quality = (
                 _root_cause_quality_for_version(
@@ -884,10 +910,18 @@ async def run_single(
             )
             raw_output = parsed_response.model_dump(mode="json")
             raw_output["matcher_version"] = selected_matcher_version
+            if isinstance(parsed_response, ReviewResponse):
+                raw_output["finding_contract_version"] = (
+                    parsed_response.report.schema_version
+                )
             process_metrics = extract_review_process_metrics(
                 event_log_path,
                 matcher_version=selected_matcher_version,
             )
+            if isinstance(parsed_response, ReviewResponse):
+                process_metrics.finding_contract_version = (
+                    parsed_response.report.schema_version
+                )
 
             placeholder = _is_placeholder_response(parsed_response)
             empty_business_output = _is_empty_business_output(parsed_response)
@@ -912,8 +946,13 @@ async def run_single(
                 run_id=parsed_response.run_id,
                 schema_valid=schema_valid,
                 expected_count=expected_count,
-                finding_contract_version=process_metrics.finding_contract_version,
+                finding_contract_version=(
+                    parsed_response.report.schema_version
+                    if isinstance(parsed_response, ReviewResponse)
+                    else process_metrics.finding_contract_version
+                ),
                 actual_count=actual_count,
+                **dimension_counts,
                 matched_count=matched_count,
                 false_positive_count=false_positive_count,
                 location_matched_count=location_matched_count,
@@ -1061,6 +1100,9 @@ def _aggregate_sampled_result(
             runs[0].matcher_version
             if runs
             else DEFAULT_EVAL_MATCHER_VERSION
+        ),
+        finding_contract_version=(
+            runs[0].finding_contract_version if runs else "unknown"
         ),
         expected_count=expected_count,
         samples=len(runs) or 1,
@@ -1642,7 +1684,6 @@ def _v3_eval_eligibility(issue: Any, response: ReviewResponse) -> tuple[bool, st
         return False, "v3_report_not_ready"
     if response.semantic_needs_revision_count or response.semantic_unresolved_count:
         return False, "v3_semantic_unresolved"
-
     candidate_id = str(getattr(issue, "candidate_id", "") or "").strip()
     if not candidate_id:
         return False, "v3_candidate_id_missing"
@@ -1974,6 +2015,11 @@ def _semantic_match_tokens(value: str) -> set[str]:
     return {aliases.get(word, word) for word in words}
 
 
+def _jaccard(left: set[str], right: set[str]) -> float:
+    union = left | right
+    return len(left & right) / len(union) if union else 1.0
+
+
 def _normalize_matcher_version(value: str | None) -> str:
     """Return a supported matcher version, defaulting new evaluations to v3."""
     selected = str(value or DEFAULT_EVAL_MATCHER_VERSION).strip()
@@ -1990,8 +2036,12 @@ def _match_issues_for_version(
 ) -> tuple[list[EvalIssueMatch], int, int]:
     """Dispatch issue matching without changing the frozen semantic-v2 path."""
     selected = _normalize_matcher_version(matcher_version)
+    if isinstance(response, ReviewResponse):
+        validate_eval_matcher_contract(selected, response.report.schema_version)
     if selected == "semantic-v2":
         return _match_issues(fixture, response)
+    if selected == V3_CONTENT_MATCHER_VERSION:
+        return _match_issues_v3_content(fixture, response)
     if selected == "semantic-v4":
         return _match_issues_v4(fixture, response)
     return _match_issues_v3(fixture, response)
@@ -2007,12 +2057,47 @@ def _layered_match_counts(
     that every historical match satisfied the new layered dimensions.
     """
 
-    if _normalize_matcher_version(matcher_version) != "semantic-v4":
+    if _normalize_matcher_version(matcher_version) not in {
+        "semantic-v4",
+        V3_CONTENT_MATCHER_VERSION,
+    }:
         return 0, 0
     return (
         sum(bool(match.location_matched) for match in matches),
         sum(bool(match.root_cause_matched) for match in matches),
     )
+
+
+def _v3_content_dimension_counts(
+    fixture: Fixture,
+    response: ReviewResponse | DebugResponse,
+    matches: list[EvalIssueMatch],
+    matcher_version: str,
+) -> dict[str, int]:
+    """Expose approval and independent v3 dimensions beside recall counts."""
+
+    if matcher_version != V3_CONTENT_MATCHER_VERSION or not isinstance(
+        response, ReviewResponse
+    ):
+        return {
+            "approved_finding_count": 0,
+            "severity_matched_count": 0,
+            "semantic_undetermined_count": 0,
+            "duplicate_actual_count": 0,
+        }
+    actual = _effective_review_issues(fixture, response)
+    return {
+        "approved_finding_count": len(actual),
+        "severity_matched_count": sum(
+            bool(match.role_match_diagnostics.get("severity_floor_met"))
+            for match in matches
+        ),
+        "semantic_undetermined_count": sum(
+            match.role_match_diagnostics.get("semantic_status") == "undetermined"
+            for match in matches
+        ),
+        "duplicate_actual_count": _v3_duplicate_actual_count(actual),
+    }
 
 
 def _match_issues_v3(
@@ -2057,6 +2142,338 @@ def _match_issues_v3(
         )
     false_positive_count = max(0, len(actual_issues) - matched_count)
     return matches, matched_count, false_positive_count
+
+
+def _match_issues_v3_content(
+    fixture: Fixture,
+    response: ReviewResponse | DebugResponse,
+) -> tuple[list[EvalIssueMatch], int, int]:
+    """Match approved v3 findings using the fields that the v3 contract owns.
+
+    The historical ``semantic-v3`` matcher above deliberately remains frozen.
+    This adapter is a separate score version so an empty v2 narrative cannot
+    become a false location or root-cause failure for a v3 finding.
+    """
+
+    if not isinstance(response, ReviewResponse):
+        raise ValueError(
+            f"{V3_CONTENT_MATCHER_VERSION} requires a ReviewResponse with a v3 report"
+        )
+    if response.report.schema_version != "3.0":
+        raise ValueError(
+            f"{V3_CONTENT_MATCHER_VERSION} requires report schema_version='3.0'"
+        )
+
+    expected = fixture.expected.issues
+    actual_issues = _effective_review_issues(fixture, response)
+    used_actual_indices: set[int] = set()
+    matches: list[EvalIssueMatch] = []
+    matched_count = 0
+    for expected_index, expected_issue in enumerate(expected):
+        ranked: list[
+            tuple[
+                tuple[int, int, int, int, int],
+                int,
+                dict[str, Any],
+            ]
+        ] = []
+        for actual_index, issue in enumerate(actual_issues):
+            if actual_index in used_actual_indices:
+                continue
+            diagnostics = _v3_content_dimensions(expected_issue, issue)
+            score = (
+                int(diagnostics["fully_matched"]),
+                int(diagnostics["semantic_status"] == "matched"),
+                int(diagnostics["location_matched"]),
+                int(diagnostics["severity_floor_met"]),
+                int(diagnostics["repair_unit_status"] == "matched"),
+            )
+            ranked.append((score, actual_index, diagnostics))
+
+        if ranked:
+            _, hit_index, diagnostics = max(
+                ranked,
+                key=lambda item: (item[0], -item[1]),
+            )
+            matched = bool(diagnostics["fully_matched"])
+        else:
+            hit_index = None
+            matched = False
+            diagnostics = {
+                "fully_matched": False,
+                "location_matched": False,
+                "severity_floor_met": False,
+                "semantic_status": "undetermined",
+                "semantic_reason": "no_available_actual_issue",
+                "repair_unit_status": "undetermined",
+                "repair_unit_reason": "no_available_actual_issue",
+                "affected_paths_matched": False,
+                "evidence_refs_status": "not_available",
+                "reason": "no_available_actual_issue",
+            }
+        if hit_index is not None:
+            # Reserve the diagnostic candidate even when a semantic or repair
+            # dimension fails.  This keeps the assignment one-to-one while
+            # still reporting the partial match separately from a full hit.
+            used_actual_indices.add(hit_index)
+            if matched:
+                matched_count += 1
+        matches.append(
+            EvalIssueMatch(
+                expected_index=expected_index,
+                matched=matched,
+                matched_actual_index=hit_index,
+                location_matched=bool(diagnostics["location_matched"]),
+                root_cause_matched=diagnostics["semantic_status"] == "matched",
+                role_match_diagnostics=diagnostics,
+            )
+        )
+    false_positive_count = max(0, len(actual_issues) - matched_count)
+    return matches, matched_count, false_positive_count
+
+
+def _v3_content_dimensions(expected_issue: Any, issue: Any) -> dict[str, Any]:
+    """Return independent, content-based dimensions for one v3 candidate."""
+
+    issue_locations = [str(getattr(issue, "location", "") or "")]
+    primary_anchor = getattr(issue, "primary_anchor", None)
+    if primary_anchor is not None:
+        issue_locations.append(str(getattr(primary_anchor, "location", "") or ""))
+    issue_locations.extend(
+        str(getattr(item, "location", "") or "")
+        for item in getattr(issue, "related_locations", [])
+    )
+    if _expected_issue_has_structured_location(expected_issue):
+        location_matched = any(
+            _semantic_location_matches_v3(expected_issue, location)
+            for location in issue_locations
+        )
+    else:
+        pattern = str(getattr(expected_issue, "location_pattern", "") or "")
+        location_matched = any(_location_matches(pattern, location) for location in issue_locations)
+
+    severity = _issue_severity_value(issue)
+    severity_floor_met = _severity_rank(severity) >= _severity_rank(
+        expected_issue.severity.value
+    )
+    semantic_status, semantic_reason = _v3_semantic_content_match(
+        expected_issue,
+        issue,
+    )
+    repair_status, repair_reason = _v3_repair_content_match(
+        expected_issue,
+        issue,
+    )
+    expected_paths = {
+        normalize_repo_path(str(path))
+        for path in getattr(expected_issue, "affected_paths", [])
+        if str(path).strip()
+    }
+    actual_paths = _issue_paths(issue)
+    affected_paths_matched = expected_paths.issubset(actual_paths)
+    evidence_refs = [
+        str(item).strip()
+        for item in getattr(issue, "evidence_refs", [])
+        if str(item).strip()
+    ]
+    evidence_refs_status = "present" if evidence_refs else "missing"
+    fully_matched = bool(
+        location_matched
+        and severity_floor_met
+        and semantic_status in {"matched", "not_annotated"}
+        and repair_status in {"matched", "not_annotated"}
+        and affected_paths_matched
+        and evidence_refs
+    )
+    return {
+        "fully_matched": fully_matched,
+        "location_matched": location_matched,
+        "severity_floor_met": severity_floor_met,
+        "semantic_status": semantic_status,
+        "semantic_reason": semantic_reason,
+        "repair_unit_status": repair_status,
+        "repair_unit_reason": repair_reason,
+        "affected_paths_matched": affected_paths_matched,
+        "expected_paths": sorted(expected_paths),
+        "actual_paths": sorted(actual_paths),
+        "evidence_refs_status": evidence_refs_status,
+        "evidence_ref_count": len(evidence_refs),
+        "semantic_source": "description",
+        "actual_integrity_status": str(
+            getattr(issue, "integrity_status", "pending") or "pending"
+        ),
+    }
+
+
+def _v3_semantic_content_match(
+    expected_issue: Any,
+    issue: Any,
+) -> tuple[str, str]:
+    """Conservatively compare gold prose to v3 description/suggestion prose."""
+
+    expected_description = str(getattr(expected_issue, "description", "") or "").strip()
+    expected_root = str(getattr(expected_issue, "root_cause_id", "") or "").strip()
+    actual_description = str(getattr(issue, "description", "") or "").strip()
+    if not expected_description and not expected_root:
+        return "not_annotated", "gold_semantic_annotation_missing"
+    if not actual_description:
+        return "undetermined", "v3_description_missing"
+
+    expected_text = " ".join((expected_description, expected_root))
+    actual_text = " ".join(
+        (
+            actual_description,
+            str(getattr(issue, "suggestion", "") or "").strip(),
+        )
+    )
+    expected_tag = _v3_semantic_tag(expected_text)
+    actual_tag = _v3_semantic_tag(actual_text)
+    if expected_tag and actual_tag:
+        if expected_tag == actual_tag:
+            return "matched", f"recognized_tag:{actual_tag}"
+        return "mismatched", f"recognized_tags_differ:{expected_tag}!={actual_tag}"
+
+    expected_tokens = _semantic_match_tokens(expected_text)
+    actual_tokens = _semantic_match_tokens(actual_text)
+    if not expected_tokens or not actual_tokens:
+        return "undetermined", "semantic_tokens_missing"
+    normalized_expected = " ".join(expected_text.lower().split())
+    normalized_actual = " ".join(actual_text.lower().split())
+    if normalized_expected in normalized_actual or normalized_actual in normalized_expected:
+        return "matched", "description_contains_gold_claim"
+    common = len(expected_tokens & actual_tokens)
+    coverage = common / len(expected_tokens)
+    similarity = _jaccard(expected_tokens, actual_tokens)
+    if common >= 3 and coverage >= 0.6 and similarity >= 0.3:
+        return "matched", "description_token_overlap"
+    return "undetermined", "offline_semantic_rule_insufficient"
+
+
+def _v3_repair_content_match(
+    expected_issue: Any,
+    issue: Any,
+) -> tuple[str, str]:
+    """Compare repair annotations only to the v3 suggestion field."""
+
+    expected_repair = str(getattr(expected_issue, "repair_unit", "") or "").strip()
+    if not expected_repair:
+        return "not_annotated", "gold_repair_annotation_missing"
+    suggestion = str(getattr(issue, "suggestion", "") or "").strip()
+    if not suggestion:
+        return "undetermined", "v3_suggestion_missing"
+    expected_tag = _v3_repair_tag(expected_repair)
+    actual_tag = _v3_repair_tag(suggestion)
+    if expected_tag and actual_tag:
+        if expected_tag == actual_tag:
+            return "matched", f"recognized_repair_tag:{actual_tag}"
+        return "mismatched", f"recognized_repair_tags_differ:{expected_tag}!={actual_tag}"
+    expected_tokens = _semantic_match_tokens(expected_repair)
+    actual_tokens = _semantic_match_tokens(suggestion)
+    common = len(expected_tokens & actual_tokens)
+    coverage = common / len(expected_tokens) if expected_tokens else 0.0
+    if common >= 2 and coverage >= 0.5:
+        return "matched", "suggestion_token_overlap"
+    return "undetermined", "offline_repair_rule_insufficient"
+
+
+def _v3_semantic_tag(value: str) -> str:
+    text = value.lower().replace("_", " ")
+    if (
+        re.search(r"\bunknown|non[- ]field|extra", text)
+        and re.search(r"\bdrop|discard|lost|no value|silently", text)
+    ):
+        return "unknown-key-discard"
+    if (
+        re.search(r"private[- ]attribute|private attribute", text)
+        and re.search(r"\bintercept|reclassif|rout|preserv", text)
+    ):
+        return "private-attribute-reclassification"
+    if (
+        re.search(r"file[ _-]?path", text)
+        and re.search(r"metadata|byte ?stream|key ?error|unsafe|optional", text)
+    ):
+        return "unsafe-file-path-metadata"
+    return ""
+
+
+def _v3_repair_tag(value: str) -> str:
+    text = value.lower().replace("_", " ")
+    if re.search(r"file[ _-]?path|metadata", text) and re.search(
+        r"safe|fallback|get\(|lookup|guard", text
+    ):
+        return "unsafe-file-path-metadata"
+    if re.search(r"private|attribute", text) and re.search(
+        r"compat|route|preserv|reclassif", text
+    ):
+        return "private-attribute-reclassification"
+    if re.search(r"unknown|non[- ]field|extra", text) and re.search(
+        r"preserv|write|store|fallback", text
+    ):
+        return "unknown-key-discard"
+    return ""
+
+
+def _v3_duplicate_actual_count(actual_issues: list[Any]) -> int:
+    """Count repeated v3 content units without deleting approved findings."""
+
+    if len(actual_issues) < 2:
+        return 0
+    parent = list(range(len(actual_issues)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    for left_index, left in enumerate(actual_issues):
+        left_refs = {
+            str(item).strip()
+            for item in getattr(left, "evidence_refs", [])
+            if str(item).strip()
+        }
+        left_text = " ".join(
+            (
+                str(getattr(left, "description", "") or ""),
+                str(getattr(left, "suggestion", "") or ""),
+            )
+        )
+        left_tag = _v3_semantic_tag(left_text)
+        for right_index in range(left_index + 1, len(actual_issues)):
+            right = actual_issues[right_index]
+            right_refs = {
+                str(item).strip()
+                for item in getattr(right, "evidence_refs", [])
+                if str(item).strip()
+            }
+            if not left_refs.intersection(right_refs):
+                continue
+            right_text = " ".join(
+                (
+                    str(getattr(right, "description", "") or ""),
+                    str(getattr(right, "suggestion", "") or ""),
+                )
+            )
+            right_tag = _v3_semantic_tag(right_text)
+            if left_tag and left_tag == right_tag:
+                union(left_index, right_index)
+                continue
+            if _jaccard(
+                _semantic_match_tokens(left_text),
+                _semantic_match_tokens(right_text),
+            ) >= 0.45:
+                union(left_index, right_index)
+
+    group_sizes: dict[int, int] = {}
+    for index in range(len(actual_issues)):
+        root = find(index)
+        group_sizes[root] = group_sizes.get(root, 0) + 1
+    return sum(max(0, size - 1) for size in group_sizes.values())
 
 
 def _match_issues_v4(
@@ -2507,7 +2924,106 @@ def _root_cause_quality_for_version(
             matches,
             actual_issues=_effective_verified_review_issues(fixture, response),
         )
+    if selected == V3_CONTENT_MATCHER_VERSION:
+        return _root_cause_quality_v3_content(fixture, response, matches)
     return _root_cause_quality_v3(fixture, response, matches)
+
+
+def _root_cause_quality_v3_content(
+    fixture: Fixture,
+    response: ReviewResponse,
+    matches: list[EvalIssueMatch],
+) -> dict[str, int | None]:
+    """Measure v3 root/repair/evidence dimensions without legacy role fields."""
+
+    actual = _effective_review_issues(fixture, response)
+    annotated_indices = {
+        index
+        for index, issue in enumerate(fixture.expected.issues)
+        if issue.description.strip()
+        or issue.root_cause_id.strip()
+        or issue.repair_unit.strip()
+        or issue.mechanism_pattern.strip()
+        or issue.invariant_pattern.strip()
+    }
+    evidence_complete = sum(
+        bool(getattr(issue, "evidence_refs", []))
+        and bool(getattr(issue, "evidence_provenance", []))
+        for issue in actual
+    )
+    base: dict[str, int | None] = {
+        "evidence_complete_count": evidence_complete,
+        "final_finding_count": len(actual),
+    }
+    if not annotated_indices:
+        return {
+            **base,
+            "expected_root_cause_count": None,
+            "matched_root_cause_count": None,
+            "over_merge_count": None,
+            "under_merge_count": None,
+            "repair_unit_expected_count": None,
+            "repair_unit_matched_count": None,
+        }
+
+    expected_root_keys = {
+        index: (
+            fixture.expected.issues[index].root_cause_id.strip()
+            or f"expected-{index}"
+        )
+        for index in annotated_indices
+    }
+    expected_to_actual: dict[str, set[str]] = {}
+    actual_to_expected: dict[str, set[str]] = {}
+    repair_expected = sum(
+        bool(fixture.expected.issues[index].repair_unit.strip())
+        for index in annotated_indices
+    )
+    repair_matched = 0
+    for match in matches:
+        if match.expected_index not in annotated_indices:
+            continue
+        expected_root = expected_root_keys[match.expected_index]
+        if match.role_match_diagnostics.get("repair_unit_status") == "matched":
+            repair_matched += 1
+        if match.root_cause_matched is not True or match.matched_actual_index is None:
+            continue
+        actual_index = match.matched_actual_index
+        actual_root = _v3_actual_identity(actual[actual_index], actual_index)
+        expected_to_actual.setdefault(expected_root, set()).add(actual_root)
+        actual_to_expected.setdefault(actual_root, set()).add(expected_root)
+
+    return {
+        **base,
+        "expected_root_cause_count": len(set(expected_root_keys.values())),
+        "matched_root_cause_count": len(expected_to_actual),
+        # Duplicate approved findings are reported separately.  They are not
+        # silently reclassified as a root-cause over-merge.
+        "over_merge_count": sum(
+            max(0, len(expected_roots) - 1)
+            for expected_roots in actual_to_expected.values()
+        ),
+        "under_merge_count": sum(
+            max(0, len(actual_roots) - 1)
+            for actual_roots in expected_to_actual.values()
+        ),
+        "repair_unit_expected_count": repair_expected,
+        "repair_unit_matched_count": repair_matched,
+    }
+
+
+def _v3_actual_identity(issue: Any, index: int) -> str:
+    text = " ".join(
+        (
+            str(getattr(issue, "description", "") or ""),
+            str(getattr(issue, "suggestion", "") or ""),
+        )
+    )
+    tag = _v3_semantic_tag(text)
+    if tag:
+        return tag
+    tokens = sorted(_semantic_match_tokens(text))
+    return "content-" + ("-".join(tokens[:12]) or str(index))
 
 
 def _default_eval_variant() -> EvalVariant:

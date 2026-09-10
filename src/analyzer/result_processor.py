@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from uuid import uuid4
 
 from src.analyzer.context_state import ContextState, DecisionStep
@@ -26,13 +27,21 @@ class ResultProcessor:
         plan: AnalysisPlan,
         tool_results: list[ToolResult],
         state: ContextState,
+        *,
+        contract_version: str = "2.0",
     ) -> tuple[ReviewResponse, bool]:
         blocking_error = any(
             (not result.ok) and not result.recoverable for result in tool_results
         )
         report = plan.draft_review or ReviewReport(
-            summary="Review pipeline completed with placeholder summary."
+            summary="Review pipeline completed with placeholder summary.",
+            schema_version=contract_version,
         )
+        if report.schema_version != contract_version:
+            raise ValueError(
+                "review result contract/version mismatch: "
+                f"report={report.schema_version!r}, context={contract_version!r}"
+            )
         if blocking_error and not report.summary:
             report.summary = "Tool execution failed; returning partial review output."
         report = self.merge_review_reports([report])
@@ -77,6 +86,13 @@ class ResultProcessor:
 
     @staticmethod
     def merge_review_reports(reports: list[ReviewReport]) -> ReviewReport:
+        report_versions = {report.schema_version for report in reports}
+        if len(report_versions) > 1:
+            raise ValueError(
+                "cannot merge review reports with mixed contract envelopes: "
+                + ", ".join(sorted(report_versions))
+            )
+        report_version = next(iter(report_versions), "2.0")
         severity_rank = {
             "critical": 0,
             "warning": 1,
@@ -84,13 +100,28 @@ class ResultProcessor:
             "style": 3,
         }
         merged_summary = " ".join([item.summary for item in reports if item.summary]).strip()
-        seen: set[tuple[str, str, str]] = set()
+        seen: set[tuple[str, str, str, str]] = set()
         merged_issues: list[ReviewIssue] = []
         for report in reports:
             for issue in report.issues:
                 if not ResultProcessor._passes_issue_filter(issue):
                     continue
-                key = (issue.severity.value, issue.location, issue.suggestion)
+                if report_version == "3.0":
+                    # v3 candidates own description, evidence refs, and the
+                    # runtime identity.  Do not deduplicate them through the
+                    # legacy location/suggestion projection.
+                    key = (
+                        "3.0",
+                        issue.candidate_id,
+                        issue.finding_id,
+                        json.dumps(
+                            issue.contract_payload(),
+                            ensure_ascii=True,
+                            sort_keys=True,
+                        ),
+                    )
+                else:
+                    key = ("legacy", issue.severity.value, issue.location, issue.suggestion)
                 if key in seen:
                     continue
                 seen.add(key)
@@ -102,7 +133,11 @@ class ResultProcessor:
                 issue.suggestion,
             )
         )
-        return ReviewReport(summary=merged_summary, issues=merged_issues)
+        return ReviewReport(
+            summary=merged_summary,
+            issues=merged_issues,
+            schema_version=report_version,
+        )
 
     @staticmethod
     def _passes_issue_filter(issue: ReviewIssue) -> bool:
