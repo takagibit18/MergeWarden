@@ -22,6 +22,8 @@ from src.analyzer.diff_lines import changed_new_lines_by_file
 from src.analyzer.event_log import EventEntry, EventLog, EventType
 from src.analyzer.finding_integrity import (
     FindingIntegrityGuard,
+    FindingIntegrityResult,
+    IntegrityFailure,
     build_candidates,
     classify_integrity_failure,
 )
@@ -30,14 +32,23 @@ from src.analyzer.finding_delivery import (
     RepairTransaction,
     candidate_content_version,
     evidence_context_digest,
+    relevant_evidence_context_digest,
 )
 from src.analyzer.finding_contract import (
     canonical_contract_gaps,
     issue_supports,
     normalize_model_finding_payload,
+    normalize_model_finding_v3_payload,
     normalize_model_repair_payload,
 )
-from src.analyzer.finding_schema import SourceAnchor
+from src.analyzer.finding_schema import FindingContentV3, SourceAnchor
+from src.analyzer.semantic_verifier import (
+    InvestigationResult,
+    SemanticInvestigationRequest,
+    SemanticVerifier,
+    SemanticVerifierBudget,
+    SemanticVerifierCandidate,
+)
 from src.analyzer.inference_engine import InferenceEngine
 from src.analyzer.output_formatter import ReviewIssue, ReviewReport, Severity
 from src.analyzer.persistent_index import repository_identity, revision_identity
@@ -83,6 +94,7 @@ from src.orchestrator.run_journal import (
     PreflightJournalPayload,
     RunJournal,
     RunJournalError,
+    SemanticVerifierJournalPayload,
     ToolResultJournalPayload,
     redact_sensitive_values,
 )
@@ -90,6 +102,7 @@ from src.orchestrator.review_workflow import ReviewWorkflowTracker
 from src.orchestrator.tool_schemas import (
     build_draft_finding_tool_schema,
     build_draft_finding_update_tool_schema,
+    build_v3_finding_action_tool_schemas,
     build_repair_tool_schemas,
     build_submit_tool_schemas,
     build_tool_schemas,
@@ -267,6 +280,22 @@ class AgentOrchestrator:
         self._deterministic_rejected_count = 0
         self._verifier_accepted_count = 0
         self._verifier_rejected_count = 0
+        self._semantic_verifier_required = False
+        self._semantic_verifier_completed = False
+        self._semantic_accepted_count = 0
+        self._semantic_rejected_count = 0
+        self._semantic_needs_revision_count = 0
+        self._semantic_unresolved_count = 0
+        self._semantic_model_call_count = 0
+        self._semantic_investigation_call_count = 0
+        self._semantic_investigation_tool_call_count = 0
+        self._semantic_receipts: list[dict[str, Any]] = []
+        self._semantic_handles: dict[str, str] = {}
+        self._v3_handle_to_candidate: dict[str, str] = {}
+        self._v3_candidate_to_handle: dict[str, str] = {}
+        self._v3_finish_seen = False
+        self._v3_finish_summary = ""
+        self._last_integrity_guard_result: Any | None = None
         self._review_outcome: ReviewOutcome = "no_candidates"
         self._integrity_failure_codes: dict[str, list[str]] = {}
         self._integrity_failure_details: dict[str, list[dict[str, Any]]] = {}
@@ -374,6 +403,11 @@ class AgentOrchestrator:
                 )
                 self._submit_only_retry_pending = submit_only_failed
             tool_results = await self.execute_tools(plan, self._registry, state)
+            if self._settings.finding_contract_version == "3.0":
+                self._observe_review_submission(plan)
+                if plan.v3_finish_review is not None and plan.draft_review is not None:
+                    self._review_stage = "complete"
+                    self._submit_only_retry_pending = False
             self._observe_workflow_tools(plan, tool_results)
             response = self.format_result(state, tool_results)
             if not self.should_continue(state, response):
@@ -386,6 +420,8 @@ class AgentOrchestrator:
                     state, request, tool_specs=[], force_submit=True
                 )
                 self._last_plan = submit_plan
+                if self._settings.finding_contract_version == "3.0":
+                    await self.execute_tools(submit_plan, self._registry, state)
                 self._observe_review_submission(submit_plan)
                 self._observe_incomplete_plan(submit_plan, state)
                 response = self.format_result(state, tool_results=[])
@@ -450,12 +486,21 @@ class AgentOrchestrator:
             if self._last_plan is not None and self._last_plan.draft_review is not None
             else response.report
         )
-        return self._verify_with_integrity_guard(
+        guarded = self._verify_with_integrity_guard(
             response,
             submitted_report,
             request,
             state,
         )
+        if any(issue.is_v3_finding for issue in submitted_report.issues):
+            return await self._run_semantic_verifier(
+                guarded,
+                submitted_report,
+                request,
+                state,
+            )
+        return guarded
+
     def _verify_with_integrity_guard(
         self,
         response: ReviewResponse,
@@ -465,6 +510,9 @@ class AgentOrchestrator:
     ) -> ReviewResponse:
         """Run the default thin integrity stage without another model call."""
 
+        v3_mode = any(issue.is_v3_finding for issue in submitted_report.issues)
+        semantic_mode = v3_mode
+        self._semantic_verifier_required = semantic_mode
         filter_decisions = [
             evaluate_issue_filter(issue) for issue in submitted_report.issues
         ]
@@ -491,7 +539,9 @@ class AgentOrchestrator:
             submitted_report,
             iteration=self._iteration,
             registry=self._candidate_registry,
+            include_non_risk=v3_mode,
         )
+        self._last_integrity_guard_result = None
         state.candidate_registrations = self._candidate_registry.snapshot()
         self._verifier_candidate_count = len(candidates)
         self._risk_candidate_count = len(candidates)
@@ -610,8 +660,10 @@ class AgentOrchestrator:
                 "verifier_kind": "integrity_guard",
             },
         )
-        if self._workflow_enforcement != "off" and candidates:
+        if self._workflow_enforcement != "off" and candidates and not semantic_mode:
             self._complete_workflow_step("semantic_verify_findings")
+
+        self._last_integrity_guard_result = guard_result
 
         bound_by_source_index = {
             candidate.source_issue_index: candidate.issue
@@ -712,6 +764,1050 @@ class AgentOrchestrator:
             state=state,
         )
         return response
+
+    async def _run_semantic_verifier(
+        self,
+        response: ReviewResponse,
+        submitted_report: ReviewReport,
+        request: ReviewRequest,
+        state: ContextState,
+        *,
+        target_candidate_ids: set[str] | None = None,
+        preserve_issues: list[ReviewIssue] | None = None,
+        allow_semantic_repair: bool = True,
+    ) -> ReviewResponse:
+        """Run the independent semantic gate after integrity binding."""
+
+        self._semantic_verifier_required = True
+        guard_result = self._last_integrity_guard_result
+        if guard_result is None:
+            response.completion_status = "incomplete"
+            response.incomplete_reasons = list(
+                dict.fromkeys([*response.incomplete_reasons, "integrity_result_missing"])
+            )
+            self._semantic_unresolved_count = len(submitted_report.issues)
+            return response
+
+        target_ids = {
+            str(candidate_id).strip()
+            for candidate_id in (target_candidate_ids or set())
+            if str(candidate_id).strip()
+        }
+        prior_semantic_receipts = list(self._semantic_receipts)
+        verified_ids = {
+            item.candidate_id
+            for item in guard_result.results
+            if item.status == "verified"
+        }
+        submitted_structured_ids = {
+            candidate.candidate_id
+            for candidate in guard_result.bound_candidates
+            if candidate.issue.is_structured_hypothesis
+        }
+        if target_ids:
+            verified_ids &= target_ids
+            submitted_structured_ids &= target_ids
+        # Integrity and semantics are separate gates.  A candidate that failed
+        # integrity is not allowed to disappear before the semantic stage and
+        # accidentally make the run look complete merely because no model input
+        # could be built for it.
+        integrity_blocked_v3_count = len(submitted_structured_ids - verified_ids)
+        candidate_items: list[SemanticVerifierCandidate] = []
+        candidate_by_handle: dict[str, Any] = {}
+        versions: dict[str, str] = {}
+        evidence_digests: dict[str, str] = {}
+        investigation_evidence_refs: dict[str, list[str]] = {}
+        for candidate in guard_result.bound_candidates:
+            issue = candidate.issue
+            if (
+                not issue.is_structured_hypothesis
+                or candidate.candidate_id not in verified_ids
+            ):
+                continue
+            record = self._candidate_registry.registration(candidate.candidate_id)
+            if record is None:
+                continue
+            try:
+                evidence_refs = list(issue.evidence_refs)
+                if not evidence_refs:
+                    evidence_refs = [
+                        str(item.evidence_id or item.reference_id).strip()
+                        for item in issue.all_evidence()
+                        if str(item.evidence_id or item.reference_id).strip()
+                    ]
+                description = issue.description.strip()
+                if not description:
+                    description = " ".join(
+                        item.strip()
+                        for item in (
+                            issue.observed_behavior,
+                            issue.causal_mechanism,
+                            issue.violated_invariant,
+                            issue.trigger,
+                            issue.impact,
+                        )
+                        if item.strip()
+                    ) or issue.evidence.strip()
+                content = FindingContentV3.model_validate(
+                    {
+                        "anchor": issue.primary_anchor.model_dump(mode="json")
+                        if issue.primary_anchor is not None
+                        else {},
+                        "description": description,
+                        "evidence_refs": evidence_refs,
+                        "severity": issue.severity.value,
+                        "suggestion": issue.suggestion or None,
+                        "related_locations": [
+                            SourceAnchor.model_validate(item.model_dump(mode="json"))
+                            for item in issue.related_locations
+                        ],
+                    }
+                )
+            except Exception:  # noqa: BLE001
+                continue
+            # The registry rotates the opaque handle whenever the runtime
+            # content version changes.  A semantic receipt must therefore
+            # never be re-used for a revised candidate.
+            handle = self._candidate_registry.opaque_handle(candidate.candidate_id)
+            self._semantic_handles[candidate.candidate_id] = handle
+            semantic_candidate = SemanticVerifierCandidate(
+                opaque_handle=handle,
+                content=content,
+            )
+            candidate_items.append(semantic_candidate)
+            candidate_by_handle[handle] = candidate
+            versions[handle] = record.candidate_content_version
+            evidence_digests[handle] = relevant_evidence_context_digest(
+                state.evidence_ledger,
+                content.evidence_refs,
+                snapshot_id=self._evidence_snapshot_id,
+                revision=self._evidence_revision,
+            )
+
+        response.semantic_verifier_required = True
+        if not candidate_items:
+            self._semantic_verifier_completed = (
+                not verified_ids and integrity_blocked_v3_count == 0
+            )
+            self._semantic_unresolved_count = integrity_blocked_v3_count + len(
+                verified_ids
+            )
+            response.semantic_verifier_completed = self._semantic_verifier_completed
+            response.semantic_unresolved_count = self._semantic_unresolved_count
+            if verified_ids or integrity_blocked_v3_count:
+                self._add_incomplete_reason(state, "semantic_verifier_no_candidates")
+            return response
+
+        evidence = self._semantic_evidence_projection(
+            state.evidence_ledger,
+            {ref for item in candidate_items for ref in item.content.evidence_refs},
+        )
+        semantic_context = {
+            "context_mode": state.context_mode,
+            "candidate_manifests": self._semantic_manifest_projection(
+                state.candidate_context_manifests
+            ),
+        }
+
+        async def investigate(
+            question: str,
+            candidate: SemanticVerifierCandidate,
+            max_calls: int,
+        ) -> InvestigationResult:
+            before_evidence_ids = {
+                str(item.get("evidence_id", "")).strip()
+                for item in state.evidence_ledger
+                if isinstance(item, dict)
+                and str(item.get("evidence_id", "")).strip()
+            }
+            investigation = await self._investigate_semantic_candidate(
+                question,
+                candidate,
+                max_calls=max_calls,
+                state=state,
+            )
+            investigation_evidence_refs[candidate.opaque_handle] = [
+                str(item.get("evidence_id", "")).strip()
+                for item in state.evidence_ledger
+                if isinstance(item, dict)
+                and str(item.get("evidence_id", "")).strip()
+                not in before_evidence_ids
+            ]
+            evidence_refs = set(candidate.content.evidence_refs)
+            evidence_refs.update(investigation_evidence_refs[candidate.opaque_handle])
+            evidence_digests[candidate.opaque_handle] = relevant_evidence_context_digest(
+                state.evidence_ledger,
+                evidence_refs,
+                snapshot_id=self._evidence_snapshot_id,
+                revision=self._evidence_revision,
+            )
+            return investigation
+
+        diff_text = request.diff_text or ""
+        budget = SemanticVerifierBudget(
+            batch_size=self._settings.semantic_verifier_batch_size,
+            max_model_calls=self._settings.semantic_verifier_max_model_calls,
+            max_investigation_calls=self._settings.semantic_verifier_max_investigation_calls,
+            max_investigation_tool_calls=(
+                self._settings.semantic_verifier_max_investigation_tool_calls
+            ),
+            timeout_seconds=max(
+                0.001,
+                min(
+                    self._settings.model_request_timeout_seconds,
+                    self._run_timeout_seconds - self._run_elapsed_seconds(),
+                ),
+            ),
+            token_budget=self._settings.token_budget,
+            hard_token_budget=self._settings.token_hard_budget,
+            initial_tokens_used=self._total_tokens,
+            request_token_budget=self._settings.assembled_request_token_budget,
+        )
+        if self._budget_exhausted or self._run_timeout_exceeded():
+            # The semantic gate shares the report-level budget.  A depleted
+            # budget is an unresolved verifier result, never a guard-only pass.
+            budget.max_model_calls = 0
+        verifier = SemanticVerifier(self._model_client, budget=budget)
+        def observe_semantic_usage(
+            model_response: ModelResponse | None,
+            provider_attempt_count: int,
+            failed_provider_attempt_count: int,
+            failed_unknown_usage_count: int,
+        ) -> None:
+            """Commit verifier usage to the shared run ledger immediately."""
+
+            self._provider_attempt_count += provider_attempt_count
+            self._failed_attempt_count += failed_provider_attempt_count
+            self._failed_unknown_usage_count += failed_unknown_usage_count
+            if model_response is not None and model_response.usage_present:
+                self._successful_prompt_tokens += max(
+                    0, int(model_response.usage.prompt_tokens)
+                )
+                self._successful_completion_tokens += max(
+                    0, int(model_response.usage.completion_tokens)
+                )
+                self._successful_reasoning_tokens += max(
+                    0, int(model_response.usage.reasoning_tokens)
+                )
+                self._successful_total_tokens += max(
+                    0, int(model_response.usage.total_tokens)
+                )
+                self._total_tokens += max(0, int(model_response.usage.total_tokens))
+                cached = model_response.usage.cached_prompt_tokens
+                if cached is not None:
+                    self._cache_observation_count += 1
+                    self._successful_cached_prompt_tokens += max(0, int(cached))
+                    self._provider_cache_hit_count += int(cached > 0)
+            self._budget_state = self._result_processor.budget_state(self._total_tokens)
+            self._budget_exhausted = self._budget_state != "none"
+
+        semantic_result = await verifier.verify(
+            candidate_items,
+            changed_diff=diff_text,
+            evidence=evidence,
+            context=semantic_context,
+            content_versions=versions,
+            evidence_context_digests=evidence_digests,
+            investigator=investigate,
+            investigation_evidence_refs=investigation_evidence_refs,
+            usage_observer=observe_semantic_usage,
+        )
+        self._semantic_model_call_count = semantic_result.model_call_count
+        self._semantic_investigation_call_count = semantic_result.investigation_call_count
+        self._semantic_investigation_tool_call_count = (
+            semantic_result.investigation_tool_call_count
+        )
+        self._semantic_accepted_count = semantic_result.accepted_count
+        self._semantic_rejected_count = semantic_result.rejected_count
+        self._semantic_needs_revision_count = semantic_result.needs_revision_count
+        self._semantic_unresolved_count = (
+            semantic_result.unresolved_count + integrity_blocked_v3_count
+        )
+        self._semantic_receipts = [
+            item
+            for item in prior_semantic_receipts
+            if target_ids
+            and str(item.get("candidate_id", "")).strip() not in target_ids
+        ]
+        accepted_handles: set[str] = set()
+        for receipt in semantic_result.receipts:
+            candidate = candidate_by_handle.get(receipt.opaque_handle)
+            candidate_id = candidate.candidate_id if candidate is not None else ""
+            payload = receipt.model_dump(mode="json")
+            payload["candidate_id"] = candidate_id
+            self._semantic_receipts.append(payload)
+            self._journal_semantic_receipt(payload, phase="request")
+            if candidate_id:
+                receipt_saved = self._candidate_registry.record_semantic_receipt(
+                    candidate_id,
+                    payload,
+                    content_version=receipt.content_version,
+                    evidence_context_digest=receipt.evidence_context_digest,
+                )
+                if not receipt_saved:
+                    self._semantic_unresolved_count += 1
+                    self._add_incomplete_reason(
+                        state, "semantic_receipt_binding_failed"
+                    )
+                    accepted_handles.discard(receipt.opaque_handle)
+                    self._journal_semantic_receipt(payload, phase="receipt")
+                    continue
+            self._journal_semantic_receipt(payload, phase="receipt")
+            if receipt.verdict == "accept" and not receipt.severity_correction:
+                accepted_handles.add(receipt.opaque_handle)
+
+        accepted_issues = [
+            candidate_by_handle[handle].issue
+            for handle in accepted_handles
+            if handle in candidate_by_handle
+        ]
+        preserved_issues = list(preserve_issues or [])
+        accepted_issues = [
+            *preserved_issues,
+            *[
+                issue
+                for issue in accepted_issues
+                if issue.candidate_id
+                not in {item.candidate_id for item in preserved_issues}
+            ],
+        ]
+        if allow_semantic_repair:
+            repaired_report = await self._repair_semantic_revisions(
+                response=response,
+                submitted_report=submitted_report,
+                request=request,
+                state=state,
+                candidate_by_handle=candidate_by_handle,
+                receipts=semantic_result.receipts,
+                investigation_evidence_refs=investigation_evidence_refs,
+            )
+            if repaired_report is not None:
+                revised_ids = {
+                    issue.candidate_id.strip()
+                    for issue in repaired_report.issues
+                    if issue.candidate_id.strip()
+                }
+                preserved_for_recheck = [
+                    issue
+                    for issue in accepted_issues
+                    if issue.candidate_id.strip() not in revised_ids
+                ]
+                response.incomplete_reasons = [
+                    reason
+                    for reason in response.incomplete_reasons
+                    if reason
+                    not in {
+                        "semantic_verifier_needs_revision",
+                        "semantic_verifier_unresolved",
+                    }
+                ]
+                return await self._run_semantic_verifier(
+                    response,
+                    repaired_report,
+                    request,
+                    state,
+                    target_candidate_ids=revised_ids,
+                    preserve_issues=preserved_for_recheck,
+                    allow_semantic_repair=False,
+                )
+        response.report = ReviewReport(
+            summary=submitted_report.summary,
+            issues=accepted_issues,
+            schema_version=submitted_report.schema_version,
+        )
+        total = len(candidate_items) + integrity_blocked_v3_count
+        self._semantic_verifier_completed = (
+            total > 0
+            and self._semantic_unresolved_count == 0
+            and self._semantic_needs_revision_count == 0
+        )
+        response.semantic_verifier_completed = self._semantic_verifier_completed
+        response.semantic_accepted_count = self._semantic_accepted_count
+        response.semantic_rejected_count = self._semantic_rejected_count
+        response.semantic_needs_revision_count = self._semantic_needs_revision_count
+        response.semantic_unresolved_count = self._semantic_unresolved_count
+        response.review_outcome = _review_outcome_for_counts(
+            total, self._semantic_accepted_count
+        )
+        response.report_ready = bool(
+            self._semantic_verifier_completed
+            and not self._integrity_needs_repair_count
+            and not self._integrity_invalid_count
+        )
+        response.external_publish_status = "ready" if response.report_ready else "not_requested"
+        semantic_reasons = list(semantic_result.errors)
+        if self._semantic_unresolved_count:
+            semantic_reasons.append("semantic_verifier_unresolved")
+        if self._semantic_needs_revision_count:
+            semantic_reasons.append("semantic_verifier_needs_revision")
+        if semantic_reasons:
+            response.completion_status = "incomplete"
+            response.finding_run_status = "incomplete"
+            response.incomplete_reasons = list(
+                dict.fromkeys([*response.incomplete_reasons, *semantic_reasons])
+            )
+        if self._workflow_enforcement != "off":
+            if self._semantic_verifier_completed:
+                self._complete_workflow_step("semantic_verify_findings")
+            else:
+                self._fail_workflow_step(
+                    "semantic_verify_findings", "semantic_verifier_unresolved"
+                )
+        self._record_event(
+            EventType.FINDING_VERIFICATION_COMPLETED,
+            "semantic_verify_findings",
+            {
+                "verifier_kind": "semantic_model",
+                "candidate_count": total,
+                "accepted_count": self._semantic_accepted_count,
+                "rejected_count": self._semantic_rejected_count,
+                "needs_revision_count": self._semantic_needs_revision_count,
+                "unresolved_count": self._semantic_unresolved_count,
+                "model_call_count": self._semantic_model_call_count,
+                "successful_model_call_count": semantic_result.successful_model_call_count,
+                "failed_model_call_count": semantic_result.failed_model_call_count,
+                "prompt_tokens": semantic_result.prompt_tokens,
+                "completion_tokens": semantic_result.completion_tokens,
+                "reasoning_tokens": semantic_result.reasoning_tokens,
+                "total_tokens": semantic_result.total_tokens,
+                "cached_prompt_tokens": semantic_result.cached_prompt_tokens,
+                "cache_observation_count": semantic_result.cache_observation_count,
+                "cache_hit_count": semantic_result.cache_hit_count,
+                "investigation_call_count": self._semantic_investigation_call_count,
+                "investigation_tool_call_count": self._semantic_investigation_tool_call_count,
+                "receipts": [
+                    {
+                        "opaque_handle": item["opaque_handle"],
+                        "verdict": item["verdict"],
+                        "status": item["status"],
+                        "error_code": item.get("error_code", ""),
+                    }
+                    for item in self._semantic_receipts
+                ],
+            },
+        )
+        state.candidate_registrations = self._candidate_registry.snapshot()
+        self._persist_final_candidate_states(
+            response=response,
+            guard_result=guard_result,
+            state=state,
+        )
+        return response
+
+    def _journal_semantic_receipt(
+        self,
+        payload: dict[str, Any],
+        *,
+        phase: Literal["request", "receipt"],
+    ) -> None:
+        """Persist safe request/response binding facts without model reasoning."""
+
+        if self._run_journal is None:
+            return
+        journal_payload = SemanticVerifierJournalPayload(
+            phase=phase,
+            opaque_handle=str(payload.get("opaque_handle", "")),
+            candidate_id=str(payload.get("candidate_id", "")),
+            content_version=str(payload.get("content_version", "")),
+            evidence_context_digest=str(payload.get("evidence_context_digest", "")),
+            input_digest=str(payload.get("input_digest", "")),
+            request_hash=str(payload.get("request_hash", "")),
+            request_estimated_tokens=int(payload.get("request_estimated_tokens", 0) or 0),
+            response_digest=(
+                str(payload.get("response_digest", "")) if phase == "receipt" else ""
+            ),
+            provider_request_id=(
+                str(payload.get("provider_request_id", ""))
+                if phase == "receipt"
+                else ""
+            ),
+            provider_attempt_count=(
+                int(payload.get("provider_attempt_count", 0) or 0)
+                if phase == "receipt"
+                else 0
+            ),
+            verdict=(str(payload.get("verdict", "")) if phase == "receipt" else ""),
+            status=(str(payload.get("status", "")) if phase == "receipt" else ""),
+            error_code=(
+                str(payload.get("error_code", "")) if phase == "receipt" else ""
+            ),
+            investigation_calls=(
+                int(payload.get("investigation_calls", 0) or 0)
+                if phase == "receipt"
+                else 0
+            ),
+            investigation_tool_calls=(
+                int(payload.get("investigation_tool_calls", 0) or 0)
+                if phase == "receipt"
+                else 0
+            ),
+            investigation_evidence_refs=(
+                [
+                    str(item).strip()
+                    for item in payload.get("investigation_evidence_refs", [])
+                    if str(item).strip()
+                ]
+                if phase == "receipt"
+                and isinstance(payload.get("investigation_evidence_refs", []), list)
+                else []
+            ),
+        ).model_dump(mode="json")
+        self._run_journal.append(
+            PendingRunJournalEntry(
+                type="semantic_verifier_call",
+                payload=journal_payload,
+            )
+        )
+
+    async def _repair_semantic_revisions(
+        self,
+        *,
+        response: ReviewResponse,
+        submitted_report: ReviewReport,
+        request: ReviewRequest,
+        state: ContextState,
+        candidate_by_handle: dict[str, Any],
+        receipts: list[Any],
+        investigation_evidence_refs: dict[str, list[str]],
+    ) -> ReviewReport | None:
+        """Run one explicit Reviewer repair transaction for semantic gaps."""
+
+        revision_receipts = [
+            receipt
+            for receipt in receipts
+            if receipt.verdict == "needs_revision"
+            and receipt.opaque_handle in candidate_by_handle
+        ]
+        if not revision_receipts:
+            return None
+        target_ids = {
+            candidate_by_handle[receipt.opaque_handle].candidate_id
+            for receipt in revision_receipts
+        }
+        if self._active_repair_transaction is not None:
+            self._add_incomplete_reason(state, "semantic_repair_transaction_busy")
+            return None
+        capacity = self._repair_sequence_capacity(
+            1,
+            transaction_scoped=True,
+        )
+        if not capacity["allowed"]:
+            reason = str(capacity.get("reason", "repair_budget_exhausted"))
+            self._add_incomplete_reason(state, reason)
+            self._record_event(
+                EventType.DECISION,
+                "semantic_repair",
+                {
+                    "stage": "preflight",
+                    "succeeded": False,
+                    "reason": reason,
+                    "target_candidate_count": len(target_ids),
+                    **capacity,
+                },
+            )
+            return None
+
+        repair_report = ReviewReport(
+            summary=submitted_report.summary,
+            issues=[
+                candidate_by_handle[receipt.opaque_handle].issue
+                for receipt in revision_receipts
+            ],
+            schema_version=submitted_report.schema_version,
+        )
+        repair_candidates = build_candidates(
+            repair_report,
+            iteration=self._iteration,
+            registry=self._candidate_registry,
+            register=False,
+            include_non_risk=True,
+        )
+        preview = FindingIntegrityGuard(self._workspace_root).validate(
+            repair_candidates,
+            request,
+            tool_evidence=self._observed_tool_evidence(state),
+            context_manifests=[dict(item) for item in state.candidate_context_manifests],
+            context_mode=state.context_mode,
+            evidence_ledger=ledger_from_sources(
+                existing_payload=state.evidence_ledger,
+                snapshot_id=self._evidence_snapshot_id,
+                revision=self._evidence_revision,
+            ),
+            snapshot_id=self._evidence_snapshot_id,
+            revision=self._evidence_revision,
+        )
+        if any(
+            result.status != "verified"
+            for result in preview.results
+            if result.candidate_id in target_ids
+        ):
+            self._add_incomplete_reason(state, "semantic_repair_integrity_recheck_failed")
+            return None
+
+        gaps: list[dict[str, Any]] = []
+        synthetic_results: list[FindingIntegrityResult] = []
+        for receipt in revision_receipts:
+            candidate = candidate_by_handle[receipt.opaque_handle]
+            candidate_id = candidate.candidate_id
+            gap_items = [
+                {
+                    "code": "semantic_verifier_needs_revision",
+                    "message": receipt.reason,
+                    "field": "semantic_verifier",
+                    "failure_class": "contract_gap",
+                    "required_action": (
+                        "apply only the requested semantic patch, then let the "
+                        "runtime re-run integrity and semantic verification"
+                    ),
+                }
+            ]
+            if receipt.severity_correction is not None:
+                gap_items.append(
+                    {
+                        "code": "semantic_severity_correction",
+                        "message": "The verifier requested an explicit severity correction.",
+                        "field": "severity",
+                        "failure_class": "contract_gap",
+                        "required_action": "set severity in repair_patch explicitly",
+                    }
+                )
+            available_evidence = [
+                {
+                    key: item.get(key, "")
+                    for key in (
+                        "evidence_id",
+                        "path",
+                        "start_line",
+                        "end_line",
+                        "source_type",
+                        "truncated",
+                    )
+                }
+                for item in state.evidence_ledger
+                if isinstance(item, dict)
+                and str(item.get("evidence_id", "")).strip()
+                in set(investigation_evidence_refs.get(receipt.opaque_handle, []))
+            ]
+            gaps.append(
+                {
+                    "candidate_id": candidate_id,
+                    "target_candidate_id": candidate_id,
+                    "original_contents": candidate.issue.model_dump(mode="json"),
+                    "status": "needs_repair",
+                    "candidate_content_version": self._candidate_registry.expected_version(
+                        candidate_id
+                    ),
+                    "content_hash": self._candidate_registry.expected_version(
+                        candidate_id
+                    ),
+                    "gaps": gap_items,
+                    "available_evidence": available_evidence,
+                }
+            )
+            synthetic_results.append(
+                FindingIntegrityResult(
+                    candidate_id=candidate_id,
+                    passed=False,
+                    failures=(
+                        IntegrityFailure(
+                            code="semantic_verifier_needs_revision",
+                            message=receipt.reason,
+                            field="semantic_verifier",
+                        ),
+                    ),
+                    content_version=self._candidate_registry.expected_version(candidate_id),
+                    evidence_context_digest=(
+                        receipt.evidence_context_digest
+                        or evidence_context_digest(
+                            state.evidence_ledger,
+                            snapshot_id=self._evidence_snapshot_id,
+                            revision=self._evidence_revision,
+                        )
+                    ),
+                )
+            )
+        transaction = self._build_repair_transaction(
+            synthetic_results,
+            gaps,
+            evidence_catalog=state.evidence_ledger,
+        )
+        self._last_validator_result = {
+            "validator_passed": False,
+            "submit_allowed": False,
+            "unresolved_evidence_gaps": [
+                self._model_safe_repair_gap(
+                    gap,
+                    target_handle=next(
+                        handle
+                        for handle, candidate_id in transaction.target_handles.items()
+                        if candidate_id == gap["candidate_id"]
+                    ),
+                )
+                for gap in gaps
+            ],
+            "repair_instruction": (
+                "Repair only these semantic verifier targets. Preserve every other "
+                "finding. Use the opaque target_handle and a minimal repair_patch; "
+                "do not emit candidate ids, content versions, or a full finding. "
+                "A verifier rejection is not a repair request."
+            ),
+            "repair_transaction": self._model_safe_transaction(transaction),
+        }
+        self._open_repair_transaction(transaction, state=state)
+        self._record_repair_transaction_step("preflight")
+        self._record_event(
+            EventType.DECISION,
+            "semantic_repair",
+            {
+                "stage": "opened",
+                "target_candidate_ids": sorted(target_ids),
+                "reason_codes": sorted(
+                    {
+                        code
+                        for gap in gaps
+                        for item in gap["gaps"]
+                        for code in [str(item.get("code", "")).strip()]
+                        if code
+                    }
+                ),
+            },
+        )
+
+        repair_plan = await self.analyze(
+            state,
+            request,
+            tool_specs=[],
+            force_submit=True,
+            repair_mode=True,
+        )
+        self._record_repair_model_call("semantic_repair")
+        self._account_latest_model_usage()
+        self._observe_review_submission(repair_plan)
+        self._observe_incomplete_plan(repair_plan, state)
+        if repair_plan.repair_response is None:
+            self._add_incomplete_reason(state, "semantic_repair_response_missing")
+            self._finish_repair_transaction(
+                status="incomplete",
+                target_results={candidate_id: "incomplete" for candidate_id in target_ids},
+                reasons=["semantic_repair_response_missing"],
+                state=state,
+            )
+            return None
+
+        diagnostics: list[dict[str, Any]] = []
+        merged = self._merge_repair_response(
+            repair_report,
+            repair_plan.repair_response,
+            preview,
+            transaction=transaction,
+            registry=self._candidate_registry,
+            evidence_catalog=state.evidence_ledger,
+            snapshot_id=self._evidence_snapshot_id,
+            revision=self._evidence_revision,
+            allowed_target_candidate_ids=target_ids,
+            diagnostics=diagnostics,
+        )
+        if diagnostics:
+            codes = [
+                str(item.get("code", "")).strip()
+                for item in diagnostics
+                if str(item.get("code", "")).strip()
+            ]
+            for code in dict.fromkeys(codes):
+                self._add_incomplete_reason(state, code)
+
+        merged_candidates = build_candidates(
+            merged,
+            iteration=self._iteration,
+            registry=self._candidate_registry,
+            register=False,
+            include_non_risk=True,
+        )
+        repaired_result = FindingIntegrityGuard(self._workspace_root).validate(
+            merged_candidates,
+            request,
+            tool_evidence=self._observed_tool_evidence(state),
+            context_manifests=[dict(item) for item in state.candidate_context_manifests],
+            context_mode=state.context_mode,
+            evidence_ledger=ledger_from_sources(
+                existing_payload=state.evidence_ledger,
+                snapshot_id=self._evidence_snapshot_id,
+                revision=self._evidence_revision,
+            ),
+            snapshot_id=self._evidence_snapshot_id,
+            revision=self._evidence_revision,
+        )
+        repaired_by_id = {
+            candidate.candidate_id: (candidate, result)
+            for candidate, result in zip(
+                repaired_result.bound_candidates,
+                repaired_result.results,
+                strict=False,
+            )
+        }
+        if any(
+            repaired_by_id.get(candidate_id) is None
+            or repaired_by_id[candidate_id][1].status != "verified"
+            for candidate_id in target_ids
+        ):
+            self._add_incomplete_reason(state, "semantic_repair_integrity_failed")
+            self._finish_repair_transaction(
+                status="incomplete",
+                target_results={candidate_id: "incomplete" for candidate_id in target_ids},
+                reasons=["semantic_repair_integrity_failed"],
+                state=state,
+            )
+            return None
+
+        # Validate every current base version before applying any replacement;
+        # the subsequent writes are therefore one logical all-target commit.
+        if any(
+            self._candidate_registry.expected_version(candidate_id)
+            != transaction.base_versions.get(candidate_id, "")
+            for candidate_id in target_ids
+        ):
+            self._add_incomplete_reason(state, "semantic_repair_target_expired")
+            self._finish_repair_transaction(
+                status="incomplete",
+                target_results={candidate_id: "expired" for candidate_id in target_ids},
+                reasons=["semantic_repair_target_expired"],
+                state=state,
+            )
+            return None
+        replacements = {
+            candidate_id: repaired_by_id[candidate_id][0].issue
+            for candidate_id in target_ids
+        }
+        for candidate_id in target_ids:
+            if not self._candidate_registry.revise_finding(
+                candidate_id,
+                replacements[candidate_id],
+                base_version=transaction.base_versions[candidate_id],
+            ):
+                self._add_incomplete_reason(state, "semantic_repair_commit_failed")
+                self._finish_repair_transaction(
+                    status="incomplete",
+                    target_results={
+                        target_id: "incomplete" for target_id in target_ids
+                    },
+                    reasons=["semantic_repair_commit_failed"],
+                    state=state,
+                )
+                return None
+        # The patch has passed the complete integrity guard.  Persist that
+        # exact revised version as the current verified mechanical state before
+        # the independent semantic recheck; otherwise a valid repair would
+        # remain ``registered`` and the publisher would reject the rechecked
+        # receipt even though the candidate content and evidence are bound.
+        for candidate_id in target_ids:
+            candidate, integrity_result = repaired_by_id[candidate_id]
+            self._candidate_registry.commit_verified_version(
+                candidate_id,
+                candidate.issue,
+                evidence_context_digest=integrity_result.evidence_context_digest,
+            )
+        self._last_integrity_guard_result = repaired_result
+        self._integrity_needs_repair_count = 0
+        self._integrity_invalid_count = 0
+        self._finish_repair_transaction(
+            status="accepted",
+            target_results={candidate_id: "revised" for candidate_id in target_ids},
+            state=state,
+        )
+        self._record_event(
+            EventType.DECISION,
+            "semantic_repair",
+            {
+                "stage": "committed",
+                "target_candidate_ids": sorted(target_ids),
+                "independent_recheck_required": True,
+            },
+        )
+        revised_issues: list[ReviewIssue] = []
+        for candidate_id in target_ids:
+            issue = self._candidate_registry.authoritative_issue(candidate_id)
+            if issue is not None:
+                revised_issues.append(issue)
+        return ReviewReport(
+            summary=merged.summary,
+            issues=revised_issues,
+            schema_version=merged.schema_version,
+        )
+
+    async def _investigate_semantic_candidate(
+        self,
+        question: str,
+        candidate: SemanticVerifierCandidate,
+        *,
+        max_calls: int,
+        state: ContextState,
+    ) -> InvestigationResult:
+        """Answer one verifier question with a bounded existing read-only tool."""
+
+        if (
+            max_calls <= 0
+            or self._budget_exhausted
+            or self._run_timeout_exceeded()
+            or self._tool_call_count >= self._settings.agent_max_tool_calls
+        ):
+            return InvestigationResult(answer="investigation_budget_exhausted")
+        try:
+            request_payload = _json.loads(question)
+            investigation_request = SemanticInvestigationRequest.model_validate(
+                request_payload.get("action", {})
+                if isinstance(request_payload, dict)
+                else {}
+            )
+            investigation_question = str(
+                request_payload.get("question", "")
+                if isinstance(request_payload, dict)
+                else ""
+            ).strip()
+        except (TypeError, ValueError, _json.JSONDecodeError):
+            return InvestigationResult(
+                answer="investigation_action_missing",
+                tool_call_count=0,
+            )
+
+        tool_name = investigation_request.tool
+        tool = self._registry.get(tool_name)
+        if tool is None or tool.spec().safety != ToolSafety.READONLY:
+            return InvestigationResult(answer="read-only investigation tool unavailable")
+
+        start_line = investigation_request.start_line or 1
+        end_line = investigation_request.end_line or start_line
+        if tool_name == "read_file":
+            arguments = {
+                "file_path": investigation_request.file,
+                "offset": max(0, start_line - 1),
+                "limit": max(1, min(64, end_line - start_line + 1)),
+            }
+        elif tool_name == "get_changed_context":
+            arguments = {
+                "file_path": investigation_request.file,
+                "line": start_line,
+                "end_line": end_line,
+                "radius": 16,
+                "include_imports": True,
+                "include_enclosing_symbol": True,
+            }
+        elif tool_name == "find_symbol_context":
+            arguments = {
+                "symbol": investigation_request.symbol,
+                "path": investigation_request.file or ".",
+                "mode": "all",
+                "line": investigation_request.start_line,
+                "max_results": 30,
+                "context_radius": 8,
+            }
+        else:
+            arguments = {
+                "pattern": investigation_request.pattern,
+                "path": investigation_request.file,
+                "limit": 50,
+            }
+        call_id = "semantic-investigation-" + uuid4().hex[:12]
+        raw_call = {
+            "id": call_id,
+            "type": "function",
+            "function": {
+                "name": tool_name,
+                "arguments": _json.dumps(arguments, ensure_ascii=True),
+            },
+            "synthetic_context": True,
+        }
+        result, error_detail, elapsed_ms = await self._execute_one_tool(
+            tool_name=tool_name,
+            tool=tool,
+            args=arguments,
+        )
+        self._tool_call_count += 1
+        self._tool_name_counts[tool_name] = self._tool_name_counts.get(tool_name, 0) + 1
+        self._record_event(
+            EventType.TOOL_CALL,
+            "semantic_investigation",
+            {
+                "iteration": self._iteration,
+                "call_id": call_id,
+                "name": tool_name,
+                "question": investigation_question[:300],
+                "path": investigation_request.file,
+                "line": investigation_request.start_line,
+                "end_line": investigation_request.end_line,
+                "arguments": arguments,
+                "ok": result.ok,
+                "elapsed_ms": elapsed_ms,
+            },
+        )
+        self._append_tool_feedback([{"tool_call": raw_call, "result": result}])
+        if error_detail is not None:
+            state.errors.append(error_detail)
+        if not result.ok:
+            return InvestigationResult(
+                answer=str(result.error or "read-only investigation failed"),
+                tool_call_count=1,
+            )
+        self._refresh_evidence_ledger(state)
+        data = result.data if isinstance(result.data, dict) else {"value": result.data}
+        evidence = {
+            "tool": tool_name,
+            "arguments": arguments,
+            "result": data,
+            "truncated": bool(data.get("truncated", False)),
+        }
+        return InvestigationResult(
+            answer=str(data.get("content", "") or "read-only evidence delivered"),
+            evidence=[evidence],
+            tool_call_count=1,
+        )
+
+    @staticmethod
+    def _semantic_evidence_projection(
+        records: list[dict[str, Any]], refs: set[str]
+    ) -> list[dict[str, Any]]:
+        selected: list[dict[str, Any]] = []
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            identifiers = {
+                str(record.get("evidence_id", "")).strip(),
+                str(record.get("artifact_id", "")).strip(),
+            }
+            aliases = record.get("aliases", [])
+            if isinstance(aliases, list):
+                identifiers.update(str(item).strip() for item in aliases)
+            if identifiers.intersection(refs):
+                selected.append(dict(record))
+        return selected
+
+    @staticmethod
+    def _semantic_manifest_projection(
+        manifests: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        projected: list[dict[str, Any]] = []
+        for manifest in manifests:
+            if not isinstance(manifest, dict):
+                continue
+            spans: list[dict[str, Any]] = []
+            for raw_span in manifest.get("included_spans", []):
+                if not isinstance(raw_span, dict):
+                    continue
+                spans.append(
+                    {
+                        key: raw_span.get(key, "")
+                        for key in (
+                            "file",
+                            "start_line",
+                            "end_line",
+                            "symbol_id",
+                            "role",
+                            "content",
+                        )
+                    }
+                )
+            if spans:
+                projected.append({"changed_anchor": manifest.get("changed_anchor", {}), "included_spans": spans})
+        return projected
 
     @staticmethod
     def _repair_action_for_failure(failure: Any) -> str:
@@ -887,6 +1983,23 @@ class AgentOrchestrator:
             ),
             "gaps": gap.get("gaps", []),
         }
+        available_evidence = gap.get("available_evidence", [])
+        if isinstance(available_evidence, list):
+            safe["available_evidence"] = [
+                {
+                    key: item.get(key, "")
+                    for key in (
+                        "evidence_id",
+                        "path",
+                        "start_line",
+                        "end_line",
+                        "source_type",
+                        "truncated",
+                    )
+                }
+                for item in available_evidence
+                if isinstance(item, dict)
+            ]
         # Failure details contain source locations needed to choose an existing
         # delivered catalog entry, but never runtime target/version metadata.
         return safe
@@ -1178,6 +2291,9 @@ class AgentOrchestrator:
             submitted_report,
             iteration=self._iteration,
             registry=self._candidate_registry,
+            include_non_risk=any(
+                issue.is_v3_finding for issue in submitted_report.issues
+            ),
         )
         if not candidates:
             return response
@@ -1570,6 +2686,7 @@ class AgentOrchestrator:
             iteration=self._iteration,
             registry=self._candidate_registry,
             register=False,
+            include_non_risk=any(issue.is_v3_finding for issue in merged.issues),
         )
         repaired_tool_evidence = self._observed_tool_evidence(state)
         repaired_result = FindingIntegrityGuard(self._workspace_root).validate(
@@ -1658,6 +2775,7 @@ class AgentOrchestrator:
         evidence_catalog: list[dict[str, Any]] | None = None,
         snapshot_id: str = "",
         revision: str = "",
+        allowed_target_candidate_ids: set[str] | None = None,
         diagnostics: list[dict[str, Any]] | None = None,
     ) -> ReviewReport:
         """Apply one opaque-handle repair response atomically.
@@ -1697,12 +2815,21 @@ class AgentOrchestrator:
             )
             return original
 
+        allowed_targets = {
+            str(candidate_id).strip()
+            for candidate_id in (allowed_target_candidate_ids or set())
+            if str(candidate_id).strip()
+        }
         repairable_candidates = {
             candidate.source_issue_index: candidate
             for candidate, result in zip(
                 preview.bound_candidates, preview.results, strict=False
             )
             if result.status == "needs_repair"
+            or (
+                candidate.candidate_id in allowed_targets
+                and result.status == "verified"
+            )
         }
         target_indexes = {
             candidate.candidate_id: index
@@ -1849,25 +2976,34 @@ class AgentOrchestrator:
                 "repair_patch": patch_payload,
             }
             try:
-                normalized = normalize_model_repair_payload(
-                    envelope,
-                    evidence_catalog=evidence_catalog or [],
-                )
-                repair_issue = ReviewIssue.model_validate(normalized)
-                support_error = AgentOrchestrator._repair_support_patch_error(
-                    original_issue, repair_issue
-                )
-                if support_error is not None:
-                    raise ValueError(support_error[1])
-                replacement = AgentOrchestrator._apply_repair_patch(
-                    original_issue,
-                    repair_issue,
-                    candidate_id=candidate_id,
-                )
-                replacement = AgentOrchestrator._apply_explicit_repair_deletes(
-                    replacement,
-                    delete_fields,
-                )
+                if original_issue.is_v3_finding:
+                    replacement = AgentOrchestrator._apply_v3_repair_patch(
+                        original_issue,
+                        patch_payload,
+                        delete_fields=delete_fields,
+                        candidate_id=candidate_id,
+                        evidence_catalog=evidence_catalog or [],
+                    )
+                else:
+                    normalized = normalize_model_repair_payload(
+                        envelope,
+                        evidence_catalog=evidence_catalog or [],
+                    )
+                    repair_issue = ReviewIssue.model_validate(normalized)
+                    support_error = AgentOrchestrator._repair_support_patch_error(
+                        original_issue, repair_issue
+                    )
+                    if support_error is not None:
+                        raise ValueError(support_error[1])
+                    replacement = AgentOrchestrator._apply_repair_patch(
+                        original_issue,
+                        repair_issue,
+                        candidate_id=candidate_id,
+                    )
+                    replacement = AgentOrchestrator._apply_explicit_repair_deletes(
+                        replacement,
+                        delete_fields,
+                    )
             except ValueError as exc:
                 add(
                     "repair_patch_rejected",
@@ -2338,6 +3474,61 @@ class AgentOrchestrator:
         payload = original_issue.model_dump(mode="json")
         payload.update(updates)
         return ReviewIssue.model_validate(payload)
+
+    @staticmethod
+    def _apply_v3_repair_patch(
+        original_issue: ReviewIssue,
+        patch_payload: dict[str, Any],
+        *,
+        delete_fields: list[str],
+        candidate_id: str,
+        evidence_catalog: list[dict[str, Any]],
+    ) -> ReviewIssue:
+        """Apply one 3.0 patch atomically and rebind all selected evidence."""
+
+        if not original_issue.is_v3_finding:
+            raise ValueError("3.0 repair patch requires a 3.0 finding")
+        anchor = patch_payload.get(
+            "anchor",
+            original_issue.primary_anchor.model_dump(mode="json")
+            if original_issue.primary_anchor is not None
+            else {},
+        )
+        description = patch_payload.get("description", original_issue.description)
+        evidence_refs = patch_payload.get("evidence_refs", original_issue.evidence_refs)
+        severity = patch_payload.get("severity", original_issue.severity.value)
+        suggestion = patch_payload.get("suggestion", original_issue.suggestion)
+        related_locations = patch_payload.get(
+            "related_locations",
+            [item.model_dump(mode="json") for item in original_issue.related_locations],
+        )
+        if "suggestion" in delete_fields:
+            suggestion = None
+        if "related_locations" in delete_fields:
+            related_locations = []
+        normalized = normalize_model_finding_v3_payload(
+            {
+                "anchor": anchor,
+                "description": description,
+                "evidence_refs": evidence_refs,
+                "severity": severity,
+                "suggestion": suggestion,
+                "related_locations": related_locations,
+            },
+            evidence_catalog=evidence_catalog,
+        )
+        normalized.update(
+            {
+                "candidate_id": candidate_id,
+                "finding_id": original_issue.finding_id,
+                "target_candidate_id": "",
+                "repair_status": "",
+                "candidate_content_version": "",
+                "repair_reason": "",
+                "repair_patch": None,
+            }
+        )
+        return ReviewIssue.model_validate(normalized)
 
     @staticmethod
     def _apply_explicit_repair_deletes(
@@ -2892,13 +4083,15 @@ class AgentOrchestrator:
             self._record_finalize_skipped(skip_reason)
             return response
         # This call is deliberately submit-only.  The engine receives an empty
-        # tool list and serializes only submit_review, so exhausted exploration
-        # cannot be mistaken for a finalization attempt.
+        # tool list and serializes only the active completion action, so exhausted
+        # exploration cannot be mistaken for a finalization attempt.
         finalize_plan = await self.analyze(
             state, request, tool_specs=[], force_submit=True
         )
         self._last_plan = finalize_plan
         self._finalization_response_id = finalize_plan.source_response_id
+        if self._settings.finding_contract_version == "3.0":
+            await self.execute_tools(finalize_plan, self._registry, state)
         self._observe_review_submission(finalize_plan)
         self._observe_incomplete_plan(finalize_plan, state)
         formatted = self.format_result(state, tool_results=[])
@@ -2994,6 +4187,8 @@ class AgentOrchestrator:
             force_submit=True,
         )
         self._last_plan = finalize_plan
+        if self._settings.finding_contract_version == "3.0":
+            await self.execute_tools(finalize_plan, self._registry, state)
         self._observe_review_submission(finalize_plan)
         self._observe_incomplete_plan(finalize_plan, state)
         formatted = self.format_result(state, tool_results=[])
@@ -3059,6 +4254,8 @@ class AgentOrchestrator:
             state, request, tool_specs=[], force_submit=True
         )
         self._last_plan = finalize_plan
+        if self._settings.finding_contract_version == "3.0":
+            await self.execute_tools(finalize_plan, self._registry, state)
         self._observe_incomplete_plan(finalize_plan, state)
         response = self.format_result(state, tool_results=[])
         self._record_event(
@@ -3139,6 +4336,11 @@ class AgentOrchestrator:
             else "validate"
             if any(spec.name == "validate_review_draft" for spec in tool_specs)
             else "explore"
+        )
+        contract_version = (
+            self._settings.finding_contract_version
+            if isinstance(request, ReviewRequest)
+            else "2.0"
         )
         model_call_success = False
         wire_tool_schema_count = 0
@@ -3232,24 +4434,39 @@ class AgentOrchestrator:
                 logical_stage = "repair" if repair_mode else call_stage
                 repair_submit_schema = False
                 if repair_mode:
-                    serialized_tools = build_repair_tool_schemas()
+                    serialized_tools = build_repair_tool_schemas(
+                        contract_version=contract_version
+                    )
                 elif force_submit:
-                    serialized_tools = build_submit_tool_schemas(
-                        model_input=True,
-                        repair=repair_submit_schema,
+                    serialized_tools = (
+                        build_v3_finding_action_tool_schemas(
+                            include_save=False,
+                            include_revise=False,
+                            include_finish=True,
+                        )
+                        if contract_version == "3.0"
+                        else build_submit_tool_schemas(
+                            model_input=True,
+                            repair=repair_submit_schema,
+                            contract_version=contract_version,
+                        )
                     )
                 else:
                     serialized_tools = build_tool_schemas(active_tool_specs)
                     if (
                         isinstance(request, ReviewRequest)
                         and self._permission_mode != "plan"
+                        and contract_version != "3.0"
                     ):
                         serialized_tools.append(build_draft_finding_tool_schema())
                         serialized_tools.append(build_draft_finding_update_tool_schema())
-                    if not defer_review_submit:
+                    if contract_version == "3.0":
+                        serialized_tools += build_v3_finding_action_tool_schemas()
+                    elif not defer_review_submit:
                         serialized_tools += build_submit_tool_schemas(
                             model_input=True,
                             repair=repair_submit_schema,
+                            contract_version=contract_version,
                         )
                 wire_tool_schema_count = len(serialized_tools)
                 self._final_submit_attempt_count += int(submit_only_call)
@@ -3285,7 +4502,14 @@ class AgentOrchestrator:
                     ),
                     allow_exploration=explicit_exploration_allowed,
                     repair_mode=repair_mode,
-                    submit_tool_name=("repair_review" if repair_mode else None),
+                    submit_tool_name=(
+                        "repair_review"
+                        if repair_mode
+                        else "finish_review"
+                        if contract_version == "3.0" and submit_only_call
+                        else None
+                    ),
+                    contract_version=contract_version,
                 )
                 self._prepare_format_recovery(result, state)
                 # The engine updates the ledger only after it has confirmed which
@@ -3544,6 +4768,21 @@ class AgentOrchestrator:
 
         if not isinstance(request, ReviewRequest):
             return tool_specs
+        if self._settings.finding_contract_version == "3.0" and len(tool_specs) > 2:
+            # 3.0 deliberately removes the old draft/whole-report preflight
+            # ritual from the model-visible path.  The runtime registry still
+            # retains crash recovery and bounded repair facts, but the reviewer
+            # is not asked to maintain a second finding representation.
+            return [
+                spec
+                for spec in tool_specs
+                if spec.name
+                not in {
+                    "record_draft_finding",
+                    "update_draft_finding",
+                    "validate_review_draft",
+                }
+            ]
         if not defer_submit or self._draft_finding_store.all():
             return tool_specs
         return [spec for spec in tool_specs if spec.name != "validate_review_draft"]
@@ -3572,6 +4811,11 @@ class AgentOrchestrator:
         state: ContextState,
     ) -> list[ToolResult]:
         """Execute model-planned tools via registry."""
+        v3_actions = bool(
+            plan.v3_save_findings
+            or plan.v3_revise_findings
+            or plan.v3_finish_review is not None
+        )
         state.decisions.append(
             DecisionStep(
                 phase="execute_tools",
@@ -3587,11 +4831,18 @@ class AgentOrchestrator:
         )
         if self._permission_mode == "plan":
             return []
-        if not plan.needs_tools:
-            return []
-
         results: list[ToolResult] = []
         executed_feedback: list[dict[str, Any]] = []
+        if v3_actions:
+            action_results = self._execute_v3_finding_actions(plan, state)
+            results.extend(result for _, result in action_results)
+            executed_feedback.extend(
+                {"tool_call": raw_call, "result": result}
+                for raw_call, result in action_results
+            )
+        if not plan.needs_tools:
+            self._append_tool_feedback(executed_feedback)
+            return results
         index = 0
         while index < len(plan.tool_calls):
             if self._tool_call_count >= self._settings.agent_max_tool_calls:
@@ -3885,6 +5136,185 @@ class AgentOrchestrator:
         self._append_tool_feedback(executed_feedback)
         return results
 
+    def _execute_v3_finding_actions(
+        self,
+        plan: AnalysisPlan,
+        state: ContextState,
+    ) -> list[tuple[dict[str, Any], ToolResult]]:
+        """Execute v3 registry actions before ordinary read-only tools."""
+
+        catalog = list(self._live_evidence_catalog or state.evidence_ledger)
+        actions: list[tuple[dict[str, Any], ToolResult]] = []
+        # Source indexes are audit-only.  They are deliberately allocated from
+        # the action stream and never used to choose an existing candidate.
+        source_index = sum(
+            len(record.source_issue_indexes)
+            for record in self._candidate_registry.records
+        )
+
+        def record(
+            name: str,
+            payload: dict[str, Any],
+            result: ToolResult,
+        ) -> None:
+            nonlocal source_index
+            raw_call = {
+                "id": f"v3_{name}_{source_index}",
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": _json.dumps(payload, ensure_ascii=True),
+                },
+            }
+            self._journal_tool_result(plan, raw_call, result)
+            self._record_event(
+                EventType.TOOL_CALL,
+                "execute_tools",
+                self._build_tool_call_event_payload(
+                    name=name,
+                    result=result,
+                    elapsed_ms=0,
+                ),
+            )
+            self._tool_call_count += 1
+            self._tool_name_counts[name] = self._tool_name_counts.get(name, 0) + 1
+            actions.append((raw_call, result))
+            source_index += 1
+
+        def safe_action_payload(action: Any) -> dict[str, Any]:
+            """Keep a malformed action failure journalable without re-raising."""
+
+            try:
+                payload = action.model_dump(mode="json")
+            except Exception:  # noqa: BLE001
+                return {"serialization_error": "action_payload_unserializable"}
+            return payload if isinstance(payload, dict) else {}
+
+        for save_action in plan.v3_save_findings:
+            try:
+                normalized = normalize_model_finding_v3_payload(
+                    save_action.finding.model_dump(mode="json"),
+                    evidence_catalog=catalog,
+                )
+                issue = ReviewIssue.model_validate(normalized)
+                registration = self._candidate_registry.save_finding(
+                    issue,
+                    source_issue_index=source_index,
+                    iteration=self._iteration,
+                )
+                handle = self._candidate_registry.opaque_handle(
+                    registration.candidate_id
+                )
+                self._iteration_progress = True
+                self._iteration_state_action_applied = True
+                record(
+                    "save_finding",
+                    safe_action_payload(save_action),
+                    ToolResult(
+                        ok=True,
+                        data={
+                            "saved": True,
+                            "opaque_handle": handle,
+                            "mechanical_gaps": canonical_contract_gaps(issue),
+                        },
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001
+                record(
+                    "save_finding",
+                    safe_action_payload(save_action),
+                    ToolResult(
+                        ok=False,
+                        error=str(exc),
+                        error_type="finding_action_invalid",
+                        failure_class="parameter_error",
+                        recoverable=True,
+                    ),
+                )
+
+        for revise_action in plan.v3_revise_findings:
+            candidate_id = self._candidate_registry.candidate_for_handle(
+                revise_action.opaque_handle
+            )
+            current = self._candidate_registry.authoritative_issue(candidate_id)
+            try:
+                if not candidate_id or current is None:
+                    raise ValueError("unknown opaque finding handle")
+                bound_version = self._candidate_registry.version_for_handle(
+                    revise_action.opaque_handle
+                )
+                current_version = self._candidate_registry.expected_version(candidate_id)
+                if not bound_version or bound_version != current_version:
+                    raise ValueError("opaque finding handle is stale")
+                patch_payload = revise_action.patch.model_dump(
+                    mode="json", exclude_unset=True, exclude_none=True
+                )
+                delete_fields = list(patch_payload.pop("delete_fields", []))
+                replacement = self._apply_v3_repair_patch(
+                    current,
+                    patch_payload,
+                    delete_fields=delete_fields,
+                    candidate_id=candidate_id,
+                    evidence_catalog=catalog,
+                )
+                if not self._candidate_registry.revise_finding(
+                    candidate_id,
+                    replacement,
+                    base_version=current_version,
+                ):
+                    raise ValueError("opaque finding handle is stale")
+                next_handle = self._candidate_registry.opaque_handle(candidate_id)
+                self._iteration_progress = True
+                self._iteration_state_action_applied = True
+                record(
+                    "revise_finding",
+                    safe_action_payload(revise_action),
+                    ToolResult(
+                        ok=True,
+                        data={
+                            "revised": True,
+                            "opaque_handle": next_handle,
+                        },
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001
+                record(
+                    "revise_finding",
+                    safe_action_payload(revise_action),
+                    ToolResult(
+                        ok=False,
+                        error=str(exc),
+                        error_type="finding_action_invalid",
+                        failure_class="parameter_error",
+                        recoverable=True,
+                    ),
+                )
+
+        if plan.v3_finish_review is not None:
+            self._v3_finish_seen = True
+            self._v3_finish_summary = plan.v3_finish_review.summary
+            self._submit_review_seen_any = True
+            self._submit_iteration = self._iteration
+            plan.draft_review = ReviewReport(
+                summary=plan.v3_finish_review.summary,
+                issues=list(self._candidate_registry.finish_review()),
+                schema_version="3.0",
+            )
+            self._iteration_progress = True
+            record(
+                "finish_review",
+                plan.v3_finish_review.model_dump(mode="json"),
+                ToolResult(
+                    ok=True,
+                    data={
+                        "finished": True,
+                        "finding_count": len(plan.draft_review.issues),
+                        "content_in_payload": False,
+                    },
+                ),
+            )
+        return actions
+
     def format_result(
         self,
         state: ContextState,
@@ -4147,6 +5577,14 @@ class AgentOrchestrator:
             and not self._draft_finding_store.has_incomplete()
             and not self._integrity_needs_repair_count
             and not self._integrity_invalid_count
+            and (
+                not self._semantic_verifier_required
+                or (
+                    self._semantic_verifier_completed
+                    and not self._semantic_unresolved_count
+                    and not self._semantic_needs_revision_count
+                )
+            )
         ):
             # The loop may have formatted an iteration-guard placeholder
             # before the bounded submit-only finalizer ran.  A valid final
@@ -4174,6 +5612,22 @@ class AgentOrchestrator:
             )
         )
         response.finding_run_status = response.completion_status
+        response.semantic_verifier_required = self._semantic_verifier_required
+        response.semantic_verifier_completed = self._semantic_verifier_completed
+        response.semantic_accepted_count = self._semantic_accepted_count
+        response.semantic_rejected_count = self._semantic_rejected_count
+        response.semantic_needs_revision_count = self._semantic_needs_revision_count
+        response.semantic_unresolved_count = self._semantic_unresolved_count
+        response.report_ready = bool(
+            response.completion_status == "complete"
+            and response.review_complete
+            and (
+                not self._semantic_verifier_required
+                or self._semantic_verifier_completed
+            )
+        )
+        if response.report_ready and response.external_publish_status == "not_requested":
+            response.external_publish_status = "ready"
         response.delivery_complete = bool(
             response.review_complete
             and response.completion_status == "complete"
@@ -4181,6 +5635,14 @@ class AgentOrchestrator:
             and not self._integrity_invalid_count
             and not self._policy_rejected_issue_count
             and not self._completion_incomplete_reasons
+            and (
+                not self._semantic_verifier_required
+                or (
+                    self._semantic_verifier_completed
+                    and not self._semantic_unresolved_count
+                    and not self._semantic_needs_revision_count
+                )
+            )
         )
 
     def should_continue(
@@ -4203,6 +5665,12 @@ class AgentOrchestrator:
             has_pending_tools or has_valid_state_action or has_explicit_submit
         )
         has_pending_drafts = is_review and self._draft_finding_store.has_pending()
+        has_pending_v3_findings = bool(
+            is_review
+            and self._settings.finding_contract_version == "3.0"
+            and self._candidate_registry.records
+            and not self._v3_finish_seen
+        )
         defer_review_submit = (
             is_review
             and self._iteration < self._review_min_tool_iterations
@@ -4252,6 +5720,7 @@ class AgentOrchestrator:
             and not defer_review_submit
             and not self._model_incomplete_seen
             and not has_pending_drafts
+            and not has_pending_v3_findings
             and has_effective_action
         )
         submit_ready = self._review_stage == "submit_ready"
@@ -4536,6 +6005,22 @@ class AgentOrchestrator:
         self._integrity_needs_repair_count = 0
         self._integrity_invalid_count = 0
         self._final_published_count = 0
+        self._semantic_verifier_required = False
+        self._semantic_verifier_completed = False
+        self._semantic_accepted_count = 0
+        self._semantic_rejected_count = 0
+        self._semantic_needs_revision_count = 0
+        self._semantic_unresolved_count = 0
+        self._semantic_model_call_count = 0
+        self._semantic_investigation_call_count = 0
+        self._semantic_investigation_tool_call_count = 0
+        self._semantic_receipts = []
+        self._semantic_handles = {}
+        self._v3_handle_to_candidate = {}
+        self._v3_candidate_to_handle = {}
+        self._v3_finish_seen = False
+        self._v3_finish_summary = ""
+        self._last_integrity_guard_result = None
         self._record_event(
             EventType.PHASE_START,
             "prepare",
@@ -5319,6 +6804,13 @@ class AgentOrchestrator:
         evidence_catalog: list[dict[str, Any]],
     ) -> set[str]:
         refs: set[str] = set()
+        direct_refs = raw_issue.get("evidence_refs", [])
+        if isinstance(direct_refs, list):
+            refs.update(
+                cls._format_recovery_canonical_ref(item, evidence_catalog)
+                for item in direct_refs
+                if str(item or "").strip()
+            )
         supports = raw_issue.get("supports", [])
         if isinstance(supports, list):
             for support in supports:
@@ -5338,10 +6830,15 @@ class AgentOrchestrator:
     def _recovered_issue_refs(issue: ReviewIssue) -> set[str]:
         refs = {
             str(item or "").strip()
+            for item in issue.evidence_refs
+            if str(item or "").strip()
+        }
+        refs.update(
+            str(item or "").strip()
             for support in issue.supports
             for item in support.evidence_refs
             if str(item or "").strip()
-        }
+        )
         refs.update(
             str(item.evidence_id or item.reference_id).strip()
             for item in issue.all_evidence()
@@ -5453,6 +6950,9 @@ class AgentOrchestrator:
             for field in (
                 "severity",
                 "primary_anchor",
+                "description",
+                "evidence_refs",
+                "related_locations",
                 "evidence",
                 "suggestion",
                 "confidence",
@@ -5465,13 +6965,36 @@ class AgentOrchestrator:
             ):
                 if field in allowed_fields:
                     continue
-                if field not in raw_issue or raw_issue.get(field) in (None, "", []):
+                raw_field = field
+                if (
+                    field == "primary_anchor"
+                    and field not in raw_issue
+                    and "anchor" in raw_issue
+                ):
+                    raw_field = "anchor"
+                if raw_field not in raw_issue or raw_issue.get(raw_field) in (None, "", []):
                     continue
-                raw_value = cls._format_recovery_value(field, raw_issue.get(field))
+                raw_value = cls._format_recovery_value(
+                    field, raw_issue.get(raw_field)
+                )
                 recovered_value = cls._format_recovery_value(
                     field,
                     getattr(recovered_issue, field),
                 )
+                if field == "evidence_refs":
+                    raw_value = [str(item).strip() for item in raw_value]
+                    recovered_value = [
+                        str(item).strip() for item in recovered_value
+                    ]
+                elif field == "related_locations":
+                    raw_value = [
+                        SourceAnchor.model_validate(item).model_dump(mode="json")
+                        for item in raw_value
+                    ]
+                    recovered_value = [
+                        SourceAnchor.model_validate(item).model_dump(mode="json")
+                        for item in recovered_value
+                    ]
                 if raw_value != recovered_value:
                     return (
                         False,
@@ -5529,6 +7052,7 @@ class AgentOrchestrator:
                 )
                 if not isinstance(normalized, dict):
                     continue
+                is_v3 = normalized.get("schema_version") == "3.0" or "anchor" in raw_issue
                 normalized.setdefault("severity", "info")
                 normalized.setdefault(
                     "primary_anchor",
@@ -5538,7 +7062,7 @@ class AgentOrchestrator:
                 normalized.setdefault("evidence", "")
                 normalized.setdefault("suggestion", "")
                 normalized.setdefault("confidence", 0.0)
-                normalized["schema_version"] = "2.0"
+                normalized["schema_version"] = "3.0" if is_v3 else "2.0"
                 normalized.update(
                     {
                         "candidate_id": "",
@@ -5556,18 +7080,49 @@ class AgentOrchestrator:
                     # Keep an explicit placeholder issue only when the raw
                     # severity is still a valid compatibility value.
                     try:
-                        issues.append(
-                            ReviewIssue(
-                                severity=Severity(
-                                    str(raw_issue.get("severity", "info"))
-                                ),
-                                location=str(normalized.get("location", "")),
-                                evidence=str(raw_issue.get("evidence", "") or ""),
-                                suggestion=str(raw_issue.get("suggestion", "") or ""),
-                                confidence=float(raw_issue.get("confidence", 0.0) or 0.0),
-                                schema_version="2.0",
+                        if is_v3:
+                            issues.append(
+                                ReviewIssue(
+                                    severity=Severity(
+                                        str(raw_issue.get("severity", "info"))
+                                    ),
+                                    location=str(
+                                        normalized.get(
+                                            "location", "__format_recovery__:1"
+                                        )
+                                    ),
+                                    evidence="",
+                                    suggestion=str(
+                                        raw_issue.get("suggestion", "") or ""
+                                    ),
+                                    confidence=0.0,
+                                    description=str(
+                                        raw_issue.get("description", "") or ""
+                                    ),
+                                    evidence_refs=[
+                                        str(item).strip()
+                                        for item in raw_issue.get("evidence_refs", [])
+                                        if str(item).strip()
+                                    ],
+                                    primary_anchor=SourceAnchor(
+                                        file="__format_recovery__", line=1
+                                    ),
+                                    schema_version="3.0",
+                                )
                             )
-                        )
+                        else:
+                            issues.append(
+                                ReviewIssue(
+                                    severity=Severity(
+                                        str(raw_issue.get("severity", "info"))
+                                    ),
+                                    location=str(normalized.get("location", "")),
+                                    evidence=str(raw_issue.get("evidence", "") or ""),
+                                    suggestion=str(raw_issue.get("suggestion", "") or ""),
+                                    confidence=float(raw_issue.get("confidence", 0.0) or 0.0),
+                                    schema_version="2.0",
+                                )
+                            )
                     except Exception:  # noqa: BLE001
                         continue
         summary = str(raw.get("summary", "") or "").strip() if isinstance(raw, dict) else ""
@@ -5575,7 +7130,9 @@ class AgentOrchestrator:
             summary=summary
             or "Format recovery rejected; the original candidate was preserved for integrity validation.",
             issues=issues,
-            schema_version="2.0",
+            schema_version=(
+                "3.0" if any(issue.is_v3_finding for issue in issues) else "2.0"
+            ),
         )
 
     def _prepare_format_recovery(
@@ -5726,6 +7283,7 @@ class AgentOrchestrator:
         registrations = self._candidate_registry.register_report(
             report,
             iteration=self._iteration,
+            include_non_risk=any(issue.is_v3_finding for issue in report.issues),
         )
         if not registrations:
             return
@@ -6020,6 +7578,29 @@ class AgentOrchestrator:
                 for issue in (response.report.issues if response is not None else [])
             ),
             "evidence_validated_count": self._verifier_accepted_count,
+            "finding_contract_version": self._settings.finding_contract_version,
+            "semantic_verifier_required": self._semantic_verifier_required,
+            "semantic_model_call_count": self._semantic_model_call_count,
+            "semantic_investigation_call_count": self._semantic_investigation_call_count,
+            "semantic_investigation_tool_call_count": (
+                self._semantic_investigation_tool_call_count
+            ),
+            "semantic_accepted_count": self._semantic_accepted_count,
+            "semantic_rejected_count": self._semantic_rejected_count,
+            "semantic_needs_revision_count": self._semantic_needs_revision_count,
+            "semantic_unresolved_count": self._semantic_unresolved_count,
+            "report_ready": bool(
+                response.report_ready if response is not None else False
+            ),
+            "external_publish_status": (
+                response.external_publish_status
+                if response is not None
+                else "not_requested"
+            ),
+            "external_published_count": int(
+                response is not None
+                and response.external_publish_status == "published"
+            ),
             "finding_run_status": (
                 response.completion_status if response is not None else ""
             ),
@@ -6146,6 +7727,22 @@ class AgentOrchestrator:
             "submission_received": bool(response.submission_received),
             "review_complete": bool(response.review_complete),
             "delivery_complete": bool(response.delivery_complete),
+            "finding_contract_version": self._settings.finding_contract_version,
+            "semantic_verifier_required": self._semantic_verifier_required,
+            "semantic_model_call_count": self._semantic_model_call_count,
+            "semantic_investigation_call_count": self._semantic_investigation_call_count,
+            "semantic_investigation_tool_call_count": (
+                self._semantic_investigation_tool_call_count
+            ),
+            "semantic_accepted_count": self._semantic_accepted_count,
+            "semantic_rejected_count": self._semantic_rejected_count,
+            "semantic_needs_revision_count": self._semantic_needs_revision_count,
+            "semantic_unresolved_count": self._semantic_unresolved_count,
+            "report_ready": bool(response.report_ready),
+            "external_publish_status": response.external_publish_status,
+            "external_published_count": int(
+                response.external_publish_status == "published"
+            ),
         }
         self._record_event(
             EventType.FINDING_FUNNEL_COMPLETED,

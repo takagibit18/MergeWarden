@@ -57,6 +57,22 @@ class IssueFilterDecision:
 def evaluate_issue_filter(issue: ReviewIssue) -> IssueFilterDecision:
     """Return the current filter verdict plus every contributing reason."""
 
+    if issue.is_v3_finding:
+        # 3.0 intentionally has no confidence or lexical risk gate.  This is a
+        # structural preflight result only; publication still requires the
+        # independent semantic verifier receipt.
+        return IssueFilterDecision(
+            finding_id=_filter_finding_id(issue),
+            passed=True,
+            reason_codes=("v3_semantic_verifier_required",),
+            severity=issue.severity,
+            confidence=issue.confidence,
+            standard_threshold=None,
+            relaxed_threshold=None,
+            evidence_specific=bool(issue.evidence_refs),
+            risk_pattern_matched=False,
+        )
+
     evidence_specific = has_specific_code_evidence(issue.evidence)
     combined = f"{issue.evidence}\n{issue.suggestion}"
     risk_pattern_matched = RISK_WARNING_PATTERN.search(combined) is not None

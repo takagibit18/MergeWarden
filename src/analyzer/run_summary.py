@@ -79,6 +79,18 @@ class RunSummary(BaseModel):
     finding_accepted_count: int = 0
     finding_rejected_count: int = 0
     review_outcome: ReviewOutcome = "no_candidates"
+    finding_contract_version: str = ""
+    semantic_verifier_required: bool = False
+    semantic_model_call_count: int = 0
+    semantic_investigation_call_count: int = 0
+    semantic_investigation_tool_call_count: int = 0
+    semantic_accepted_count: int = 0
+    semantic_rejected_count: int = 0
+    semantic_needs_revision_count: int = 0
+    semantic_unresolved_count: int = 0
+    report_ready: bool = False
+    external_publish_status: str = "not_requested"
+    external_published_count: int = 0
     integrity_failure_codes: dict[str, list[str]] = Field(default_factory=dict)
     integrity_failure_details: dict[str, list[dict[str, Any]]] = Field(
         default_factory=dict
@@ -137,13 +149,17 @@ def summarize_event_log(
     """Read a JSONL event log and return a compact run summary."""
     if path is None:
         return RunSummary(
-            run_id=run_id, event_log_status="missing", publish_status=publish_status
+            run_id=run_id,
+            event_log_status="missing",
+            publish_status=publish_status,
+            external_publish_status=publish_status,
         )
     log_path = Path(path)
     summary = RunSummary(
         run_id=run_id,
         event_log_path=str(log_path),
         publish_status=publish_status,
+        external_publish_status=publish_status,
     )
     if not log_path.exists():
         summary.event_log_status = "missing"
@@ -449,6 +465,31 @@ def _update_summary(summary: RunSummary, event: dict[str, Any]) -> None:
         )
         summary.finding_accepted_count = int(payload.get("accepted_count", 0) or 0)
         summary.finding_rejected_count = int(payload.get("rejected_count", 0) or 0)
+        summary.finding_contract_version = str(
+            payload.get("finding_contract_version", summary.finding_contract_version)
+            or ""
+        )
+        summary.semantic_verifier_required = bool(
+            payload.get("semantic_verifier_required", False)
+        )
+        for field_name in (
+            "semantic_model_call_count",
+            "semantic_investigation_call_count",
+            "semantic_investigation_tool_call_count",
+            "semantic_accepted_count",
+            "semantic_rejected_count",
+            "semantic_needs_revision_count",
+            "semantic_unresolved_count",
+            "external_published_count",
+        ):
+            if field_name in payload:
+                setattr(summary, field_name, _non_negative_int(payload[field_name]))
+        if isinstance(payload.get("report_ready"), bool):
+            summary.report_ready = payload["report_ready"]
+        if "external_publish_status" in payload:
+            summary.external_publish_status = str(
+                payload.get("external_publish_status") or "not_requested"
+            )
         summary.deterministic_evidence_checked_count = int(
             payload.get("deterministic_evidence_checked_count", 0) or 0
         )
@@ -485,6 +526,31 @@ def _update_summary(summary: RunSummary, event: dict[str, Any]) -> None:
             }
     if event_type == "finding_funnel_completed":
         summary.finding_funnel = FindingFunnel.model_validate(payload)
+        summary.finding_contract_version = str(
+            payload.get("finding_contract_version", summary.finding_contract_version)
+            or ""
+        )
+        summary.semantic_verifier_required = bool(
+            payload.get("semantic_verifier_required", False)
+        )
+        for field_name in (
+            "semantic_model_call_count",
+            "semantic_investigation_call_count",
+            "semantic_investigation_tool_call_count",
+            "semantic_accepted_count",
+            "semantic_rejected_count",
+            "semantic_needs_revision_count",
+            "semantic_unresolved_count",
+            "external_published_count",
+        ):
+            if field_name in payload:
+                setattr(summary, field_name, _non_negative_int(payload[field_name]))
+        if isinstance(payload.get("report_ready"), bool):
+            summary.report_ready = payload["report_ready"]
+        if "external_publish_status" in payload:
+            summary.external_publish_status = str(
+                payload.get("external_publish_status") or "not_requested"
+            )
 
     if event_type == "workflow_summary":
         summary.workflow_enforcement = str(payload.get("enforcement", "off") or "off")

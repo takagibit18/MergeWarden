@@ -292,6 +292,42 @@ class Settings(BaseModel):
         le=128000,
         description="Effective completion-token cap for submit and repair calls.",
     )
+    finding_contract_version: Literal["2.0", "3.0"] = Field(
+        default_factory=lambda: cast(
+            Literal["2.0", "3.0"],
+            os.getenv("FINDING_CONTRACT_VERSION", "2.0").strip(),
+        ),
+        description=(
+            "Active model-facing finding contract. 2.0 is an explicit legacy "
+            "compatibility mode; 3.0 is the slim contract."
+        ),
+    )
+    semantic_verifier_batch_size: int = Field(
+        default_factory=lambda: int(os.getenv("SEMANTIC_VERIFIER_BATCH_SIZE", "8")),
+        ge=1,
+        le=64,
+    )
+    semantic_verifier_max_model_calls: int = Field(
+        default_factory=lambda: int(
+            os.getenv("SEMANTIC_VERIFIER_MAX_MODEL_CALLS", "2")
+        ),
+        ge=0,
+        le=8,
+    )
+    semantic_verifier_max_investigation_calls: int = Field(
+        default_factory=lambda: int(
+            os.getenv("SEMANTIC_VERIFIER_MAX_INVESTIGATION_CALLS", "1")
+        ),
+        ge=0,
+        le=1,
+    )
+    semantic_verifier_max_investigation_tool_calls: int = Field(
+        default_factory=lambda: int(
+            os.getenv("SEMANTIC_VERIFIER_MAX_INVESTIGATION_TOOL_CALLS", "2")
+        ),
+        ge=0,
+        le=2,
+    )
     model_request_timeout_seconds: float = Field(
         default_factory=lambda: float(os.getenv("MODEL_REQUEST_TIMEOUT_SECONDS", "90")),
         gt=0.0,

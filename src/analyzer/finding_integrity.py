@@ -99,6 +99,7 @@ def build_candidates(
     iteration: int,
     registry: CandidateRegistry | None = None,
     register: bool = True,
+    include_non_risk: bool = False,
 ) -> list[FindingCandidate]:
     """Build runtime-registered risk candidates for the integrity stage.
 
@@ -110,9 +111,13 @@ def build_candidates(
     candidates: list[FindingCandidate] = []
     seen: set[str] = set()
     if registry is not None and register:
-        registry.register_report(report, iteration=iteration)
+        registry.register_report(
+            report,
+            iteration=iteration,
+            include_non_risk=include_non_risk,
+        )
     for source_issue_index, issue in enumerate(report.issues):
-        if issue.severity not in _RISK_SEVERITIES:
+        if not include_non_risk and issue.severity not in _RISK_SEVERITIES:
             continue
         registration = (
             registry.registration(issue.candidate_id)
@@ -518,6 +523,21 @@ class FindingIntegrityGuard:
         """Drop invalid optional structured evidence before final publication."""
 
         issue = candidate.issue
+        if isinstance(issue, ReviewIssue) and issue.is_v3_finding:
+            failures: list[IntegrityFailure] = []
+            for index, evidence_item in enumerate(issue.evidence_provenance):
+                failures.extend(
+                    self._validate_evidence_item(
+                        evidence_item,
+                        request=request,
+                        repo_root=repo_root,
+                        changed=changed,
+                        context=context,
+                        evidence_ledger=evidence_ledger,
+                        field=f"evidence_refs[{index}]",
+                    )
+                )
+            return candidate, tuple(failures)
         if not (
             isinstance(issue, ReviewIssue)
             and issue.is_structured_hypothesis
@@ -631,7 +651,7 @@ class FindingIntegrityGuard:
                     **metadata,
                 )
             )
-        if not evidence_item.statement.strip():
+        if not field.startswith("evidence_refs[") and not evidence_item.statement.strip():
             failures.append(
                 IntegrityFailure(
                     "evidence_binding_missing",
@@ -922,7 +942,25 @@ class FindingIntegrityGuard:
                     )
                 )
 
-        if issue.is_structured_hypothesis and issue.severity in _RISK_SEVERITIES:
+        if issue.is_v3_finding:
+            for index, evidence_item in enumerate(issue.evidence_provenance):
+                failures.extend(
+                    self._validate_evidence_item(
+                        evidence_item,
+                        request=request,
+                        repo_root=repo_root,
+                        changed=changed,
+                        context=context,
+                        evidence_ledger=evidence_ledger,
+                        field=f"evidence_refs[{index}]",
+                    )
+                )
+
+        if (
+            issue.is_structured_hypothesis
+            and not issue.is_v3_finding
+            and issue.severity in _RISK_SEVERITIES
+        ):
             required_roles = {"cause", "contract"}
             if issue.trigger.strip():
                 required_roles.add("trigger")

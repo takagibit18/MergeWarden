@@ -7,6 +7,8 @@ from src.analyzer.schemas import ReviewResponse
 
 def find_blocking_review_error(response: ReviewResponse) -> str | None:
     """Return a model/runtime error that means the review result is not trusted."""
+    if response.semantic_verifier_required and not response.report_ready:
+        return "semantic verifier has not produced a publishable report"
     for error in response.context.errors:
         message = error.message
         if error.category == "runtime" and (

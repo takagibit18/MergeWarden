@@ -1,8 +1,8 @@
 """Canonical finding-contract adapters and deterministic contract gaps.
 
 The runtime still exposes :class:`ReviewIssue` to old publishers.  This module
-is the explicit seam between that compatibility envelope and the v2 finding
-contract used by parsing, validation, and evaluation.  It deliberately does
+is the explicit seam between that compatibility envelope and the versioned
+finding contracts used by parsing, validation, and evaluation.  It deliberately does
 not decide whether a claim is semantically true; it only checks that a claim
 has the fields and provenance needed for the later integrity stage.
 """
@@ -12,13 +12,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from src.analyzer.finding_schema import (
     ClaimSupport,
     FindingDraft,
+    FindingContentV3,
+    FindingPatchV3,
     FindingRepairPatch,
     FINDING_SCHEMA_VERSION,
+    FINDING_V3_SCHEMA_VERSION,
     EvidenceProvenance,
     EvidenceRole,
     FindingSeverity,
@@ -42,6 +45,9 @@ _STRUCTURED_ISSUE_FIELDS = frozenset(
         "trigger",
         "impact",
         "supports",
+        "anchor",
+        "description",
+        "evidence_refs",
     }
 )
 
@@ -139,6 +145,62 @@ class ModelFindingInput(BaseModel):
     related_locations: list[RelatedLocation] = Field(default_factory=list)
 
 
+class ModelFindingInputV3(BaseModel):
+    """Exact model-facing input for the slim 3.0 finding contract.
+
+    Runtime-owned metadata is intentionally absent. The runtime adds only
+    bound safety facts after validating the selected evidence references.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    anchor: SourceAnchor
+    description: str = Field(..., min_length=1)
+    evidence_refs: list[str] = Field(..., min_length=1)
+    severity: FindingSeverity
+    suggestion: str | None = None
+    related_locations: list[SourceAnchor] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _unique_refs(self) -> "ModelFindingInputV3":
+        refs = [str(item).strip() for item in self.evidence_refs]
+        if any(not item for item in refs) or len(refs) != len(set(refs)):
+            raise ValueError("evidence_refs must contain unique non-empty ids")
+        self.evidence_refs = refs
+        return self
+
+    @classmethod
+    def to_content(cls, payload: Any) -> FindingContentV3:
+        """Validate and return the shared 3.0 semantic content model."""
+
+        return FindingContentV3.model_validate(payload)
+
+
+class ModelSaveFindingActionV3(BaseModel):
+    """Model-facing action for saving one v3 finding in the runtime registry."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    finding: ModelFindingInputV3
+
+
+class ModelReviseFindingActionV3(BaseModel):
+    """Model-facing action for an atomic patch of one saved v3 finding."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    opaque_handle: str = Field(..., min_length=1)
+    patch: FindingPatchV3
+
+
+class ModelFinishReviewActionV3(BaseModel):
+    """Model-facing completion action carrying no finding body."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    summary: str = Field(..., min_length=1)
+
+
 class ModelRepairIssueInput(BaseModel):
     """Model-facing identity-bound repair envelope.
 
@@ -210,12 +272,34 @@ class ModelRepairResponse(BaseModel):
     )
 
 
+class ModelRepairTargetInputV3(BaseModel):
+    """Opaque patch-only repair item for a 3.0 finding."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    target_handle: str = Field(..., min_length=1)
+    repair_status: Literal["repaired", "unchanged", "incomplete", "deferred"]
+    repair_reason: str = ""
+    repair_patch: FindingPatchV3 | None = None
+
+
+class ModelRepairResponseV3(BaseModel):
+    """Dedicated 3.0 repair response; it never contains a full finding."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    repairs: list[ModelRepairTargetInputV3] = Field(..., min_length=1)
+
+
 def is_structured_issue_payload(payload: Any) -> bool:
     """Tell producer boundaries whether a payload uses the v2 field family."""
 
     if not isinstance(payload, dict):
         return False
-    if str(payload.get("schema_version", "") or "").strip() == FINDING_SCHEMA_VERSION:
+    if str(payload.get("schema_version", "") or "").strip() in {
+        FINDING_SCHEMA_VERSION,
+        FINDING_V3_SCHEMA_VERSION,
+    }:
         return True
     return bool(_STRUCTURED_ISSUE_FIELDS.intersection(payload))
 
@@ -226,6 +310,14 @@ def is_model_finding_payload(payload: Any) -> bool:
     if not isinstance(payload, dict):
         return False
     return "primary_anchor" in payload and "location" not in payload
+
+
+def is_model_finding_v3_payload(payload: Any) -> bool:
+    """Identify the slim model-facing shape before compatibility materialization."""
+
+    if not isinstance(payload, dict):
+        return False
+    return "anchor" in payload and "primary_anchor" not in payload
 
 
 def is_model_repair_payload(payload: Any) -> bool:
@@ -313,6 +405,38 @@ def validate_model_repair_target_payload(payload: Any) -> str:
                 + ", ".join(null_fields)
             )
     elif patch is not None:
+        return (
+            "repair_patch is allowed only when repair_status is repaired; "
+            f"got {item.repair_status}"
+        )
+    return ""
+
+
+def validate_model_repair_target_v3_payload(payload: Any) -> str:
+    """Validate one opaque 3.0 patch item without identity/version fields."""
+
+    if not isinstance(payload, dict):
+        return f"repair item must be an object, got {type(payload).__name__}"
+    try:
+        item = ModelRepairTargetInputV3.model_validate(payload)
+    except ValidationError as exc:
+        return str(exc)
+    if item.repair_status == "repaired":
+        if item.repair_patch is None:
+            return "repaired repair_status requires a non-empty repair_patch"
+        if not (item.repair_patch.model_fields_set - {"delete_fields"}) and not item.repair_patch.delete_fields:
+            return "repaired repair_status requires a non-empty repair_patch"
+        null_fields = sorted(
+            field
+            for field in item.repair_patch.model_fields_set
+            if field != "delete_fields" and getattr(item.repair_patch, field, None) is None
+        )
+        if null_fields:
+            return (
+                "null is not an omission or deletion for repair fields: "
+                + ", ".join(null_fields)
+            )
+    elif item.repair_patch is not None:
         return (
             "repair_patch is allowed only when repair_status is repaired; "
             f"got {item.repair_status}"
@@ -453,6 +577,11 @@ def normalize_model_finding_payload(
             payload,
             evidence_catalog=evidence_catalog,
         )
+    if is_model_finding_v3_payload(payload):
+        return normalize_model_finding_v3_payload(
+            payload,
+            evidence_catalog=evidence_catalog,
+        )
     model_shape = is_model_finding_payload(payload)
     if not model_shape and "primary_anchor" not in payload:
         return normalize_producer_issue_payload(payload)
@@ -550,6 +679,96 @@ def normalize_model_finding_payload(
                 )
             )
     return normalized
+
+
+def normalize_model_finding_v3_payload(
+    payload: Any,
+    *,
+    evidence_catalog: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Materialize one slim 3.0 finding without inventing semantic fields.
+
+    ``ReviewIssue`` is still used by downstream compatibility code, so the
+    adapter supplies an empty presentation-only ``evidence`` slot and an empty
+    legacy confidence slot.  The model-facing schema and all 3.0 gates use
+    ``description``/``evidence_refs`` instead; the compatibility values are
+    never treated as semantic evidence.
+    """
+
+    try:
+        model_input = ModelFindingInputV3.model_validate(payload)
+    except ValidationError:
+        # Preserve only the new contract fields so a malformed submission is
+        # reported by the normal Pydantic boundary without allowing runtime
+        # identity/provenance fields to leak through.
+        normalized = {
+            key: value
+            for key, value in dict(payload).items()
+            if key in ModelFindingInputV3.model_fields
+        }
+    else:
+        normalized = model_input.model_dump(mode="json")
+
+    normalized["schema_version"] = FINDING_V3_SCHEMA_VERSION
+    description = str(normalized.get("description", "")).strip()
+    normalized["description"] = description
+    # Keep the compatibility slot empty.  Copying the semantic description into
+    # the old evidence field would make a 3.0 result look like a legacy finding
+    # and would encourage downstream code to reconstruct the retired narrative
+    # contract.
+    normalized["evidence"] = ""
+    normalized["suggestion"] = str(normalized.get("suggestion") or "").strip()
+    normalized["confidence"] = 0.0
+
+    anchor_raw = normalized.get("anchor")
+    try:
+        anchor = SourceAnchor.model_validate(anchor_raw)
+    except Exception:  # noqa: BLE001
+        normalized.setdefault("location", "")
+    else:
+        anchor_payload = anchor.model_dump(mode="json")
+        normalized["anchor"] = anchor_payload
+        normalized["primary_anchor"] = anchor_payload
+        normalized["location"] = anchor.location
+
+    refs = normalized.get("evidence_refs", [])
+    if not isinstance(refs, list):
+        refs = []
+    normalized["evidence_refs"] = [str(item).strip() for item in refs]
+    normalized["evidence_provenance"] = _v3_evidence_for_refs(
+        normalized["evidence_refs"], evidence_catalog or []
+    )
+    # ReviewIssue's old role arrays are not part of 3.0 and must remain empty.
+    normalized["cause_evidence"] = []
+    normalized["contract_evidence"] = []
+    normalized["trigger_evidence"] = []
+    normalized["impact_evidence"] = []
+    return normalized
+
+
+def _v3_evidence_for_refs(
+    refs: list[str], catalog: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Bind exact 3.0 evidence ids, retaining unresolved refs explicitly."""
+
+    by_reference = _evidence_catalog_by_reference(catalog)
+    statuses = _evidence_catalog_reference_status(catalog)
+    result: list[dict[str, Any]] = []
+    for reference in refs:
+        record = by_reference.get(reference)
+        result.append(
+            _evidence_payload_from_catalog_record(
+                record,
+                reference=reference,
+                statement="",
+                resolution_status=(
+                    "resolved"
+                    if record is not None
+                    else statuses.get(reference, "unresolved")
+                ),
+            )
+        )
+    return result
 
 
 def _evidence_catalog_by_reference(
@@ -747,12 +966,14 @@ def canonical_contract_gaps(
 
     if issue.schema_version == "1.0":
         return []
+    if issue.schema_version == FINDING_V3_SCHEMA_VERSION:
+        return _canonical_v3_contract_gaps(issue)
     if issue.schema_version != FINDING_SCHEMA_VERSION:
         return [
             FindingContractGap(
                 "finding_contract_invalid",
                 "schema_version",
-                "Finding schema_version must be 1.0 or 2.0.",
+                "Finding schema_version must be 1.0, 2.0, or 3.0.",
                 invalid=True,
             )
         ]
@@ -894,6 +1115,78 @@ def canonical_contract_gaps(
                     f"Canonical supports is missing the {role} role envelope.",
                 )
             )
+    return gaps
+
+
+def _canonical_v3_contract_gaps(issue: ReviewIssue) -> list[FindingContractGap]:
+    """Validate only the four mandatory 3.0 fields and exact evidence refs."""
+
+    gaps: list[FindingContractGap] = []
+    if issue.primary_anchor is None:
+        gaps.append(
+            FindingContractGap(
+                "finding_contract_incomplete",
+                "anchor",
+                "3.0 findings need an anchor.",
+            )
+        )
+    else:
+        display_location = normalize_location(issue.location)
+        if display_location.valid and display_location.canonical != issue.primary_anchor.location:
+            gaps.append(
+                FindingContractGap(
+                    "finding_contract_invalid",
+                    "anchor",
+                    "anchor must agree with the canonical finding location.",
+                    invalid=True,
+                )
+            )
+    if not issue.description.strip():
+        gaps.append(
+            FindingContractGap(
+                "finding_contract_incomplete",
+                "description",
+                "3.0 findings need a non-empty description.",
+            )
+        )
+    refs = [str(item).strip() for item in issue.evidence_refs]
+    if not refs:
+        gaps.append(
+            FindingContractGap(
+                "evidence_incomplete",
+                "evidence_refs",
+                "3.0 findings need at least one exact evidence reference.",
+            )
+        )
+    if len(refs) != len(set(refs)) or any(not item for item in refs):
+        gaps.append(
+            FindingContractGap(
+                "finding_contract_invalid",
+                "evidence_refs",
+                "3.0 evidence_refs must contain unique non-empty ids.",
+                invalid=True,
+            )
+        )
+    bound_refs = {
+        str(item.evidence_id).strip()
+        for item in issue.evidence_provenance
+        if str(item.evidence_id).strip()
+    }
+    bound_refs.update(
+        str(item.reference_id).strip()
+        for item in issue.evidence_provenance
+        if str(item.reference_id).strip()
+    )
+    missing = sorted(set(refs) - bound_refs)
+    if missing:
+        gaps.append(
+            FindingContractGap(
+                "evidence_binding_missing",
+                "evidence_refs",
+                "3.0 evidence_refs are not all bound to the delivered evidence catalog: "
+                + ", ".join(missing),
+            )
+        )
     return gaps
 
 

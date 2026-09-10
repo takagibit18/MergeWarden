@@ -7,7 +7,13 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from src.analyzer.context_state import ContextState
-from src.analyzer.finding_contract import ModelRepairResponse
+from src.analyzer.finding_contract import (
+    ModelFinishReviewActionV3,
+    ModelRepairResponse,
+    ModelRepairResponseV3,
+    ModelReviseFindingActionV3,
+    ModelSaveFindingActionV3,
+)
 from src.analyzer.output_formatter import ReviewIssue, ReviewReport
 from src.models.schemas import DraftFindingInput, DraftFindingUpdateInput
 
@@ -144,6 +150,33 @@ class ReviewResponse(BaseModel):
         default="complete",
         description="Explicit finding-delivery status kept alongside legacy completion fields.",
     )
+    semantic_verifier_required: bool = Field(
+        default=False,
+        description="Whether 3.0 findings require the independent semantic verifier.",
+    )
+    semantic_verifier_completed: bool = Field(
+        default=False,
+        description="Whether every submitted 3.0 candidate received a semantic receipt.",
+    )
+    semantic_accepted_count: int = Field(default=0, ge=0)
+    semantic_rejected_count: int = Field(default=0, ge=0)
+    semantic_needs_revision_count: int = Field(default=0, ge=0)
+    semantic_unresolved_count: int = Field(default=0, ge=0)
+    report_ready: bool = Field(
+        default=False,
+        description="The internal report is ready after required verification gates.",
+    )
+    external_publish_status: Literal[
+        "not_requested", "ready", "published", "failed"
+    ] = "not_requested"
+
+    def contract_payload(self) -> dict[str, Any]:
+        """Serialize public output using the report's active finding contract."""
+
+        payload = super().model_dump(mode="json")
+        if any(issue.is_v3_finding for issue in self.report.issues):
+            payload["report"] = self.report.contract_payload()
+        return payload
 
     def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         """Keep the complete v0 response envelope compact for old consumers.
@@ -168,6 +201,18 @@ class ReviewResponse(BaseModel):
                 )
             ):
                 dumped.pop("investigation_ready", None)
+        if not self.semantic_verifier_required:
+            for key in (
+                "semantic_verifier_required",
+                "semantic_verifier_completed",
+                "semantic_accepted_count",
+                "semantic_rejected_count",
+                "semantic_needs_revision_count",
+                "semantic_unresolved_count",
+                "report_ready",
+                "external_publish_status",
+            ):
+                dumped.pop(key, None)
                 dumped.pop("submission_received", None)
                 dumped.pop("review_complete", None)
                 dumped.pop("delivery_complete", None)
@@ -290,6 +335,18 @@ class AnalysisPlan(BaseModel):
         default_factory=list,
         description="Validated state transitions for already-recorded hypotheses",
     )
+    v3_save_findings: list[ModelSaveFindingActionV3] = Field(
+        default_factory=list,
+        description="Validated v3 save_finding actions",
+    )
+    v3_revise_findings: list[ModelReviseFindingActionV3] = Field(
+        default_factory=list,
+        description="Validated v3 revise_finding actions",
+    )
+    v3_finish_review: ModelFinishReviewActionV3 | None = Field(
+        default=None,
+        description="Validated v3 finish_review action without finding contents",
+    )
     draft_review: ReviewReport | None = Field(
         default=None,
         description="Optional draft review result produced by model",
@@ -306,7 +363,7 @@ class AnalysisPlan(BaseModel):
         default=False,
         description="Whether a truncated response without valid submit needs recovery",
     )
-    repair_response: ModelRepairResponse | None = Field(
+    repair_response: ModelRepairResponse | ModelRepairResponseV3 | None = Field(
         default=None,
         description="Patch-only response from the dedicated runtime repair tool.",
     )
@@ -362,13 +419,19 @@ class AnalysisPlan(BaseModel):
             self.draft_review is not None
             or self.draft_debug is not None
             or self.repair_response is not None
+            or self.v3_finish_review is not None
         )
 
     @property
     def has_state_action(self) -> bool:
         """Whether this turn changed or recorded durable investigation state."""
 
-        return bool(self.draft_finding_calls or self.draft_finding_updates)
+        return bool(
+            self.draft_finding_calls
+            or self.draft_finding_updates
+            or self.v3_save_findings
+            or self.v3_revise_findings
+        )
 
     @property
     def has_exploration_action(self) -> bool:

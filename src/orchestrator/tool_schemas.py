@@ -5,9 +5,14 @@ from __future__ import annotations
 from typing import Any
 
 from src.analyzer.finding_contract import (
+    ModelFinishReviewActionV3,
     ModelFindingInput,
+    ModelFindingInputV3,
+    ModelReviseFindingActionV3,
     ModelRepairIssueInput,
     ModelRepairResponse,
+    ModelRepairResponseV3,
+    ModelSaveFindingActionV3,
 )
 from src.models.schemas import DraftFindingInput, DraftFindingUpdateInput
 from src.tools.base import ToolSpec
@@ -90,8 +95,46 @@ def build_draft_finding_update_tool_schema() -> dict[str, Any]:
     }
 
 
+def build_v3_finding_action_tool_schemas(
+    *, include_save: bool = True, include_revise: bool = True, include_finish: bool = True
+) -> list[dict[str, Any]]:
+    """Return the v3 save/revise/finish actions with no full report action."""
+
+    actions: list[dict[str, Any]] = []
+    definitions: list[tuple[str, str, Any]] = []
+    if include_save:
+        definitions.append(
+            ("save_finding", "Save one finding body in the runtime registry.", ModelSaveFindingActionV3)
+        )
+    if include_revise:
+        definitions.append(
+            ("revise_finding", "Apply an atomic patch to one saved finding.", ModelReviseFindingActionV3)
+        )
+    if include_finish:
+        definitions.append(
+            ("finish_review", "Finish exploration and submit the saved finding set.", ModelFinishReviewActionV3)
+        )
+    for name, description, model_type in definitions:
+        actions.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": description,
+                    "parameters": _llm_facing_schema(
+                        _inline_json_schema_refs(model_type.model_json_schema())
+                    ),
+                },
+            }
+        )
+    return actions
+
+
 def build_submit_tool_schemas(
-    *, model_input: bool = False, repair: bool = False
+    *,
+    model_input: bool = False,
+    repair: bool = False,
+    contract_version: str | None = None,
 ) -> list[dict[str, Any]]:
     """Pseudo-tools used for structured final output submission.
 
@@ -100,17 +143,32 @@ def build_submit_tool_schemas(
     """
 
     if model_input:
-        return _build_model_submit_tool_schemas(repair=repair)
+        return _build_model_submit_tool_schemas(
+            repair=repair,
+            contract_version=contract_version or "2.0",
+        )
     return _build_legacy_submit_tool_schemas()
 
 
-def build_model_submit_tool_schemas(*, repair: bool = False) -> list[dict[str, Any]]:
+def build_model_submit_tool_schemas(
+    *, repair: bool = False, contract_version: str = "2.0"
+) -> list[dict[str, Any]]:
     """Return the current semantic model-input submit contract."""
 
-    return build_submit_tool_schemas(model_input=True, repair=repair)
+    if repair and contract_version == "3.0":
+        # 3.0 repair is a distinct opaque-handle transaction.  Do not route it
+        # through the historical submit_review envelope, which would expose
+        # candidate ids and content versions to the model again.
+        return build_repair_tool_schemas(contract_version="3.0")
+
+    return build_submit_tool_schemas(
+        model_input=True,
+        repair=repair,
+        contract_version=contract_version,
+    )
 
 
-def build_repair_tool_schemas() -> list[dict[str, Any]]:
+def build_repair_tool_schemas(*, contract_version: str = "2.0") -> list[dict[str, Any]]:
     """Return the dedicated patch-only repair interface.
 
     This is intentionally a different tool from ``submit_review``.  Keeping
@@ -118,8 +176,11 @@ def build_repair_tool_schemas() -> list[dict[str, Any]]:
     as a fresh finding report or being format-recovered into one.
     """
 
+    response_type = (
+        ModelRepairResponseV3 if contract_version == "3.0" else ModelRepairResponse
+    )
     response_schema = _llm_facing_schema(
-        _inline_json_schema_refs(ModelRepairResponse.model_json_schema())
+        _inline_json_schema_refs(response_type.model_json_schema())
     )
     return [
         {
@@ -142,8 +203,18 @@ def build_repair_tool_schemas() -> list[dict[str, Any]]:
     ]
 
 
-def _build_model_submit_tool_schemas(*, repair: bool = False) -> list[dict[str, Any]]:
-    model_input_type = ModelRepairIssueInput if repair else ModelFindingInput
+def _build_model_submit_tool_schemas(
+    *, repair: bool = False, contract_version: str = "2.0"
+) -> list[dict[str, Any]]:
+    if contract_version not in {"2.0", "3.0"}:
+        raise ValueError(f"Unsupported model finding contract version: {contract_version}")
+    model_input_type = (
+        ModelRepairIssueInput
+        if repair
+        else ModelFindingInputV3
+        if contract_version == "3.0"
+        else ModelFindingInput
+    )
     model_issue_schema = _llm_facing_schema(
         _inline_json_schema_refs(model_input_type.model_json_schema())
     )
@@ -171,7 +242,7 @@ def _build_model_submit_tool_schemas(*, repair: bool = False) -> list[dict[str, 
     # Repair findings are intentionally patch-only: adding full finding fields
     # here would make omission/inheritance ambiguous and would let the model
     # replace runtime-owned content accidentally.
-    if not repair:
+    if not repair and contract_version == "2.0":
         risk_condition: dict[str, Any] = {
             "properties": {
                 "severity": {"enum": ["critical", "warning"]}
@@ -203,9 +274,14 @@ def _build_model_submit_tool_schemas(*, repair: bool = False) -> list[dict[str, 
             "function": {
                 "name": "submit_review",
                 "description": (
-                    "Submit semantic review findings. Provide one primary_anchor "
-                    "and choose exact evidence_refs from the delivered evidence "
-                    "catalog. "
+                    "Submit semantic review findings. "
+                    + (
+                        "Provide one anchor, a concise description, and choose exact "
+                        "evidence_refs from the delivered evidence catalog. "
+                        if contract_version == "3.0"
+                        else "Provide one primary_anchor and choose exact evidence_refs "
+                        "from the delivered evidence catalog. "
+                    )
                     + (
                         "This is an atomic repair transaction: every issue must set "
                         "target_candidate_id to one exact runtime candidate_id, "

@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse
 
 from src import __version__
 from src.analyzer.run_summary import RunSummary, summarize_event_log
@@ -169,7 +170,10 @@ async def review(request: ReviewRequest) -> ReviewResponse:
     """Run a synchronous review request through the shared orchestrator."""
     orchestrator = AgentOrchestrator()
     try:
-        return await orchestrator.run_review(request)
+        response = await orchestrator.run_review(request)
+        if any(issue.is_v3_finding for issue in response.report.issues):
+            return JSONResponse(content=response.contract_payload())  # type: ignore[return-value]
+        return response
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001

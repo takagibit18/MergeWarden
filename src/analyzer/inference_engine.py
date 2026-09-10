@@ -16,12 +16,19 @@ from src.analyzer.context_state import ContextState
 from src.analyzer.evidence_ledger import ledger_from_sources
 from src.analyzer.event_log import EventType
 from src.analyzer.finding_contract import (
+    is_model_finding_v3_payload,
     is_model_repair_payload,
     issue_supports,
+    ModelFinishReviewActionV3,
+    ModelFindingInputV3,
     ModelRepairResponse,
+    ModelRepairResponseV3,
+    ModelReviseFindingActionV3,
+    ModelSaveFindingActionV3,
     normalize_model_finding_payload,
     validate_model_repair_payload,
     validate_model_repair_target_payload,
+    validate_model_repair_target_v3_payload,
 )
 from src.analyzer.diff_lines import ParsedDiffHunk, parse_unified_diff_hunks
 from src.analyzer.finding_schema import normalize_repo_path
@@ -30,9 +37,11 @@ from src.analyzer.output_formatter import ReviewReport
 from src.analyzer.review_skills import SkillSelection
 from src.analyzer.prompts import (
     FINALIZE_REVIEW_NOTICE,
+    FINALIZE_REVIEW_NOTICE_V3,
     FINALIZE_DEBUG_NOTICE,
     REPAIR_REVIEW_NOTICE,
     USER_PREFIX_REVIEW,
+    USER_PREFIX_REVIEW_V3,
     build_debug_messages,
     build_debug_messages_async,
     build_review_messages,
@@ -143,6 +152,7 @@ class InferenceEngine:
         allow_exploration: bool = False,
         repair_mode: bool = False,
         submit_tool_name: str | None = None,
+        contract_version: str = "2.0",
     ) -> tuple[AnalysisPlan, TokenUsage]:
         file_contents = file_contents or {}
         settings = get_settings()
@@ -227,6 +237,7 @@ class InferenceEngine:
                     project_structure=prompt_project_structure,
                     telemetry_sink=context_telemetry,
                     skill_selection=skill_selection,
+                    contract_version=contract_version,
                 )
             else:
                 messages = build_review_messages(
@@ -239,6 +250,7 @@ class InferenceEngine:
                     project_structure=prompt_project_structure,
                     telemetry_sink=context_telemetry,
                     skill_selection=skill_selection,
+                    contract_version=contract_version,
                 )
         else:
             if summary_enabled:
@@ -329,10 +341,20 @@ class InferenceEngine:
                 Message(
                     role="user",
                     content=(
-                        "Do not call submit_review yet. Submission is temporarily "
-                        "unavailable during the initial exploration stage. Use the "
-                        "available read-only tools to resolve the most important evidence "
-                        "gap. Do not assume this is the only exploration round. In later "
+                        (
+                            "Do not call finish_review yet. Submission is temporarily "
+                            "unavailable during the initial exploration stage. "
+                            if contract_version == "3.0"
+                            else "Do not call submit_review yet. Submission is temporarily "
+                            "unavailable during the initial exploration stage. Use the "
+                        )
+                        + (
+                            "Use available read-only tools and save_finding only after a "
+                            "finding is concrete. "
+                            if contract_version == "3.0"
+                            else "available read-only tools to resolve the most important evidence "
+                        )
+                        + "gap. Do not assume this is the only exploration round. In later "
                         "rounds, continue targeted investigation whenever material "
                         "evidence gaps remain."
                     ),
@@ -354,6 +376,8 @@ class InferenceEngine:
             notice = (
                 REPAIR_REVIEW_NOTICE
                 if repair_mode and isinstance(request, ReviewRequest)
+                else FINALIZE_REVIEW_NOTICE_V3
+                if contract_version == "3.0" and isinstance(request, ReviewRequest)
                 else FINALIZE_REVIEW_NOTICE
                 if isinstance(request, ReviewRequest)
                 else FINALIZE_DEBUG_NOTICE
@@ -364,8 +388,13 @@ class InferenceEngine:
                 Message(
                     role="user",
                     content=(
-                        "Note: you are at the last allowed iteration. Prefer submitting now via "
-                        "submit_review/submit_debug using what you already have, unless a tool "
+                        "Note: you are at the last allowed iteration. Prefer finishing now via "
+                        + (
+                            "finish_review"
+                            if contract_version == "3.0"
+                            else "submit_review/submit_debug"
+                        )
+                        + " using what you already have, unless a tool "
                         "call is strictly necessary and has not been made with identical args."
                     ),
                 )
@@ -405,7 +434,13 @@ class InferenceEngine:
             thinking="off" if submit_only else "high",
             forced_tool=(
                 submit_tool_name
-                or ("repair_review" if repair_mode else self._submit_tool_name(request))
+                or (
+                    "repair_review"
+                    if repair_mode
+                    else self._submit_tool_name(
+                        request, contract_version=contract_version
+                    )
+                )
             )
             if submit_only
             else None,
@@ -578,6 +613,7 @@ class InferenceEngine:
             force_submit=submit_only,
             evidence_catalog=state.evidence_ledger,
             repair_mode=repair_mode,
+            contract_version=contract_version,
         )
         self._complete_invalid_draft_tool_calls(response.tool_calls, parse_meta)
         format_recovery_raw_payload = parse_meta.get("format_recovery_raw_payload")
@@ -617,6 +653,7 @@ class InferenceEngine:
                     invalid_tool_calls=response.tool_calls,
                     stage=call_stage,
                     evidence_catalog=state.evidence_ledger,
+                    contract_version=contract_version,
                 )
                 self._record_delivered_review_evidence(
                     state,
@@ -891,6 +928,7 @@ class InferenceEngine:
         invalid_tool_calls: list[dict[str, Any]],
         stage: str = "submit_only",
         evidence_catalog: list[dict[str, Any]] | None = None,
+        contract_version: str = "2.0",
     ) -> tuple[AnalysisPlan, ModelResponse, dict[str, Any], str, AssembledRequest]:
         for raw_call in invalid_tool_calls:
             call_id = str(raw_call.get("id", "")).strip()
@@ -953,6 +991,7 @@ class InferenceEngine:
             request,
             force_submit=True,
             evidence_catalog=evidence_catalog,
+            contract_version=contract_version,
         )
         parse_meta["tool_choice"] = self._trace_tool_choice(config)
         parse_meta["thinking_disabled"] = True
@@ -978,7 +1017,11 @@ class InferenceEngine:
         )
 
     @staticmethod
-    def _submit_tool_name(request: ReviewRequest | DebugRequest) -> str:
+    def _submit_tool_name(
+        request: ReviewRequest | DebugRequest, *, contract_version: str = "2.0"
+    ) -> str:
+        if isinstance(request, ReviewRequest) and contract_version == "3.0":
+            return "finish_review"
         return "submit_review" if isinstance(request, ReviewRequest) else "submit_debug"
 
     @staticmethod
@@ -1012,12 +1055,16 @@ class InferenceEngine:
         force_submit: bool = False,
         evidence_catalog: list[dict[str, Any]] | None = None,
         repair_mode: bool = False,
+        contract_version: str = "2.0",
     ) -> tuple[AnalysisPlan, dict[str, Any]]:
         tool_calls: list[dict[str, Any]] = []
         draft_finding_calls: list[DraftFindingInput] = []
         draft_finding_updates: list[DraftFindingUpdateInput] = []
+        v3_save_findings: list[ModelSaveFindingActionV3] = []
+        v3_revise_findings: list[ModelReviseFindingActionV3] = []
+        v3_finish_review: ModelFinishReviewActionV3 | None = None
         draft_review: ReviewReport | None = None
-        repair_response: ModelRepairResponse | None = None
+        repair_response: ModelRepairResponse | ModelRepairResponseV3 | None = None
         draft_debug: DebugResponse | None = None
         parse_meta: dict[str, Any] = {
             "submit_review_seen": False,
@@ -1099,6 +1146,38 @@ class InferenceEngine:
                         str(exc)
                     )
                 continue
+            if contract_version == "3.0" and name in {
+                "save_finding",
+                "revise_finding",
+                "finish_review",
+            }:
+                if force_submit and name != "finish_review":
+                    parse_meta["force_submit_discarded_count"] += 1
+                    continue
+                if argument_error or not isinstance(payload, dict):
+                    parse_meta.setdefault("v3_action_validation_errors", []).append(
+                        argument_error
+                        or f"Invalid {name} arguments type: {type(payload).__name__}"
+                    )
+                    continue
+                try:
+                    if name == "save_finding":
+                        v3_save_findings.append(
+                            ModelSaveFindingActionV3.model_validate(payload)
+                        )
+                    elif name == "revise_finding":
+                        v3_revise_findings.append(
+                            ModelReviseFindingActionV3.model_validate(payload)
+                        )
+                    else:
+                        v3_finish_review = ModelFinishReviewActionV3.model_validate(
+                            payload
+                        )
+                except ValidationError as exc:
+                    parse_meta.setdefault("v3_action_validation_errors", []).append(
+                        f"{name}: {exc}"
+                    )
+                continue
             if name == "submit_review":
                 parse_meta["submit_review_seen"] = True
                 if repair_mode:
@@ -1176,10 +1255,18 @@ class InferenceEngine:
                     if not isinstance(repairs, list):
                         raise ValueError("repair_review requires a repairs list")
                     for index, item in enumerate(repairs):
-                        error = validate_model_repair_target_payload(item)
+                        error = (
+                            validate_model_repair_target_v3_payload(item)
+                            if contract_version == "3.0"
+                            else validate_model_repair_target_payload(item)
+                        )
                         if error:
                             raise ValueError(f"repairs[{index}]: {error}")
-                    repair_response = ModelRepairResponse.model_validate(payload)
+                    repair_response = (
+                        ModelRepairResponseV3.model_validate(payload)
+                        if contract_version == "3.0"
+                        else ModelRepairResponse.model_validate(payload)
+                    )
                 except (ValidationError, ValueError) as exc:
                     parse_meta["repair_review_validation_error"] = str(exc)
                     logger.warning("Invalid repair_review payload ignored: %s", exc)
@@ -1222,6 +1309,9 @@ class InferenceEngine:
                     tool_calls=tool_calls,
                     draft_finding_calls=draft_finding_calls,
                     draft_finding_updates=draft_finding_updates,
+                    v3_save_findings=v3_save_findings,
+                    v3_revise_findings=v3_revise_findings,
+                    v3_finish_review=v3_finish_review,
                     draft_review=draft_review,
                     repair_response=repair_response,
                 ),
@@ -1322,8 +1412,14 @@ class InferenceEngine:
     def _normalize_structured_report(report: ReviewReport) -> ReviewReport:
         """Populate canonical support envelopes from compatible role arrays."""
 
+        if any(issue.is_v3_finding for issue in report.issues):
+            report.schema_version = "3.0"
         for issue in report.issues:
-            if issue.is_structured_hypothesis and not issue.supports:
+            if (
+                issue.is_structured_hypothesis
+                and not issue.is_v3_finding
+                and not issue.supports
+            ):
                 issue.supports = issue_supports(issue)
         return report
 
@@ -1384,6 +1480,15 @@ class InferenceEngine:
                         "Invalid submit_review repair issue at "
                         f"issues[{index}]: {repair_error}"
                     )
+            if isinstance(issue, dict) and is_model_finding_v3_payload(issue):
+                try:
+                    ModelFindingInputV3.model_validate(issue)
+                except ValidationError as exc:
+                    return (
+                        "Invalid submit_review 3.0 finding at "
+                        f"issues[{index}]: {exc}"
+                    )
+                continue
             if (
                 isinstance(issue, dict)
                 and "confidence" not in issue
@@ -3114,12 +3219,19 @@ class InferenceEngine:
             if raw_message.get("role") != "user":
                 continue
             content = raw_message.get("content")
-            if not isinstance(content, str) or not content.startswith(
-                USER_PREFIX_REVIEW
-            ):
+            if not isinstance(content, str):
+                continue
+            prefix = (
+                USER_PREFIX_REVIEW_V3
+                if content.startswith(USER_PREFIX_REVIEW_V3)
+                else USER_PREFIX_REVIEW
+                if content.startswith(USER_PREFIX_REVIEW)
+                else ""
+            )
+            if not prefix:
                 continue
             try:
-                payload = json.loads(content[len(USER_PREFIX_REVIEW) :])
+                payload = json.loads(content[len(prefix) :])
             except (TypeError, json.JSONDecodeError):
                 return None
             return payload if isinstance(payload, dict) else None

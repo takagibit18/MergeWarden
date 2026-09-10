@@ -31,6 +31,7 @@ RunJournalEntryType = Literal[
     "evidence_catalog",
     "format_recovery",
     "repair_transaction",
+    "semantic_verifier_call",
     "finding_finalization",
 ]
 LengthRecoveryStatus = Literal["required", "attempted", "succeeded", "failed"]
@@ -166,6 +167,30 @@ class RepairTransactionJournalPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     transaction: dict[str, Any] = Field(default_factory=dict)
+
+
+class SemanticVerifierJournalPayload(BaseModel):
+    """Safe replay binding for one verifier request/receipt pair."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    phase: Literal["request", "receipt"]
+    opaque_handle: str = ""
+    candidate_id: str = ""
+    content_version: str = ""
+    evidence_context_digest: str = ""
+    input_digest: str = ""
+    request_hash: str = ""
+    request_estimated_tokens: int = Field(default=0, ge=0)
+    response_digest: str = ""
+    provider_request_id: str = ""
+    provider_attempt_count: int = Field(default=0, ge=0)
+    verdict: str = ""
+    status: str = ""
+    error_code: str = ""
+    investigation_calls: int = Field(default=0, ge=0)
+    investigation_tool_calls: int = Field(default=0, ge=0)
+    investigation_evidence_refs: list[str] = Field(default_factory=list)
 
 
 class FindingFinalizationJournalPayload(BaseModel):
@@ -372,6 +397,7 @@ class RunJournal:
             | EvidenceCatalogJournalPayload
             | FormatRecoveryJournalPayload
             | RepairTransactionJournalPayload
+            | SemanticVerifierJournalPayload
             | FindingFinalizationJournalPayload
         )
         if entry_type == "model_response":
@@ -394,6 +420,8 @@ class RunJournal:
             model = FormatRecoveryJournalPayload.model_validate(payload)
         elif entry_type == "repair_transaction":
             model = RepairTransactionJournalPayload.model_validate(payload)
+        elif entry_type == "semantic_verifier_call":
+            model = SemanticVerifierJournalPayload.model_validate(payload)
         else:
             model = FindingFinalizationJournalPayload.model_validate(payload)
         return model.model_dump(mode="json")

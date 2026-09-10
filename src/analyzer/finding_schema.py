@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 FINDING_SCHEMA_VERSION = "2.0"
+FINDING_V3_SCHEMA_VERSION = "3.0"
 CounterfactualResult = Literal["yes", "no", "uncertain"]
 EvidenceEligibility = Literal["strong", "exploratory", "none"]
 EvidenceRole = Literal["cause", "contract", "trigger", "impact", "related"]
@@ -65,6 +66,94 @@ class RelatedLocation(SourceAnchor):
 
     role: EvidenceRole = "related"
     description: str = ""
+
+
+class FindingContentV3(BaseModel):
+    """Slim semantic finding content owned by the review contract.
+
+    This is the only finding shape exposed to a 3.0 reviewer.  Runtime
+    identity, confidence, role envelopes, narrative decomposition, and
+    provenance are deliberately not part of this model-facing contract.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    anchor: SourceAnchor = Field(
+        ..., description="The changed-code anchor that the conclusion is about."
+    )
+    description: str = Field(
+        ..., min_length=1, description="One concise explanation of the finding."
+    )
+    evidence_refs: list[str] = Field(
+        ..., min_length=1, description="Exact ids from the delivered evidence catalog."
+    )
+    severity: FindingSeverity
+    suggestion: str | None = Field(
+        default=None, description="Optional concrete remediation suggestion."
+    )
+    related_locations: list[SourceAnchor] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _unique_evidence_refs(self) -> "FindingContentV3":
+        refs = [str(item).strip() for item in self.evidence_refs]
+        if any(not item for item in refs):
+            raise ValueError("evidence_refs must contain non-empty ids")
+        if len(refs) != len(set(refs)):
+            raise ValueError("evidence_refs must not contain duplicates")
+        self.evidence_refs = refs
+        return self
+
+
+V3FindingPatchField = Literal["suggestion", "related_locations"]
+
+
+class FindingPatchV3(BaseModel):
+    """Atomic patch surface for a 3.0 finding re-review."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    anchor: SourceAnchor | None = None
+    description: str | None = None
+    evidence_refs: list[str] | None = None
+    severity: FindingSeverity | None = None
+    suggestion: str | None = None
+    related_locations: list[SourceAnchor] | None = None
+    delete_fields: list[V3FindingPatchField] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _patch_semantics(self) -> "FindingPatchV3":
+        if len(self.delete_fields) != len(set(self.delete_fields)):
+            raise ValueError("delete_fields must not contain duplicates")
+        overlap = set(self.delete_fields).intersection(self.model_fields_set)
+        if overlap:
+            raise ValueError(
+                "delete_fields cannot also carry a value for: "
+                + ", ".join(sorted(overlap))
+            )
+        explicit_nulls = {
+            field
+            for field in self.model_fields_set
+            if field in {
+                "anchor",
+                "description",
+                "evidence_refs",
+                "severity",
+                "suggestion",
+                "related_locations",
+            }
+            and getattr(self, field) is None
+        }
+        if explicit_nulls:
+            raise ValueError(
+                "null is ambiguous in a finding patch; use delete_fields for: "
+                + ", ".join(sorted(explicit_nulls))
+            )
+        if self.evidence_refs is not None:
+            refs = [str(item).strip() for item in self.evidence_refs]
+            if any(not item for item in refs) or len(refs) != len(set(refs)):
+                raise ValueError("evidence_refs must contain unique non-empty ids")
+            self.evidence_refs = refs
+        return self
 
 
 class RepairIntent(BaseModel):
