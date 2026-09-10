@@ -134,3 +134,5 @@
 | 2026-09-10 | v3 verifier 诊断回归 / 首次运行 | malformed decision 回放先在 provider 前被 `semantic_verifier_budget_exhausted_before_request` 阻断，未进入结构校验断言 | 回放测试硬上限 1000 小于完整请求输入估算；这是测试夹具额度设置错误，不是 malformed 解析失败 | 提高回放夹具额度到 10000，保留发送前输入预算门，并重新验证结构错误仍 fail-closed |
 | 2026-09-10 | v3 离线评分 / 初次只读探针 | PowerShell 传给 `python -c` 的换行被保留为字面量 `\\n`，导致探针 SyntaxError | Windows 命令行内联脚本转义不适合多行回放；未读取或修改实验产物 | 改用单行表达式或独立测试入口继续只读检查，不重跑原始实验 |
 | 2026-09-10 | v3 离线评分 / 事件阶段探针 | 第二次 `python -c` 同样保留了字面量换行，触发 SyntaxError | 仍使用了不适合 PowerShell 引号规则的多行内联表达式；不涉及产品代码或实验产物 | 后续改用已提交的离线重评分模块和单行只读命令，避免继续依赖多行 `-c` |
+| 2026-09-10 | v3 评估契约修复 / 全量 pytest 首轮 | 全量回归 1018 passed、1 skipped、3 failed；失败均在临时 Git fixture 的 commit 阶段报 `No private key found for C:/Users/Lenovo/.ssh/id_ed25519` | 宿主 Git signing 配置指向不可用私钥，三个用例未进入本轮评估或 verifier 逻辑 | 保留为环境问题；用仅当前 pytest 进程的 `GIT_CONFIG_*` 禁用 signing 后重跑，不修改全局 Git 配置 |
+| 2026-09-10 | v3 评估契约修复 / 全量 compileall 探针 | 对 `src cli.py eval tests` 递归 compileall 扫描时长异常且无输出，超过约 3 分钟后停止 | `eval/outputs` 含历史运行产物，递归扫描范围远大于本轮 Python 改动；此前触及文件 compileall 已通过 | 终止宽范围扫描，改按本轮源码、评估模块和测试文件的显式集合运行 compileall，避免把运行产物当源码门禁 |

@@ -1,6 +1,6 @@
 # Harness 减薄与契约统一：实施交付
 
-日期：2026-09-10。基线：`7045c1b`。本交付是在本地离线 mock 和全量回归上完成的实现，不是只读方案。真实模型未执行，原因见最后一节。
+日期：2026-09-10。基线：`7045c1b`。本交付记录的是先前在本地离线 mock 和全量回归上完成的实现，不是只读方案；原文撰写时尚未执行真实模型。随后授权执行的真实 Python A/B 及本轮离线重评分见第 10 节，不能把两者的结论混为一谈。
 
 ## 1. P0–P5 本轮返工状态（仅离线工程闭环）
 
@@ -104,7 +104,7 @@ repair 还携带完整兼容 issue；因此 v3 成功路径的 finish 阶段全�
 
 ## 6. 验收与兼容
 
-实际执行结果：
+实际执行结果（原交付阶段）：
 
 - `tests/test_harness_slimming_v3.py`：46 passed。
 - 受影响 registry/repair/provider/publisher/artifact 集合：165 passed。
@@ -117,7 +117,7 @@ repair 还携带完整兼容 issue；因此 v3 成功路径的 finish 阶段全�
   全仓报告 155 个、触及集合报告 6 个文件需要重排；本轮没有机械重排，避免混入
   无关 diff。
 
-测试只使用离线脚本模型与不会联网的假 Publisher client；未调用真实模型或外部
+原交付阶段测试只使用离线脚本模型与不会联网的假 Publisher client；当时未调用真实模型或外部
 平台。受影响集合首轮曾因宿主 Git signing 配置失败 1 项，随后仅在测试进程注入
 `commit.gpgSign=false` 与 `safe.directory` 后重跑通过；没有修改全局 Git 配置。
 
@@ -128,16 +128,16 @@ signing 配置影响。
 回滚不需要迁移 journal。切换到 v3 只需显式设置 `FINDING_CONTRACT_VERSION=3.0`，
 仍需保证新 API/GitHub 消费者读取 v3 `contract_payload()`。
 
-## 7. 真实模型与未完成项
+## 7. 原交付时的真实模型与未完成项
 
-本轮没有运行真实模型或付费 provider：用户请求只授权本地实施和离线验证，没有
-授权新的模型额度。mock verifier 证明了独立会话、批处理、拒绝、未决、调查上限、
+原交付阶段没有运行真实模型或付费 provider：当时用户请求只授权本地实施和离线验证，
+没有授权新的模型额度。mock verifier 证明了独立会话、批处理、拒绝、未决、调查上限、
 版本绑定和不可绕过的状态路由，但不能证明真实模型的因果准确率、延迟、token
 成本或 provider tool-call 兼容性。
 
-尚需在获得明确授权后完成：固定 provider/model/参数的有界自然场景验证；统计
-reviewer、verifier、调查、repair、重审的真实成本；确认外部 GitHub/API 客户端
-对 v3 payload 的兼容；再决定是否把默认迁移值从 v2 切到 v3。不能用本轮离线通过
+真实 A/B 产物已在后续授权运行中保存并于第 10 节完成离线重评分；仍尚需另行验证
+真实模型的因果准确率、固定 provider/model/参数下的稳定性、实际成本以及外部
+GitHub/API 客户端兼容，再决定是否把默认迁移值从 v2 切到 v3。不能用离线重评分
 冒充真实语义质量结论。
 
 ## 8. 最终问题回答
@@ -174,3 +174,80 @@ reviewer、verifier、调查、repair、重审的真实成本；确认外部 Git
 | 6. Receipt 未绑定最终实际输入 | receipt 继续引用初始 digest，调查来源与重审 payload 未进入同一绑定 | `src/analyzer/semantic_verifier.py`、`src/orchestrator/agent_loop.py`、`src/orchestrator/run_journal.py` | 首轮/调查后实际 input digest、证据变化、无关来源、journal request/receipt 对账 | receipt 含 input/request/response/provider/evidence 绑定；全量通过 | journal 只保存可回放摘要，不保存原始敏感 prompt 或隐藏推理 |
 | 7. v3 revise 要求模型搬运版本 | v3 action 与历史 repair schema 混用 `base_version`/`candidate_content_version` | `src/analyzer/finding_contract.py`、`src/orchestrator/tool_schemas.py`、`docs/shared_contracts.md` | schema 无 content version、opaque handle 旧版本拒绝、patch/null/delete | v3 schema 与 registry 回归通过；v2 兼容字段仍隔离保留 | legacy v2 repair 仍会看到版本字段，这是明确兼容边界 |
 | 8. 调查器依赖自然语言正则 | 只从问题文本提取 path:line，缺失时静默回到 anchor | `src/analyzer/semantic_verifier.py`、`src/orchestrator/agent_loop.py` | 实际调查适配器走显式只读 action；无定位信息返回 unresolved；零调用/最多两次边界 | investigation adapter 与全量回归通过 | 没有足够路径/符号/range 时仍需 unresolved 或上游补充明确 action |
+
+## 10. 真实 A/B 事实核验与离线重评分（本轮返工）
+
+本节对应同一组已经保存的真实 provider 运行；本轮没有再次请求模型，也没有连接外部
+发布端。原始运行 ID、raw、checkpoint、journal 和 event log 均只读使用，重评分结果另存为
+带版本的 [offline-rescore-v1 产物](../eval/experiments/finding-delivery-python-ab-20260910-v3-offline-rescore-v1.json)。
+
+### 10.1 “全部未交付”结论的更正
+
+旧评估器的 `_effective_review_issues()` 把 v3 `ReviewIssue` 的兼容外壳当成 v2
+finding 处理：v3 合法 finding 的 `confidence` 默认是 `0.0`，旧 `evidence` 文本为空，
+因此在 `_match_issues_v3()` 之前被过滤。它没有读取 runtime 已完成的 integrity、独立
+semantic receipt、内容版本和相关 evidence digest。新的评分适配边界只接受 runtime 已绑定
+的最终 finding，再交给独立 gold matcher；不回填 confidence、不拼接 evidence，也不把
+semantic accept 直接当作 gold 命中。
+
+| 运行 | 原报告 finding 数 | 原 `actual_count` | 重评分有效数 | semantic accept | 内部最终集合 | delivery complete | external 状态 | gold matched |
+|---|---:|---:|---:|---:|---:|---|---|---:|
+| Pydantic A | 2 | 0 | 2 | 2 | 2 | true | ready（未发布） | 0 |
+| Pydantic B2 | 2 | 0 | 2 | 2 | 2 | true | ready（未发布） | 0 |
+| Haystack A | 0 | 0 | 0 | 0 | 0 | false | not_requested | 0 |
+| Haystack B2 | 3 | 0 | 3 | 3 | 3 | true | ready（未发布） | 0 |
+
+`natural_model_stop` 只表示 reviewer 的停止原因，不代表没有 finding；`ready` 只表示
+内部发布门已经具备条件，也不代表外部客户端被调用或发布成功。三条运行的最终 finding
+仍然没有命中本次 fixture 的 gold 位置/严重性匹配；这与“有无最终 finding”是两个独立指标。
+
+### 10.2 Finding contract、matcher 与评分输入
+
+重评分显式记录了 `finding_contract_version=3.0`、`matcher_version=semantic-v3` 和
+`adapter_version=v3-runtime-boundary-v1`，不因名称都含 v3 就默认兼容。四条运行统一使用
+同一适配器和同一 gold matcher。缺失 receipt、旧内容版本、相关 evidence digest 改变、
+semantic unresolved 或 delivery 未完成都会被标成不可评分；新增无关 ledger 来源不会改变
+相关候选的 digest。历史 v2 与冻结 matcher 测试未切换到该适配器。
+
+Pydantic 两次运行的 finding 在自动结构检查中出现同文件且行区间重叠，Haystack B2 的
+三个 finding 在同一文件、相邻范围且共享部分 evidence 引用；这些只是可审计的 overlap
+signal，不自动断言“同一根因”或“真实误报”。重评分产物对每条 finding 记录了纳入/排除
+原因、location、evidence refs、内容版本与 receipt 的 digest/id/attempt 摘要。
+
+### 10.3 Token 口径核对
+
+历史 `EvalResult.total_tokens` 只汇总了 reviewer 的 provider attempt；`phase_end` 的
+`successful_total_tokens` 才包含 reviewer 加 independent verifier。本轮没有把 warm
+priming 混入 measured run，也没有价格依据，因此只报告 token：
+
+| 运行 | reviewer 成功 tokens | verifier tokens | measured 成功总 tokens | 组件和是否对账 | warm priming |
+|---|---:|---:|---:|---|---|
+| Pydantic A | 28196 | 4224 | 32420 | yes | 不适用 |
+| Pydantic B2 | 35870 | 9388 | 45258 | yes | 20.004s，token 未记录 |
+| Haystack A | 27943 | 5066 | 33009 | yes | 不适用 |
+| Haystack B2 | 36076 | 16566 | 52642 | yes | 36.602s，token 未记录 |
+
+逻辑模型调用与 provider attempt 分开记录：四条历史运行各有 3 次 reviewer logical
+`analyze`、1 次 verifier logical call，phase-end attempt 数为 4；Haystack A 的旧 journal
+没有保存 verifier provider request id，因此其 verifier attempt identity 仍为 unknown，不能
+伪造为 1。失败 attempt 或未知 usage 保持单独统计，不记为零。新的 run summary 同时保存
+reviewer/verifier stage token 字段；请求/响应诊断不保存隐藏推理。
+
+### 10.4 Haystack A malformed decision 诊断边界
+
+离线回放能确定的只有：verifier 对 opaque handle
+`vh_3cc41e9f52354fd8894d` 产生了 `semantic_verifier_malformed_decision`，随后安全转为
+unresolved，未生成 accept receipt，流程以 `semantic_verifier_unresolved` 停止。历史
+journal 没有保存 semantic provider 的原始 response body、request hash、response digest、
+provider request id 或 attempt 关联，因此无法从现有证据恢复“具体是哪一个字段/哪一条
+schema 约束”失败；本报告不猜测字段。运行时现已把这些安全摘要字段沿 malformed 路径
+传递到 receipt/journal，后续运行可定位错误但不会记录隐藏推理或敏感源码。
+
+### 10.5 本轮验证边界
+
+本轮证明了评分输入、指标映射、runtime receipt 绑定、历史产物可重复重评分和 malformed
+诊断证据边界；没有重新验证真实模型的因果准确率、provider 兼容性、实际成本，也没有把
+未命中 gold 自动宣称为真实误报。聚焦集合为 101 passed；全量 pytest 在仅当前进程
+禁用宿主 Git signing 后为 1021 passed、1 skipped、3 warnings；ruff check、mypy src、
+compileall 和 diff check 通过。v3 仍保持非默认、非正式外部发布状态；真实发布和真实
+语义质量需要另行授权与独立实验。
