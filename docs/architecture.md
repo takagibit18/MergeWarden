@@ -202,3 +202,32 @@ attempt、provider attempt、policy、risk、integrity、repair、evidence compl
 分层 matcher，分别报告 display location 与 root-cause roles，并只统计最终
 integrity-verified 风险 finding。Graph 失败时保留审计状态并回退到
 `agent_search`，不扩大上下文预算或改变 gold/threshold。
+
+### Harness slimming v3 delivery (2026-09-10)
+
+上面的 v0.2/v2 段落描述历史兼容链路；当前 v3 链路另有明确版本边界，不能把
+integrity `verified` 重新解释成 semantic `accepted`：
+
+```text
+Reviewer FindingContentV3
+  -> CandidateRegistry (唯一可变 finding 内容与内容版本)
+  -> integrity guard (来源、快照、范围、权限、版本)
+  -> independent SemanticVerifier (fresh conversation, batch decisions)
+  -> report_ready
+  -> external publish status
+```
+
+v3 的模型输入只有 `anchor`、`description`、`evidence_refs`、`severity` 及两个可选
+字段；runtime 通过显式适配器把它绑定到历史 `ReviewIssue` 外壳，但不会把
+description 伪造为旧五段 narrative 或 confidence。`CandidateRegistry` 提供
+`save_finding`、`revise_finding`、`finish_review` 和原子 patch/receipt 绑定能力，
+旧 v2 repair 只在兼容模式使用。
+
+`SemanticVerifier` 使用独立系统提示和新会话，批量返回
+`accept/reject/needs_revision`；缺失 verdict、格式错误、超时或 provider 失败均为
+`unresolved`。只有 `integrity` 与 `semantic` 两个门都完成，内部报告才会标记
+`report_ready`；GitHub 实际发布还要单独转为 `external_publish_status=published`。
+`needs_revision` 至多触发一轮、至多两次只读定向取证；无具体疑问时不调查。
+
+迁移开关只有 `FINDING_CONTRACT_VERSION`：默认 `2.0` 保证历史调用者可回滚，设为
+`3.0` 才启用新模型契约和语义门禁；不提供绕过 verifier 的组合开关。

@@ -265,7 +265,8 @@ confidence、root cause、impact、evidence/verifier/candidate 字段，也不�
 |------|------|------|------|
 | format recovery | 仅结构化格式恢复 | 原始 response id、raw payload、candidate identity、delivered evidence ledger | semantic/evidence/reference/identity 与原始输入一致；否则保留原始输入并记 `rejected_preserved_input` |
 | finalization | 仅 `submit_review` / `submit_debug` | exploration stop reason、pending draft、最终 submit response | 一次 submit-only 调用后，provisional `max_iterations` 等原因清除，draft 有终态，最终响应成为发布权威 |
-| repair | `target_candidate_id`、`candidate_content_version`、`repair_status`、`repair_reason`、`repair_patch` | CandidateRegistry、原 finding、基础版本、完整 gap、共享 repair transaction | target/version 精确匹配；patch 合并后重新通过 canonical contract 与 integrity guard |
+| repair (v2 compatibility) | `target_candidate_id`、`candidate_content_version`、`repair_status`、`repair_reason`、`repair_patch` | CandidateRegistry、原 finding、基础版本、完整 gap、共享 repair transaction | target/version 精确匹配；patch 合并后重新通过 canonical contract 与 integrity guard |
+| repair (v3) | opaque `target_handle`、`repair_status`、`repair_reason`、`repair_patch` | runtime transaction 持有 candidate、基础内容版本、证据上下文和 handle 绑定 | handle 必须属于当前事务；runtime 校验基础版本并原子应用 patch，再通过 integrity 与独立 semantic 重审；模型不接触 content version |
 | publish | 已验证最终 candidate | final guard status、serialized delivered evidence、finding finalization journal | `integrity=verified` 且 `final_published_count` 与最终 candidate 状态一致 |
 
 repair payload 禁止重复携带完整 semantic/evidence 顶层字段；`repaired` 必须有
@@ -283,6 +284,47 @@ failure 时，才能清除 placeholder 遗留的 completion incomplete 状态。
 
 评测 validation 配置如需固定 provider，必须显式记录 `provider` 与非敏感
 `base_url`；API key 仍只能来自运行环境，不得进入 YAML、summary 或 journal。
+
+## 11. Harness slimming v3（2026-09-10）
+
+### 11.1 Model wire contract
+
+v3 模型输入由 `ModelFindingInputV3` 固定为四个必填字段：
+`anchor`、`description`、`evidence_refs`、`severity`；`suggestion` 与
+`related_locations` 可选。模型不得填写 confidence、五段 narrative、role
+support、repair intent、candidate/version/provenance 或 snapshot/hash。版本由
+runtime 注入，当前通过 `FINDING_CONTRACT_VERSION=3.0` 选择。
+
+`ReviewIssue` 的旧字段只存在于兼容适配与历史消费者边界。v3 对外使用
+`contract_payload()`；该路径不输出 fake confidence，也不把 description 复制回
+旧 narrative。未知、未送达、过期或重复 evidence ref 保留为明确 integrity gap，
+不能邻近替换。
+
+### 11.2 Authority and lifecycle
+
+`CandidateRegistry` 是 run-scoped 的唯一可变 finding authority：
+
+| Action | Input | Runtime result |
+|---|---|---|
+| `save_finding` | 一份初始正文 | 新 candidate、内容版本、机械缺口 |
+| `revise_finding` | opaque handle + patch | runtime 将 handle 绑定到当前版本；过期 handle 原子拒绝，模型不搬运 content version |
+| `finish_review` | 无 finding 正文 | registry-owned finding 集合；不代表已接受 |
+| `repair_review` | active transaction 的 opaque patch | 只合并显式字段，再跑完整 integrity |
+
+candidate identity、content version、evidence digest、semantic receipt 和发布状态
+分别由 runtime 持有。`finish_review`、`report_ready`、`external_publish_status`
+不能互相代替。
+
+### 11.3 Independent semantic verification
+
+`SemanticVerifier` 不接收 Reviewer 历史、confidence、candidate identity 或既有
+verified 标签；每次模型调用创建 fresh `ModelConversation`，输入只含 finding、
+相关 diff、真实送达 evidence 和必要 context。Integrity 只回答机械来源问题；
+semantic receipt 必须绑定当前内容版本与实际相关 evidence digest。
+
+调查遵循单一原则：只有一个可能改变结论的具体未决问题才触发，最多一轮、最多两次
+只读工具调用；调查结果回到同一 evidence ledger 后才允许一次 re-check。材料足够
+时调用数为零，不能为了耗尽预算而调查。
 
 Review 中 `finish_reason="length"` 且无合法 `submit_review` 的模型调用属于 incomplete，
 不得解释为合法空 review。runtime 必须标记 `recovery_required`，并至多发起一次只暴露

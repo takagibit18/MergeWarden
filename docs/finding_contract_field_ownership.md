@@ -1,6 +1,8 @@
 # Finding contract field ownership
 
-This table is the boundary for the structured v2 model-input contract.  The
+This table records the historical v2 model-input contract.  The active slim v3
+boundary is defined below; v2 remains only as an explicit compatibility mode.
+The
 legacy `ReviewIssue` envelope remains available to existing publishers and is
 produced by an explicit adapter; its compatibility fields are not a second
 source of truth.  In particular, a reviewer-local `finding_id`, a runtime
@@ -54,3 +56,20 @@ submit assembly prioritizes all relevant required catalog entries, keeps each
 entry atomic, and validates the serialized payload after trimming; it does not
 use an arbitrary `records[:40]` prefix.  If a required id cannot fit, the run
 is explicitly context-insufficient and no provider submit is attempted.
+
+## Active v3 ownership table
+
+| Information | Owner | v3 representation | Rule |
+| --- | --- | --- | --- |
+| Finding position | Reviewer selects; runtime validates | `FindingContentV3.anchor` | `file` and `line` are required; `end_line` is optional; runtime binds source range. |
+| Complete semantic claim | Reviewer | `FindingContentV3.description` | One natural-language description; runtime never reconstructs the old five narrative fields. |
+| Legal source selection | Reviewer selects, runtime resolves | `evidence_refs` | Every ref must be an exact id in the delivered ledger; no nearest or role-based substitution. |
+| Suggested severity | Reviewer proposes, semantic verifier may request correction | `severity` | A correction cannot silently accept the old content version; it becomes `needs_revision`. |
+| Optional remediation/display context | Reviewer | `suggestion`, `related_locations` | Omission preserves current content during patch; explicit deletion uses the small delete whitelist, never null. |
+| Runtime identity/version | Program | `CandidateRegistry` registration | Opaque handles and content versions are generated and checked atomically. |
+| Semantic decision | Independent verifier | `SemanticVerifierReceipt` | Must bind exact content version and relevant evidence digest; integrity pass alone is insufficient. |
+| Processing/publication state | Program | response/run summary fields | Processing complete, candidate disposition, report ready, and external publish are separate facts. |
+
+The compatibility `ReviewIssue` fields remain a materialization boundary for old
+publishers and journals. They are not a second mutable authority and are not
+model-facing in v3.

@@ -36,6 +36,8 @@ docs/
 ├── v023_v025_root_cause_relation_graph.md # 根因归并、关系图、Manifest 与增量索引
 ├── graph_review_verifier_root_cause_and_plan_20260905.md # Graph A/B 与 verifier 排查及分阶段实施方案
 ├── finding_pipeline_repair_20260907.md # finding 生成、证据账本、修复回路与分层评测修复记录
+├── harness_slimming_plan_20260909.md # Harness 减薄规划与 v3 迁移边界
+├── harness_slimming_delivery_20260910.md # 本轮 P0–P5 实施、指标、门禁与未完成项
 └── project_plan.md         # 项目规划与里程碑（由根目录计划文档迁移）
 
 root/
@@ -55,6 +57,7 @@ root/
 - 根因 finding、代码关系图、证据 provenance 与增量索引 → `docs/v023_v025_root_cause_relation_graph.md`
 - Graph A/B 成本、verifier 错拒及后续 PR/commit 验收 → `docs/graph_review_verifier_root_cause_and_plan_20260905.md`
 - finding 生成链路、canonical contract、evidence ledger、修复预算与 semantic-v4 → `docs/finding_pipeline_repair_20260907.md`
+- Harness 减薄实施、字段所有权、独立 semantic verifier 与迁移门禁 → `docs/harness_slimming_delivery_20260910.md`
 - 里程碑、分工、演进路线 → `docs/project_plan.md`
 - 提交流程、分支规范、代码风格 → `CONTRIBUTING.md`
 - 评测标准与基线策略 → `eval/README.md`

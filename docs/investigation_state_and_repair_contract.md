@@ -95,3 +95,45 @@ classified: file-vs-directory and other bounded parameter/path errors are
 recoverable with a corrective next step, while workspace/permission/policy
 failures are not bypassable; repeated recoverable failures stop at the
 configured bound.
+
+## v3 semantic investigation and publication boundary
+
+The v3 path uses a single `FindingContentV3` body in the `CandidateRegistry`.
+`save_finding` stores it, `revise_finding` accepts only an opaque handle plus an
+atomic patch, and the runtime binds that handle to the current content version.
+`finish_review` returns the registry-owned set without carrying a second full
+report. `repair_review` is the bounded fallback transaction and uses the same
+patch semantics; its transaction-owned handle and base version are never copied
+into the model contract. It cannot route by array position, text similarity, or
+model-supplied candidate identity.
+
+After the integrity guard, `SemanticVerifier` creates a fresh conversation and
+returns one receipt per opaque handle. `accept`, `reject`, and
+`needs_revision` are candidate dispositions, not processing status. Any missing
+decision, malformed tool output, timeout, provider failure, or exhausted model
+budget produces `unresolved`; it never falls back to integrity-only publication.
+
+Only `needs_revision` with a concrete question may call the read-only investigator.
+The runtime permits one investigation round and at most two tool calls, feeds the
+result into the delivered evidence ledger, and permits at most one re-check. If
+the supplied material is sufficient, the investigator is not called. Write and
+execute tools are outside this boundary.
+
+The final state table is:
+
+| State | Meaning | Does it publish? |
+| --- | --- | --- |
+| processing complete | bounded reviewer/integrity work ended | no |
+| candidate disposition | each candidate accepted/rejected/needs_revision/unresolved | no |
+| report ready | required integrity and semantic receipts completed | internally ready |
+| external publish status | adapter actually succeeded/failed/not requested | only `published` means external success |
+
+Historical journal entries that say `integrity=verified` are not upgraded to
+v3 semantic acceptance during replay.
+
+The actual external Publisher applies a second runtime-owned gate for v3
+content. It checks the report's candidate registration, current content version,
+public content projection, evidence-context digest, semantic receipt and
+provider-response binding before invoking any external client method. A missing
+or default `semantic_verifier_required`/`report_ready` flag is not an exemption;
+dry-run only builds a local plan and does not claim publication.
