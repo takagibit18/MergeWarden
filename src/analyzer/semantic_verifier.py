@@ -167,6 +167,14 @@ class SemanticVerifierResult(BaseModel):
     completion_tokens: int = Field(default=0, ge=0)
     reasoning_tokens: int = Field(default=0, ge=0)
     total_tokens: int = Field(default=0, ge=0)
+    budget_tokens_used: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Conservative report-budget consumption including each sent request's "
+            "estimated input when provider usage is absent or lower."
+        ),
+    )
     cached_prompt_tokens: int = Field(default=0, ge=0)
     cache_observation_count: int = Field(default=0, ge=0)
     cache_hit_count: int = Field(default=0, ge=0)
@@ -447,12 +455,27 @@ class SemanticVerifier:
             outcome = await self._call_model(
                 batch_payload,
                 started_at=started_at,
-                used_tokens=result.total_tokens,
+                used_tokens=result.budget_tokens_used,
             )
             self._record_call_outcome(result, outcome, usage_observer)
             if not outcome.sent:
+                for candidate in batch:
+                    handle = candidate.opaque_handle
+                    input_digests_by_handle.setdefault(handle, outcome.input_digest)
+                    request_hashes_by_handle.setdefault(handle, outcome.request_hash)
+                    request_tokens_by_handle.setdefault(
+                        handle, outcome.request_estimated_tokens
+                    )
+                    response_digests_by_handle.setdefault(
+                        handle, outcome.response_digest
+                    )
+                    attempt_counts_by_handle.setdefault(
+                        handle, outcome.provider_attempt_count
+                    )
                 if outcome.error:
                     result.errors.append(outcome.error)
+                if outcome.error == "semantic_verifier_budget_exhausted_before_request":
+                    break
                 continue
             if outcome.error:
                 result.errors.append(outcome.error)
@@ -549,7 +572,7 @@ class SemanticVerifier:
                     recheck = await self._call_model(
                         recheck_payload,
                         started_at=started_at,
-                        used_tokens=result.total_tokens,
+                        used_tokens=result.budget_tokens_used,
                     )
                     self._record_call_outcome(result, recheck, usage_observer)
                     if recheck.error:
@@ -752,6 +775,13 @@ class SemanticVerifier:
         if outcome.sent:
             result.model_call_count += 1
             self._record_usage(result, outcome.response)
+            reported_tokens = 0
+            if outcome.response is not None and outcome.response.usage_present:
+                reported_tokens = max(0, int(outcome.response.usage.total_tokens))
+            result.budget_tokens_used += max(
+                outcome.request_estimated_tokens,
+                reported_tokens,
+            )
             result.provider_attempt_count += outcome.provider_attempt_count
             result.failed_provider_attempt_count += outcome.failed_provider_attempt_count
             result.failed_unknown_usage_count += outcome.failed_unknown_usage_count
@@ -774,14 +804,9 @@ class SemanticVerifier:
 
         if self._clock() - started_at >= self._budget.timeout_seconds:
             return False
-        if self._budget.hard_token_budget is None:
+        remaining = self._remaining_total_tokens(result.budget_tokens_used)
+        if remaining is None:
             return True
-        remaining = (
-            self._budget.hard_token_budget
-            - self._budget.initial_tokens_used
-            - result.total_tokens
-            - self._budget.reserved_tokens
-        )
         return remaining > 0
 
     async def _call_model(
@@ -824,7 +849,12 @@ class SemanticVerifier:
         remaining_seconds = max(
             0.001, self._budget.timeout_seconds - (self._clock() - started_at)
         )
-        remaining_tokens = self._remaining_output_tokens(used_tokens)
+        remaining_total = self._remaining_total_tokens(used_tokens)
+        remaining_tokens = (
+            self._remaining_output_tokens(used_tokens)
+            if remaining_total is None
+            else max(0, remaining_total)
+        )
         if remaining_tokens <= 0:
             return _CallOutcome(
                 decisions=[],
@@ -852,20 +882,54 @@ class SemanticVerifier:
                     response=None,
                     error=_error_code(exc),
                 )
-        assembled = RequestAssembler.fit(
-            messages,
-            tools,
-            wire_config,
-            wire_policy,
-            budget=self._budget.request_token_budget,
-            profile=profile,
-        )
+        assembled: Any | None = None
+        for _ in range(3):
+            assembled = RequestAssembler.fit(
+                messages,
+                tools,
+                wire_config,
+                wire_policy,
+                budget=self._budget.request_token_budget,
+                profile=profile,
+            )
+            input_digest = _digest({"serialized_payload": assembled.serialized_payload})
+            if assembled.estimated_tokens > self._budget.request_token_budget:
+                return _CallOutcome(
+                    decisions=[],
+                    response=None,
+                    error="semantic_verifier_request_over_budget",
+                    input_digest=input_digest,
+                    request_hash=assembled.request_hash,
+                    request_estimated_tokens=assembled.estimated_tokens,
+                )
+            if remaining_total is None:
+                break
+            output_allowance = remaining_total - assembled.estimated_tokens
+            if output_allowance <= 0:
+                return _CallOutcome(
+                    decisions=[],
+                    response=None,
+                    error="semantic_verifier_budget_exhausted_before_request",
+                    input_digest=input_digest,
+                    request_hash=assembled.request_hash,
+                    request_estimated_tokens=assembled.estimated_tokens,
+                )
+            next_max_tokens = min(wire_config.max_tokens, output_allowance)
+            if next_max_tokens == wire_config.max_tokens:
+                break
+            wire_config = wire_config.model_copy(
+                update={"max_tokens": next_max_tokens}
+            )
+        assert assembled is not None
         input_digest = _digest({"serialized_payload": assembled.serialized_payload})
-        if assembled.estimated_tokens > self._budget.request_token_budget:
+        if (
+            remaining_total is not None
+            and assembled.estimated_tokens + wire_config.max_tokens > remaining_total
+        ):
             return _CallOutcome(
                 decisions=[],
                 response=None,
-                error="semantic_verifier_request_over_budget",
+                error="semantic_verifier_budget_exhausted_before_request",
                 input_digest=input_digest,
                 request_hash=assembled.request_hash,
                 request_estimated_tokens=assembled.estimated_tokens,
@@ -1029,11 +1093,11 @@ class SemanticVerifier:
             sent=True,
         )
 
-    def _remaining_output_tokens(self, used_tokens: int) -> int:
-        """Return the hard-cap output allowance for the next provider request."""
+    def _remaining_total_tokens(self, used_tokens: int) -> int | None:
+        """Return report-level tokens available for input plus output."""
 
         if self._budget.hard_token_budget is None:
-            return 2048
+            return None
         return max(
             0,
             self._budget.hard_token_budget
@@ -1041,6 +1105,14 @@ class SemanticVerifier:
             - used_tokens
             - self._budget.reserved_tokens,
         )
+
+    def _remaining_output_tokens(self, used_tokens: int) -> int:
+        """Return a provisional output cap before the assembled input is known."""
+
+        remaining = self._remaining_total_tokens(used_tokens)
+        if remaining is None:
+            return 2048
+        return remaining
 
     @staticmethod
     def _consume_attempts(model_client: Any) -> list[dict[str, Any]]:

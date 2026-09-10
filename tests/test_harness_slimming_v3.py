@@ -188,9 +188,11 @@ class _VerifierClient:
         self.calls = 0
         self.default_config = ModelConfig(model="offline-mock")
         self.messages: list[object] = []
+        self.configs: list[object] = []
 
     async def chat(self, *args: object, **kwargs: object) -> ModelResponse:
         self.messages.append(args[0] if args else kwargs)
+        self.configs.append(kwargs.get("config"))
         self.calls += 1
         payload = self.payloads.pop(0)
         return ModelResponse(
@@ -312,8 +314,12 @@ class _ScriptedV3RunClient:
                 decisions = [
                     {
                         "opaque_handle": handle,
-                        "verdict": "accept",
-                        "reason": "The claim is supported but severity must be corrected.",
+                        "verdict": "needs_revision",
+                        "reason": "The claim is supported, but one classification detail remains.",
+                        "request": (
+                            "Change severity to info because the finding is advisory, "
+                            "not a correctness violation."
+                        ),
                         "severity_correction": "info",
                     }
                 ]
@@ -345,6 +351,15 @@ class _ScriptedV3RunClient:
             )
             handle_match = re.search(r"target_handle=(repair_target_[a-z0-9]+)", text)
             assert handle_match is not None
+            expected_request = (
+                "Change severity to info because the finding is advisory, "
+                "not a correctness violation."
+            )
+            assert expected_request in text
+            severity_match = re.search(
+                r'"target_severity"\s*:\s*"([^"]+)"', text
+            )
+            assert severity_match is not None
             return ModelResponse(
                 model="offline-v3",
                 provider_request_id=f"provider-{self.calls}",
@@ -359,7 +374,9 @@ class _ScriptedV3RunClient:
                                         {
                                             "target_handle": handle_match.group(1),
                                             "repair_status": "repaired",
-                                            "repair_patch": {"severity": "info"},
+                                            "repair_patch": {
+                                                "severity": severity_match.group(1)
+                                            },
                                         }
                                     ]
                                 }
@@ -1328,15 +1345,16 @@ def test_semantic_budget_stops_the_next_batch_after_first_usage_exhausts_hard_ca
                 ]
             },
         ],
-        total_tokens=2,
+        total_tokens=5_000,
     )
+    client.default_config = ModelConfig(model="offline-mock", max_tokens=5_000)
     result = asyncio.run(
         SemanticVerifier(
             client,
             budget=SemanticVerifierBudget(
                 batch_size=1,
                 max_model_calls=2,
-                hard_token_budget=2,
+                hard_token_budget=5_000,
             ),
         ).verify([_candidate("h-1"), _candidate("h-2")])
     )
@@ -1344,6 +1362,39 @@ def test_semantic_budget_stops_the_next_batch_after_first_usage_exhausts_hard_ca
     assert result.model_call_count == 1
     assert result.accepted_count == 1
     assert result.unresolved_count == 1
+    assert isinstance(client.configs[0], ModelConfig)
+    assert client.configs[0].max_tokens < 5_000
+    assert (
+        client.configs[0].max_tokens
+        + result.receipts[0].request_estimated_tokens
+        <= 5_000
+    )
+
+
+def test_semantic_budget_rejects_input_when_remaining_total_cannot_fit_request() -> None:
+    client = _UsageVerifierClient(
+        [
+            {
+                "decisions": [
+                    {"opaque_handle": "h-1", "verdict": "accept", "reason": "ok"}
+                ]
+            }
+        ],
+        total_tokens=1,
+    )
+    result = asyncio.run(
+        SemanticVerifier(
+            client,
+            budget=SemanticVerifierBudget(hard_token_budget=1),
+        ).verify([_candidate()])
+    )
+    assert client.calls == 0
+    assert result.model_call_count == 0
+    assert result.unresolved_count == 1
+    assert result.receipts[0].error_code == (
+        "semantic_verifier_budget_exhausted_before_request"
+    )
+    assert result.receipts[0].request_estimated_tokens > 1
 
 
 def test_semantic_recheck_is_skipped_when_investigation_consumes_wall_clock() -> None:
@@ -1600,6 +1651,7 @@ def test_v3_run_review_closes_verifier_severity_repair_and_independent_recheck(
     orchestrator._settings.finding_contract_version = "3.0"  # type: ignore[assignment]  # noqa: SLF001
     orchestrator._settings.review_repair_max_attempts = 1  # noqa: SLF001
     orchestrator._settings.semantic_verifier_max_model_calls = 2  # noqa: SLF001
+    orchestrator._settings.semantic_verifier_max_investigation_calls = 0  # noqa: SLF001
     client.orchestrator = orchestrator
     client.diff_text = diff
     orchestrator._model_client = client  # type: ignore[assignment]  # noqa: SLF001

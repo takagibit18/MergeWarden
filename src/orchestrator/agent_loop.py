@@ -1353,6 +1353,7 @@ class AgentOrchestrator:
                 {
                     "code": "semantic_verifier_needs_revision",
                     "message": receipt.reason,
+                    "verifier_request": receipt.request,
                     "field": "semantic_verifier",
                     "failure_class": "contract_gap",
                     "required_action": (
@@ -1362,13 +1363,27 @@ class AgentOrchestrator:
                 }
             ]
             if receipt.severity_correction is not None:
+                target_severity = str(
+                    getattr(
+                        receipt.severity_correction,
+                        "value",
+                        receipt.severity_correction,
+                    )
+                )
                 gap_items.append(
                     {
                         "code": "semantic_severity_correction",
-                        "message": "The verifier requested an explicit severity correction.",
+                        "message": (
+                            "The verifier requested an explicit severity correction "
+                            f"to {target_severity}."
+                        ),
                         "field": "severity",
+                        "target_severity": target_severity,
                         "failure_class": "contract_gap",
-                        "required_action": "set severity in repair_patch explicitly",
+                        "required_action": (
+                            "set severity to "
+                            f"{target_severity} in repair_patch explicitly"
+                        ),
                     }
                 )
             available_evidence = [
