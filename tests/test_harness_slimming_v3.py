@@ -940,6 +940,22 @@ def test_semantic_verifier_sufficient_material_never_investigates() -> None:
     assert result.investigation_call_count == 0
 
 
+def test_semantic_verifier_schema_matches_conditional_runtime_contract() -> None:
+    schema = SemanticVerifier.tool_schema()
+    decision = schema["function"]["parameters"]["properties"]["decisions"][
+        "items"
+    ]
+    assert decision["properties"]["reason"]["minLength"] == 1
+    assert decision["properties"]["opaque_handle"]["minLength"] == 1
+    conditional = decision["allOf"][0]
+    assert conditional["then"]["required"] == ["request"]
+    assert conditional["then"]["properties"]["request"]["minLength"] == 1
+    assert conditional["else"]["properties"]["request"]["maxLength"] == 0
+    investigation = decision["properties"]["investigation"]["oneOf"]
+    read_file = next(item for item in investigation if item.get("type") == "object")
+    assert read_file["required"] == ["tool", "file", "start_line"]
+
+
 def test_orchestrator_investigation_adapter_uses_explicit_bounded_read_only_action(
     tmp_path,
 ) -> None:

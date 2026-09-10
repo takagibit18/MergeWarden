@@ -106,9 +106,9 @@ repair 还携带完整兼容 issue；因此 v3 成功路径的 finish 阶段全�
 
 实际执行结果：
 
-- `tests/test_harness_slimming_v3.py`：44 passed。
-- 受影响 registry/repair/provider/publisher/artifact 集合：127 passed。
-- 全量 `pytest -q`：1013 passed、1 skipped、3 warnings。
+- `tests/test_harness_slimming_v3.py`：45 passed。
+- 受影响 registry/repair/provider/publisher/artifact 集合：128 passed。
+- 全量 `pytest -q`：1014 passed、1 skipped、3 warnings。
 - `ruff check .`：通过。
 - `python -m mypy src`：通过（94 source files）。
 - `python -m compileall -q src cli.py tests`：通过。
@@ -169,7 +169,7 @@ reviewer、verifier、调查、repair、重审的真实成本；确认外部 Git
 | 1. 重复 save 后新 finding 覆盖旧候选 | v3 save 复用了 source index 更新语义，去重后索引与候选数量脱钩 | `src/analyzer/finding_delivery.py`、`src/orchestrator/agent_loop.py` | A→A→B、同批/跨批重复、失败后新增、顺序变化、响应重放 | v3 集成组通过；registry 保留 A/B 且 handle/version 独立 | legacy `register_issue` 仍服务 v2/recovery，不能作为 v3 路由入口 |
 | 2. 重审错误 handle 被绑定 | 重审直接取结果首项，未按预期 handle 做严格关联 | `src/analyzer/semantic_verifier.py` | 错 handle、混合 handle、重复冲突、缺 verdict、多工具调用、顺序变化 | 相关 fail-closed 回归通过，错误关联不生成 accept | 未做真实 provider 畸形输出分布验证 |
 | 3. 发布门可被缺省标记绕过 | Publisher 只看 `semantic_verifier_required` 与 `report_ready`，未校验 runtime 批准材料 | `src/integrations/github_publisher.py` | 实际 `publish()` 假客户端覆盖未验证、缺 receipt、正文/位置/来源/严重性篡改、合法发布、dry-run | 真实 Publisher 回归通过；阻断发生在任何外部 client 方法前 | 未联网验证真实 GitHub API；dry-run 只计划不宣称发布 |
-| 4. Verifier→repair→重审未闭环 | needs_revision 只落 incomplete，未进入一次定向 Reviewer patch 与独立重审 | `src/orchestrator/agent_loop.py`、`src/analyzer/semantic_verifier.py` | 实际 `run_review()` 脚本化 Reviewer/Verifier/repair/recheck；severity correction、reject、partial/unresolved | stage 为 reviewer→verify→repair→recheck；44 项 v3 组及全量回归通过 | 真实模型修复质量与 provider 行为未验证；预算不足/修复失败按 unresolved 停止 |
+| 4. Verifier→repair→重审未闭环 | needs_revision 只落 incomplete，未进入一次定向 Reviewer patch 与独立重审 | `src/orchestrator/agent_loop.py`、`src/analyzer/semantic_verifier.py` | 实际 `run_review()` 脚本化 Reviewer/Verifier/repair/recheck；severity correction、reject、partial/unresolved | stage 为 reviewer→verify→repair→recheck；45 项 v3 组及全量回归通过 | 真实模型修复质量与 provider 行为未验证；预算不足/修复失败按 unresolved 停止 |
 | 5. Verifier 内部消耗不受报告预算控制 | 仅阶段入口记账，批次/调查/重审之间未共享剩余额度与 timeout | `src/analyzer/semantic_verifier.py`、`src/orchestrator/agent_loop.py` | 可控 usage/时钟、批次耗尽、调查后不重审、请求上限、慢调用、provider attempts 对账 | 预算回归通过；logical call 与 provider attempt 分开统计 | provider 未上报 usage 时只能保守计数，真实成本仍未测 |
 | 6. Receipt 未绑定最终实际输入 | receipt 继续引用初始 digest，调查来源与重审 payload 未进入同一绑定 | `src/analyzer/semantic_verifier.py`、`src/orchestrator/agent_loop.py`、`src/orchestrator/run_journal.py` | 首轮/调查后实际 input digest、证据变化、无关来源、journal request/receipt 对账 | receipt 含 input/request/response/provider/evidence 绑定；全量通过 | journal 只保存可回放摘要，不保存原始敏感 prompt 或隐藏推理 |
 | 7. v3 revise 要求模型搬运版本 | v3 action 与历史 repair schema 混用 `base_version`/`candidate_content_version` | `src/analyzer/finding_contract.py`、`src/orchestrator/tool_schemas.py`、`docs/shared_contracts.md` | schema 无 content version、opaque handle 旧版本拒绝、patch/null/delete | v3 schema 与 registry 回归通过；v2 兼容字段仍隔离保留 | legacy v2 repair 仍会看到版本字段，这是明确兼容边界 |

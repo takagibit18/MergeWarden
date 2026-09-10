@@ -256,6 +256,100 @@ class SemanticVerifier:
     def tool_schema(cls) -> dict[str, Any]:
         """Return the single bounded verifier tool schema."""
 
+        investigation_action_schema = {
+            "oneOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "tool": {"const": "read_file"},
+                        "file": {"type": "string", "minLength": 1},
+                        "start_line": {"type": "integer", "minimum": 1},
+                        "end_line": {"type": ["integer", "null"], "minimum": 1},
+                        "symbol": {"type": "string"},
+                        "pattern": {"type": "string"},
+                    },
+                    "required": ["tool", "file", "start_line"],
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "tool": {"const": "get_changed_context"},
+                        "file": {"type": "string", "minLength": 1},
+                        "start_line": {"type": "integer", "minimum": 1},
+                        "end_line": {"type": ["integer", "null"], "minimum": 1},
+                        "symbol": {"type": "string"},
+                        "pattern": {"type": "string"},
+                    },
+                    "required": ["tool", "file", "start_line"],
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "tool": {"const": "find_symbol_context"},
+                        "file": {"type": "string"},
+                        "start_line": {"type": ["integer", "null"], "minimum": 1},
+                        "end_line": {"type": ["integer", "null"], "minimum": 1},
+                        "symbol": {"type": "string", "minLength": 1},
+                        "pattern": {"type": "string"},
+                    },
+                    "required": ["tool", "symbol"],
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "tool": {"const": "grep_files"},
+                        "file": {"type": "string", "minLength": 1},
+                        "start_line": {"type": ["integer", "null"], "minimum": 1},
+                        "end_line": {"type": ["integer", "null"], "minimum": 1},
+                        "symbol": {"type": "string"},
+                        "pattern": {"type": "string", "minLength": 1},
+                    },
+                    "required": ["tool", "file", "pattern"],
+                },
+                {"type": "null"},
+            ]
+        }
+        decision_schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "opaque_handle": {"type": "string", "minLength": 1},
+                "verdict": {
+                    "type": "string",
+                    "enum": ["accept", "reject", "needs_revision"],
+                },
+                "reason": {"type": "string", "minLength": 1},
+                "request": {"type": "string"},
+                "investigation": investigation_action_schema,
+                "severity_correction": {
+                    "type": ["string", "null"],
+                    "enum": ["critical", "warning", "info", "style", None],
+                },
+            },
+            "required": ["opaque_handle", "verdict", "reason"],
+            "allOf": [
+                {
+                    "if": {
+                        "required": ["verdict"],
+                        "properties": {"verdict": {"const": "needs_revision"}},
+                    },
+                    "then": {
+                        "required": ["request"],
+                        "properties": {"request": {"minLength": 1}},
+                    },
+                    "else": {
+                        "properties": {
+                            "request": {"maxLength": 0},
+                            "investigation": {"type": "null"},
+                        }
+                    },
+                }
+            ],
+        }
         return {
             "type": "function",
             "function": {
@@ -271,55 +365,7 @@ class SemanticVerifier:
                     "properties": {
                         "decisions": {
                             "type": "array",
-                            "items": {
-                                "type": "object",
-                                "additionalProperties": False,
-                                "properties": {
-                                    "opaque_handle": {"type": "string"},
-                                    "verdict": {
-                                        "type": "string",
-                                        "enum": [
-                                            "accept",
-                                            "reject",
-                                            "needs_revision",
-                                        ],
-                                    },
-                                    "reason": {"type": "string"},
-                                    "request": {"type": "string"},
-                                    "investigation": {
-                                        "type": ["object", "null"],
-                                        "additionalProperties": False,
-                                        "properties": {
-                                            "tool": {
-                                                "type": "string",
-                                                "enum": [
-                                                    "read_file",
-                                                    "get_changed_context",
-                                                    "find_symbol_context",
-                                                    "grep_files",
-                                                ],
-                                            },
-                                            "file": {"type": "string"},
-                                            "start_line": {"type": ["integer", "null"]},
-                                            "end_line": {"type": ["integer", "null"]},
-                                            "symbol": {"type": "string"},
-                                            "pattern": {"type": "string"},
-                                        },
-                                        "required": ["tool"],
-                                    },
-                                    "severity_correction": {
-                                        "type": ["string", "null"],
-                                        "enum": [
-                                            "critical",
-                                            "warning",
-                                            "info",
-                                            "style",
-                                            None,
-                                        ],
-                                    },
-                                },
-                                "required": ["opaque_handle", "verdict", "reason"],
-                            },
+                            "items": decision_schema,
                         }
                     },
                     "required": ["decisions"],
