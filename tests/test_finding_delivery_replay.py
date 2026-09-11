@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import pytest
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -113,6 +114,10 @@ def _merge(case, response, *, catalog=None, snapshot="snapshot-a", revision="rev
     return merged, diagnostics
 
 
+@pytest.mark.skipif(
+    not all(path.is_file() for path in _POSTFINAL_JOURNALS),
+    reason="optional local historical journals are not present",
+)
 def test_real_journal_replay_preserves_candidate_and_finalization_facts() -> None:
     observed = []
     for path in _POSTFINAL_JOURNALS:

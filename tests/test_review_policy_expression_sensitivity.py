@@ -21,49 +21,13 @@ from src.analyzer.review_policy import evaluate_issue_filter
 from src.analyzer.schemas import ReviewRequest
 
 
-ROOT = Path(__file__).resolve().parents[1]
-DISCOUNT_EVENT_LOG = (
-    ROOT
-    / "eval"
-    / "outputs"
-    / "event_logs"
-    / "development_agent_search_cross_file_22b62d9d-dd66-4f98-a980-7a796fa17c0b.jsonl"
-)
-DISCOUNT_JOURNAL = (
-    ROOT
-    / "eval"
-    / "outputs"
-    / "finding-delivery-next-round-discount-normal-20260909"
-    / "run_journals"
-    / "development_agent_search_cross_file_A-agent-search_22b62d9d-dd66-4f98-a980-7a796fa17c0b_journal.jsonl"
-)
+DISCOUNT_FIXTURE = Path(__file__).parent / "fixtures" / "policy_expression" / "discount.json"
 
 
 def _load_discount_fixture() -> tuple[ReviewIssue, list[dict[str, Any]]]:
-    events = [
-        json.loads(line)
-        for line in DISCOUNT_EVENT_LOG.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    registration = next(
-        event
-        for event in events
-        if event.get("event_type") == "candidate_registered"
-    )
-    issue_payload = registration["payload"]["registrations"][0]["current_content"]
-
-    journal_entries = [
-        json.loads(line)
-        for line in DISCOUNT_JOURNAL.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    catalogs = [
-        entry["payload"]["records"]
-        for entry in journal_entries
-        if entry.get("type") == "evidence_catalog"
-    ]
-    assert catalogs, "the natural Discount journal must contain delivered evidence"
-    return ReviewIssue.model_validate(issue_payload), catalogs[-1]
+    """Load the portable minimum extracted from the historical journal."""
+    payload = json.loads(DISCOUNT_FIXTURE.read_text(encoding="utf-8"))
+    return ReviewIssue.model_validate(payload["issue"]), payload["catalog"]
 
 
 def _repair_contract_role(
