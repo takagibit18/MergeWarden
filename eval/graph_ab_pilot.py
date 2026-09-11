@@ -35,7 +35,11 @@ from eval.graph_ab_checkpoint import (
     CheckpointStatus,
     StableRunKey,
 )
-from eval.run_summary import extract_review_process_metrics
+from eval.run_summary import (
+    extract_attempt_cost,
+    extract_review_process_metrics,
+    extract_runtime_closeout,
+)
 from eval.schemas import (
     DEFAULT_EVAL_MATCHER_VERSION,
     EvalResult,
@@ -352,14 +356,14 @@ async def run_single_lifecycle(
     """Run the frozen eval pipeline with phase-two-owned index lifecycle."""
     active_contract_version = str(get_settings().finding_contract_version).strip()
     validate_eval_matcher_contract(matcher_version, active_contract_version)
-    if active_contract_version != "2.0":
+    if active_contract_version == "3.0" and fixture.type != "review":
         raise ValueError(
-            "Graph A/B pilot is explicitly v2-only; Harness v3 requires the "
-            "main evaluator or offline v3-content rescore"
+            "Harness v3 paired evaluation only supports review fixtures"
         )
     expected_count = len(fixture.expected.issues)
     stage_timings: dict[str, float] = {}
-    lifecycle: dict[str, Any] = {}
+    iteration_contract = base_runner.review_iteration_contract(review_max_iterations)
+    lifecycle: dict[str, Any] = {"round_contract": iteration_contract}
     if defer_workspace_cleanup and deferred_workspace_dir is not None:
         # Development-only teardown deferral: keep the isolated workspace on
         # disk after the run so checkpoint append is not blocked by a slow
@@ -464,9 +468,7 @@ async def run_single_lifecycle(
             orchestrator = AgentOrchestrator(
                 permission_mode="default",
                 temperature=temperature,
-                review_max_iterations=base_runner._effective_review_max_iterations(
-                    review_max_iterations
-                ),
+                review_max_iterations=iteration_contract["effective_rounds"],
                 review_min_tool_iterations=max(
                     1, get_settings().eval_review_min_tool_iterations
                 ),
@@ -492,6 +494,11 @@ async def run_single_lifecycle(
                     )
                 )
                 parsed_response = ReviewResponse.model_validate(response.model_dump())
+                validate_eval_matcher_contract(
+                    matcher_version, parsed_response.report.schema_version
+                )
+                if parsed_response.report.schema_version != active_contract_version:
+                    raise ValueError("Response finding contract differs from active experiment")
                 actual_count = len(
                     base_runner._effective_review_issues(fixture, parsed_response)
                 )
@@ -552,6 +559,9 @@ async def run_single_lifecycle(
                 base_runner._layered_match_counts(matches, matcher_version)
             )
             structural_metrics = base_runner._structural_issue_metrics(fixture, matches)
+            dimension_counts = base_runner._v3_content_dimension_counts(
+                fixture, parsed_response, matches, matcher_version
+            )
             root_quality = (
                 base_runner._root_cause_quality_for_version(
                     fixture, parsed_response, matches, matcher_version
@@ -579,6 +589,31 @@ async def run_single_lifecycle(
                     ),
                 }
             )
+            process_metrics = extract_review_process_metrics(
+                event_log_path, matcher_version=matcher_version
+            )
+            if isinstance(parsed_response, ReviewResponse):
+                process_metrics.finding_contract_version = (
+                    parsed_response.report.schema_version
+                )
+            raw_output = parsed_response.model_dump(mode="json")
+            runtime_closeout = extract_runtime_closeout(
+                event_log_path,
+                raw_output=raw_output,
+                finding_contract_version=active_contract_version,
+            )
+            attempt_cost = extract_attempt_cost(
+                event_log_path,
+                metrics=process_metrics,
+                fallback_total_tokens=total_tokens,
+            )
+            raw_output["eval_runtime"] = {
+                "round_contract": iteration_contract,
+                "closeout": runtime_closeout.model_dump(mode="json"),
+                "cost": attempt_cost.model_dump(mode="json"),
+            }
+            lifecycle["runtime_closeout"] = runtime_closeout.model_dump(mode="json")
+            lifecycle["attempt_cost"] = attempt_cost.model_dump(mode="json")
             result = EvalResult(
                 fixture_id=fixture.id,
                 fixture_type=fixture.type,
@@ -595,6 +630,7 @@ async def run_single_lifecycle(
                 location_matched_count=location_matched_count,
                 root_cause_matched_count=root_cause_matched_count,
                 **root_quality,
+                **dimension_counts,
                 latency_seconds=latency,
                 total_tokens=total_tokens,
                 event_log_path=event_log_path,
@@ -610,7 +646,7 @@ async def run_single_lifecycle(
                 ),
                 issue_matches=matches,
                 structural_metrics=structural_metrics,
-                raw_output=parsed_response.model_dump(mode="json"),
+                raw_output=raw_output,
                 placeholder_summary=placeholder,
                 submit_review_seen_any=log_stats["submit_review_seen_any"],
                 submit_debug_seen_any=log_stats["submit_debug_seen_any"],
@@ -627,9 +663,7 @@ async def run_single_lifecycle(
                     if isinstance(parsed_response, ReviewResponse)
                     else []
                 ),
-                process_metrics=extract_review_process_metrics(
-                    event_log_path, matcher_version=matcher_version
-                ),
+                process_metrics=process_metrics,
             )
             return result, lifecycle
     except Exception as exc:  # noqa: BLE001
@@ -682,6 +716,12 @@ def _load_config(path: Path) -> dict[str, Any]:
         raise ValueError("Pilot must set formal_graph_ab=false")
     if payload.get("held_out_executed") is not False:
         raise ValueError("Pilot must set held_out_executed=false")
+    shared = payload.get("shared")
+    if not isinstance(shared, dict):
+        raise ValueError("Pilot config must declare a shared runtime contract")
+    raw_rounds = shared.get("max_iterations")
+    if isinstance(raw_rounds, bool) or not isinstance(raw_rounds, int) or raw_rounds < 1:
+        raise ValueError("Pilot shared.max_iterations must be a positive integer")
     return payload
 
 
@@ -783,6 +823,8 @@ def _apply_runtime_contract(config: dict[str, Any]) -> None:
         os.environ["OPENAI_BASE_URL"] = base_url
     shared = config.get("shared", {})
     env_map = {
+        "finding_contract_version": "FINDING_CONTRACT_VERSION",
+        "model_max_retries": "MODEL_MAX_RETRIES",
         "model": "MODEL_NAME",
         "max_output_tokens": "MODEL_MAX_TOKENS",
         "exploration_max_output_tokens": "EXPLORATION_MAX_OUTPUT_TOKENS",
@@ -895,6 +937,8 @@ def _runtime_identity(config: dict[str, Any]) -> dict[str, Any]:
         "src/analyzer/evidence_binding.py",
         "src/analyzer/evidence_ledger.py",
         "src/analyzer/finding_contract.py",
+        "src/analyzer/finding_delivery.py",
+        "src/analyzer/semantic_verifier.py",
         "src/analyzer/finding_integrity.py",
         "src/analyzer/finding_schema.py",
         "src/analyzer/inference_engine.py",
@@ -1155,6 +1199,13 @@ async def run_pilot(
 ) -> dict[str, Any]:
     config = _load_config(config_path)
     _apply_runtime_contract(config)
+    round_contract = base_runner.review_iteration_contract(
+        int(config["shared"]["max_iterations"])
+    )
+    validate_eval_matcher_contract(
+        str(config.get("matcher_version", DEFAULT_EVAL_MATCHER_VERSION)),
+        get_settings().finding_contract_version,
+    )
     frozen = _frozen_contract(config)
     variants = _variants(config)
     configured_sample_counts = {
@@ -1391,6 +1442,9 @@ async def run_pilot(
     generated_at = datetime.now(UTC).isoformat()
     payload = {
         "experiment_id": config["experiment_id"],
+        "finding_contract_version": get_settings().finding_contract_version,
+        "semantic_rule_version": base_runner.V3_CONTENT_JUDGMENT_VERSION,
+        "runtime_identity": _runtime_identity(config),
         "generated_at": generated_at,
         "branch": _run_git("branch", "--show-current"),
         "start_commit": _run_git("merge-base", "HEAD", "origin/main"),
@@ -1404,6 +1458,7 @@ async def run_pilot(
         "seed": seed,
         "samples": samples,
         "variant_sample_counts": configured_sample_counts,
+        "round_contract": round_contract,
         "suite": suite,
         "shared_contract": frozen,
         "experiment_contract_hash": experiment_contract_hash,
@@ -1471,6 +1526,238 @@ def _aggregate_run_structural_metrics(
     )
 
 
+def _record_closeout(record: PilotRunRecord) -> Any:
+    """Read status from the timeline, with explicit response fallback."""
+
+    return extract_runtime_closeout(
+        record.result.event_log_path,
+        raw_output=record.result.raw_output,
+        finding_contract_version=record.result.finding_contract_version,
+    )
+
+
+def _quality_eligibility(
+    record: PilotRunRecord,
+    closeout: Any,
+) -> tuple[bool, list[str]]:
+    """Separate runner validity from complete quality-gate eligibility."""
+
+    result = record.result
+    reasons: list[str] = []
+    if not record.valid:
+        reasons.extend(["runner_invalid", *record.invalid_reasons])
+    if result.error:
+        reasons.append("result_error")
+    if not result.schema_valid:
+        reasons.append("schema_invalid")
+    if result.placeholder_summary:
+        reasons.append("placeholder_output")
+
+    contract_version = str(
+        result.finding_contract_version or closeout.finding_contract_version
+    ).strip()
+    if contract_version == "3.0":
+        if closeout.completion_status != "complete":
+            reasons.append("incomplete_closeout")
+        if not closeout.review_complete:
+            reasons.append("review_incomplete")
+        if not closeout.delivery_complete:
+            reasons.append("delivery_incomplete")
+        if not closeout.report_ready:
+            reasons.append("report_not_ready")
+        if closeout.external_publish_status == "failed":
+            reasons.append("external_publish_failed")
+    return not reasons, list(dict.fromkeys(reasons))
+
+
+def _cost_row(
+    record: PilotRunRecord,
+    *,
+    closeout: Any,
+    quality_eligible: bool,
+    quality_exclusion_reasons: list[str],
+) -> dict[str, Any]:
+    result = record.result
+    metrics = result.process_metrics
+    attempt_cost = extract_attempt_cost(
+        result.event_log_path,
+        metrics=metrics,
+        fallback_total_tokens=result.total_tokens,
+    )
+    return {
+        "run_id": record.run_id,
+        "fixture_id": record.fixture_id,
+        "variant_id": record.variant_id,
+        "valid": record.valid,
+        "invalid_reasons": list(record.invalid_reasons),
+        "quality_eligible": quality_eligible,
+        "quality_exclusion_reasons": quality_exclusion_reasons,
+        "completion_status": closeout.completion_status,
+        "finding_run_status": closeout.finding_run_status,
+        "finish_seen": closeout.finish_seen,
+        "investigation_ready": closeout.investigation_ready,
+        "submission_received": closeout.submission_received,
+        "review_complete": closeout.review_complete,
+        "delivery_complete": closeout.delivery_complete,
+        "report_ready": closeout.report_ready,
+        "external_publish_status": closeout.external_publish_status,
+        "incomplete_reasons": list(closeout.incomplete_reasons),
+        **result.stage_timings,
+        "graph_build_latency_seconds": metrics.graph_build_latency_seconds,
+        "incremental_update_latency_seconds": metrics.incremental_update_latency_seconds,
+        "context_planning_latency_seconds": None,
+        "reviewer_latency_seconds": metrics.reviewer_latency_seconds,
+        "verifier_latency_seconds": metrics.verifier_latency_seconds,
+        "consolidation_latency_seconds": metrics.consolidation_latency_seconds,
+        "end_to_end_latency_seconds": metrics.end_to_end_latency_seconds,
+        "prompt_tokens": attempt_cost.prompt_tokens,
+        "completion_tokens": attempt_cost.completion_tokens,
+        "total_tokens": attempt_cost.total_tokens,
+        "cost_status": attempt_cost.cost_status,
+        "usage_known": attempt_cost.usage_known,
+        "provider_attempt_count": attempt_cost.provider_attempt_count,
+        "reviewer_provider_attempt_count": attempt_cost.reviewer_provider_attempt_count,
+        "verifier_provider_attempt_count": attempt_cost.verifier_provider_attempt_count,
+        "successful_attempt_count": attempt_cost.successful_attempt_count,
+        "failed_attempt_count": attempt_cost.failed_attempt_count,
+        "known_usage_attempt_count": attempt_cost.known_usage_attempt_count,
+        "unknown_usage_attempt_count": attempt_cost.unknown_usage_attempt_count,
+        "reviewer_unknown_usage_attempt_count": (
+            attempt_cost.reviewer_unknown_usage_attempt_count
+        ),
+        "verifier_unknown_usage_attempt_count": (
+            attempt_cost.verifier_unknown_usage_attempt_count
+        ),
+        "reviewer_total_tokens": attempt_cost.reviewer_total_tokens,
+        "verifier_total_tokens": attempt_cost.verifier_total_tokens,
+        "successful_prompt_tokens": attempt_cost.successful_prompt_tokens,
+        "successful_completion_tokens": attempt_cost.successful_completion_tokens,
+        "successful_reasoning_tokens": attempt_cost.successful_reasoning_tokens,
+        "successful_total_tokens": attempt_cost.successful_total_tokens,
+        "successful_cached_prompt_tokens": (
+            attempt_cost.successful_cached_prompt_tokens
+        ),
+        "successful_adjacent_common_prefix_tokens": (
+            attempt_cost.successful_adjacent_common_prefix_tokens
+        ),
+        "cache_observation_count": metrics.cache_observation_count,
+        "provider_cache_hit_count": metrics.provider_cache_hit_count,
+        "provider_cache_hit_rate": _ratio(
+            metrics.provider_cache_hit_count,
+            metrics.cache_observation_count,
+        ),
+        "cached_prompt_token_rate": _ratio(
+            attempt_cost.successful_cached_prompt_tokens,
+            attempt_cost.successful_prompt_tokens,
+        ),
+        "graph_selected_production_path_count": (
+            metrics.graph_selected_production_path_count
+        ),
+        "graph_selected_low_hop_path_count": metrics.graph_selected_low_hop_path_count,
+        "graph_required_production_path_count": (
+            metrics.graph_required_production_path_count
+        ),
+        "graph_missing_production_path_count": metrics.graph_missing_production_path_count,
+        "graph_reviewer_available_path_count": (
+            metrics.graph_reviewer_available_path_count
+        ),
+        "graph_reviewer_selected_path_count": (
+            metrics.graph_reviewer_selected_path_count
+        ),
+        "graph_reviewer_dropped_path_count": metrics.graph_reviewer_dropped_path_count,
+        "graph_reviewer_selected_token_count": (
+            metrics.graph_reviewer_selected_token_count
+        ),
+        "graph_reviewer_role_coverage": metrics.graph_reviewer_role_coverage,
+        "manifest_token_cost": metrics.manifest_token_cost,
+        "tool_call_count": metrics.tool_call_count,
+        "read_file_calls": metrics.read_file_calls,
+        "grep_calls": metrics.grep_calls,
+        "symbol_lookup_calls": metrics.symbol_lookup_calls,
+        "duplicate_tool_call_count": metrics.duplicate_tool_call_count,
+        "parsed_file_count": metrics.parsed_file_count,
+        "graph_node_count": metrics.graph_node_count,
+        "graph_edge_count": metrics.graph_edge_count,
+        "cache_hit": metrics.graph_cache_hit,
+        "persistent_cache_hit_rate": metrics.persistent_cache_hit_rate,
+        "index_size_bytes": record.index_after.size_bytes
+        if record.index_after
+        else None,
+        "review_iterations": metrics.review_iterations,
+        "tool_search_success_rate": None,
+        "search_after_manifest": None,
+        "out_of_scope_read_rate": None,
+        "repeated_search_rate": None,
+        "candidate_revision_count": None,
+        "stop_condition_efficiency": None,
+    }
+
+
+def _aggregate_cost_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate cost across every attempted run, including invalid runs."""
+
+    def total(name: str) -> int:
+        return sum(int(row.get(name, 0) or 0) for row in rows)
+
+    unknown = total("unknown_usage_attempt_count")
+    reviewer_unknown = total("reviewer_unknown_usage_attempt_count")
+    verifier_unknown = total("verifier_unknown_usage_attempt_count")
+
+    def complete_component(name: str, unknown_count: int) -> int | None:
+        if unknown_count:
+            return None
+        return sum(int(row[name] or 0) for row in rows if row.get(name) is not None)
+
+    provider_attempts = total("provider_attempt_count")
+    if provider_attempts == 0:
+        status = "no_provider_attempt"
+    elif unknown:
+        status = "partial_unknown_usage"
+    else:
+        status = "complete"
+    return {
+        "sample_domain": "all_attempts_including_invalid",
+        "run_count": len(rows),
+        "provider_attempt_count": provider_attempts,
+        "reviewer_provider_attempt_count": total("reviewer_provider_attempt_count"),
+        "verifier_provider_attempt_count": total("verifier_provider_attempt_count"),
+        "successful_attempt_count": total("successful_attempt_count"),
+        "failed_attempt_count": total("failed_attempt_count"),
+        "known_usage_attempt_count": total("known_usage_attempt_count"),
+        "unknown_usage_attempt_count": unknown,
+        "reviewer_unknown_usage_attempt_count": reviewer_unknown,
+        "verifier_unknown_usage_attempt_count": verifier_unknown,
+        "usage_known": unknown == 0,
+        "cost_status": status,
+        "total_tokens": complete_component("total_tokens", unknown),
+        "reviewer_total_tokens": complete_component(
+            "reviewer_total_tokens", reviewer_unknown
+        ),
+        "verifier_total_tokens": complete_component(
+            "verifier_total_tokens", verifier_unknown
+        ),
+        "successful_prompt_tokens": total("successful_prompt_tokens"),
+        "successful_completion_tokens": total("successful_completion_tokens"),
+        "successful_reasoning_tokens": total("successful_reasoning_tokens"),
+        "successful_total_tokens": total("successful_total_tokens"),
+        "successful_cached_prompt_tokens": total("successful_cached_prompt_tokens"),
+        "successful_adjacent_common_prefix_tokens": total(
+            "successful_adjacent_common_prefix_tokens"
+        ),
+    }
+
+
+def _aggregate_quality_payload(aggregate: MetricSummary) -> dict[str, Any]:
+    return {
+        "overall_recall": aggregate.overall_recall,
+        "precision": aggregate.precision,
+        "root_cause_recall": aggregate.root_cause_recall,
+        "over_merge_count": aggregate.over_merge_count,
+        "under_merge_count": aggregate.under_merge_count,
+        "repair_unit_accuracy": aggregate.repair_unit_accuracy,
+    }
+
+
 def compact_summary(payload: dict[str, Any]) -> dict[str, Any]:
     records = [PilotRunRecord.model_validate(item) for item in payload["records"]]
     configured_variant_ids = tuple(
@@ -1484,16 +1771,58 @@ def compact_summary(payload: dict[str, Any]) -> dict[str, Any]:
     for variant_id in variant_ids:
         all_runs = [item for item in records if item.variant_id == variant_id]
         valid = [item for item in all_runs if item.valid]
+        closeouts = {item.run_id: _record_closeout(item) for item in all_runs}
+        quality_details = {
+            item.run_id: _quality_eligibility(item, closeouts[item.run_id])
+            for item in all_runs
+        }
+        # Quality denominators intentionally use runner-valid runs only.  A
+        # structurally valid but incomplete v3 run remains visible in this
+        # domain and may contribute approved partial findings; the gate result
+        # is reported separately so it cannot be mistaken for complete delivery.
+        quality_runs = valid
+        complete_delivery_runs = [
+            item for item in valid if quality_details[item.run_id][0]
+        ]
+        complete_delivery_aggregate = MetricSummary.from_results(
+            [item.result for item in complete_delivery_runs]
+        )
+        delivery_complete_count = sum(
+            closeouts[item.run_id].delivery_complete for item in all_runs
+        )
+        delivery_complete_rate = _ratio(delivery_complete_count, len(all_runs))
+        delivery_summary = {
+            "sample_domain": "all_attempts_including_invalid",
+            "attempt_count": len(all_runs),
+            "delivery_complete_count": delivery_complete_count,
+            "delivery_complete_rate": delivery_complete_rate,
+            "end_to_end_delivery_rate": delivery_complete_rate,
+            "invalid_attempt_count": len(all_runs) - len(valid),
+            "valid_attempt_count": len(valid),
+            "complete_delivery_gate_count": len(complete_delivery_runs),
+        }
         quality_rows = []
         cost_rows = []
-        for item in valid:
+        for item in quality_runs:
             result = item.result
             metrics = result.process_metrics
+            closeout = closeouts[item.run_id]
             quality_rows.append(
                 {
                     "run_id": item.run_id,
                     "fixture_id": item.fixture_id,
+                    "completion_status": closeout.completion_status,
+                    "finding_run_status": closeout.finding_run_status,
+                    "finish_seen": closeout.finish_seen,
+                    "submission_received": closeout.submission_received,
+                    "review_complete": closeout.review_complete,
+                    "delivery_complete": closeout.delivery_complete,
+                    "report_ready": closeout.report_ready,
+                    "external_publish_status": closeout.external_publish_status,
+                    "quality_gate_eligible": quality_details[item.run_id][0],
+                    "quality_gate_exclusion_reasons": quality_details[item.run_id][1],
                     "schema_valid": result.schema_valid,
+                    "approved_finding_count": result.approved_finding_count,
                     "expected_count": result.expected_count,
                     "matched_count": result.matched_count,
                     "false_positive_count": result.false_positive_count,
@@ -1620,19 +1949,76 @@ def compact_summary(payload: dict[str, Any]) -> dict[str, Any]:
                     "stop_condition_efficiency": None,
                 }
             )
-        aggregate = MetricSummary.from_results([item.result for item in valid])
+        cost_rows = [
+            _cost_row(
+                item,
+                closeout=closeouts[item.run_id],
+                quality_eligible=quality_details[item.run_id][0],
+                quality_exclusion_reasons=quality_details[item.run_id][1],
+            )
+            for item in all_runs
+        ]
+        aggregate = MetricSummary.from_results([item.result for item in quality_runs])
+        aggregate_cost = _aggregate_cost_rows(cost_rows)
         variants[variant_id] = {
             "valid_runs": len(valid),
             "invalid_runs": len(all_runs) - len(valid),
             "valid_run_rate": _ratio(len(valid), len(all_runs)),
-            "aggregate_quality": {
-                "overall_recall": aggregate.overall_recall,
-                "precision": aggregate.precision,
-                "root_cause_recall": aggregate.root_cause_recall,
-                "over_merge_count": aggregate.over_merge_count,
-                "under_merge_count": aggregate.under_merge_count,
-                "repair_unit_accuracy": aggregate.repair_unit_accuracy,
+            "quality_sample_domain": (
+                "runner_valid_runs_only"
+            ),
+            "quality_sample_includes_incomplete": True,
+            "quality_runs": len(quality_runs),
+            "quality_gate_eligible_runs": sum(
+                quality_details[item.run_id][0] for item in valid
+            ),
+            "quality_gate_excluded_runs": [
+                {
+                    "run_id": item.run_id,
+                    "reasons": quality_details[item.run_id][1],
+                    "completion_status": closeouts[item.run_id].completion_status,
+                    "submission_received": closeouts[item.run_id].submission_received,
+                    "finish_seen": closeouts[item.run_id].finish_seen,
+                }
+                for item in all_runs
+                if not quality_details[item.run_id][0]
+            ],
+            "complete_delivery_gate_excluded": [
+                {
+                    "run_id": item.run_id,
+                    "reasons": quality_details[item.run_id][1],
+                    "completion_status": closeouts[item.run_id].completion_status,
+                    "submission_received": closeouts[item.run_id].submission_received,
+                    "finish_seen": closeouts[item.run_id].finish_seen,
+                }
+                for item in valid
+                if not quality_details[item.run_id][0]
+            ],
+            "quality_excluded_runs": [
+                {
+                    "run_id": item.run_id,
+                    "reasons": quality_details[item.run_id][1],
+                    "completion_status": closeouts[item.run_id].completion_status,
+                    "submission_received": closeouts[item.run_id].submission_received,
+                    "finish_seen": closeouts[item.run_id].finish_seen,
+                }
+                for item in all_runs
+                if not item.valid
+            ],
+            "complete_delivery": {
+                "sample_domain": (
+                    "runner_valid_runs_with_complete_delivery_gates_only"
+                ),
+                "runs": len(complete_delivery_runs),
+                "run_ids": [item.run_id for item in complete_delivery_runs],
+                "aggregate_quality": _aggregate_quality_payload(
+                    complete_delivery_aggregate
+                ),
+                "quality": [
+                    row for row in quality_rows if row["quality_gate_eligible"]
+                ],
             },
+            "aggregate_quality": _aggregate_quality_payload(aggregate),
             "aggregate_process": {
                 "provider_attempt_count": aggregate.provider_attempt_count,
                 "successful_prompt_tokens": aggregate.successful_prompt_tokens,
@@ -1683,8 +2069,17 @@ def compact_summary(payload: dict[str, Any]) -> dict[str, Any]:
                     aggregate.graph_reviewer_role_coverage
                 ),
             },
+            "aggregate_cost": aggregate_cost,
+            "cost_sample_domain": "all_attempts_including_invalid",
+            "delivery": delivery_summary,
+            "delivery_sample_domain": "all_attempts_including_invalid",
+            "delivery_complete_runs": delivery_complete_count,
+            "delivery_complete_rate": delivery_complete_rate,
+            "end_to_end_delivery_rate": delivery_complete_rate,
             "structural_metrics": _structural_metrics_payload(
-                _aggregate_run_structural_metrics([item.result for item in valid])
+                _aggregate_run_structural_metrics(
+                    [item.result for item in quality_runs]
+                )
             ),
             "quality": quality_rows,
             "cost": cost_rows,
@@ -1694,6 +2089,10 @@ def compact_summary(payload: dict[str, Any]) -> dict[str, Any]:
                     [row["end_to_end_latency_seconds"] for row in cost_rows]
                 ),
                 "total_tokens": _stats([row["total_tokens"] for row in cost_rows]),
+                "usage_known_rate": _ratio(
+                    sum(bool(row["usage_known"]) for row in cost_rows),
+                    len(cost_rows),
+                ),
                 "pass_at_k": max(
                     (
                         row["hit_rate"]
@@ -1711,6 +2110,29 @@ def compact_summary(payload: dict[str, Any]) -> dict[str, Any]:
         records=records,
         variants=variants,
     )
+    quality_ready = runner_ready and all(
+        variants[item]["invalid_runs"] == 0
+        and variants[item]["valid_runs"] > 0
+        and variants[item]["quality_gate_eligible_runs"]
+        == variants[item]["valid_runs"]
+        for item in variants
+    )
+    overall_closeouts = [_record_closeout(item) for item in records]
+    overall_delivery_complete_count = sum(
+        closeout.delivery_complete for closeout in overall_closeouts
+    )
+    overall_delivery_rate = _ratio(
+        overall_delivery_complete_count, len(records)
+    )
+    overall_delivery = {
+        "sample_domain": "all_attempts_including_invalid",
+        "attempt_count": len(records),
+        "delivery_complete_count": overall_delivery_complete_count,
+        "delivery_complete_rate": overall_delivery_rate,
+        "end_to_end_delivery_rate": overall_delivery_rate,
+        "invalid_attempt_count": sum(not item.valid for item in records),
+        "valid_attempt_count": sum(item.valid for item in records),
+    }
     return (
         {
             key: payload[key]
@@ -1734,6 +2156,7 @@ def compact_summary(payload: dict[str, Any]) -> dict[str, Any]:
         | {
             "experiment_contract_hash": payload.get("experiment_contract_hash"),
             "checkpoint": payload.get("checkpoint"),
+            "round_contract": payload.get("round_contract"),
         }
         | {
             "fixtures": [
@@ -1768,6 +2191,13 @@ def compact_summary(payload: dict[str, Any]) -> dict[str, Any]:
                 if not item.valid
             ],
             "runner_readiness": runner_ready,
+            "runner_readiness_scope": "runtime_variant_contract_only",
+            "quality_readiness": quality_ready,
+            "delivery": overall_delivery,
+            "delivery_sample_domain": "all_attempts_including_invalid",
+            "delivery_complete_runs": overall_delivery_complete_count,
+            "delivery_complete_rate": overall_delivery_rate,
+            "end_to_end_delivery_rate": overall_delivery_rate,
             "ready_for_formal_paired_ab": False,
             "readiness_note": "Runner evidence only; final readiness additionally requires automated test results and frozen-file audit.",
         }

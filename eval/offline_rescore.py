@@ -18,10 +18,11 @@ from typing import Any
 
 from eval.run_summary import extract_review_process_metrics
 from eval.runner import (
+    V3_CONTENT_JUDGMENT_VERSION,
     _effective_review_issues,
     _match_issues_for_version,
     _root_cause_quality_for_version,
-    _v3_duplicate_actual_count,
+    _v3_duplicate_actual_stats,
     _v3_eval_eligibility,
     load_fixtures,
 )
@@ -30,7 +31,7 @@ from src.analyzer.location import normalize_location
 from src.analyzer.schemas import ReviewResponse
 
 
-RESCORE_VERSION = "offline-rescore-v2"
+RESCORE_VERSION = "offline-rescore-v4"
 V3_ADAPTER_VERSION = "v3-runtime-boundary-v1"
 
 
@@ -100,6 +101,76 @@ def _git_commit(repo_root: Path) -> str:
     except (OSError, subprocess.CalledProcessError):
         return "unknown"
     return completed.stdout.strip() or "unknown"
+
+
+def _is_generated_rescore_path(value: str) -> bool:
+    normalized = value.replace("\\", "/")
+    return normalized.startswith("eval/reports/") and normalized.endswith(".json")
+
+
+def _git_worktree_trace(repo_root: Path) -> dict[str, Any]:
+    """Capture the HEAD base and current patch state without changing Git state."""
+
+    try:
+        status = subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        ).stdout
+        tracked_patch = subprocess.run(
+            ["git", "diff", "--binary", "--no-ext-diff", "HEAD", "--"],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+        ).stdout
+        untracked = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+        ).stdout.decode("utf-8", errors="replace")
+    except (OSError, subprocess.CalledProcessError) as exc:
+        return {
+            "scoring_worktree_dirty": None,
+            "scoring_worktree_status": [],
+            "scoring_worktree_patch_sha256": "",
+            "scoring_worktree_trace_error": str(exc),
+        }
+
+    status_lines = [
+        line
+        for line in status.splitlines()
+        if line.strip() and not _is_generated_rescore_path(line[3:].strip())
+    ]
+    untracked_files: list[dict[str, str]] = []
+    for raw_path in untracked.split("\x00"):
+        path_value = raw_path.strip()
+        if not path_value or _is_generated_rescore_path(path_value):
+            continue
+        path = repo_root / Path(path_value)
+        if path.is_file():
+            untracked_files.append(
+                {
+                    "path": path_value.replace("\\", "/"),
+                    "sha256": _sha256(path),
+                }
+            )
+    untracked_files.sort(key=lambda item: item["path"])
+    trace_payload = {
+        "status": status_lines,
+        "tracked_patch_sha256": hashlib.sha256(tracked_patch).hexdigest(),
+        "untracked_files": untracked_files,
+    }
+    return {
+        "scoring_worktree_dirty": bool(status_lines or untracked_files),
+        "scoring_worktree_status": status_lines,
+        "scoring_worktree_patch_sha256": _canonical_sha256(trace_payload),
+        "scoring_worktree_trace_error": "",
+    }
 
 
 def _last_funnel_payload(events: list[dict[str, Any]]) -> dict[str, Any]:
@@ -481,6 +552,7 @@ def _run_view(
         match.role_match_diagnostics.get("semantic_status") == "undetermined"
         for match in matches
     )
+    duplicate_stats = _v3_duplicate_actual_stats(actual_issues)
     funnel = _last_funnel_payload(events)
     external_status = str(response.external_publish_status)
     external_published_count = int(funnel.get("external_published_count", 0) or 0)
@@ -523,14 +595,19 @@ def _run_view(
             root_cause_quality.get("repair_unit_matched_count") or 0
         ),
         "semantic_undetermined_count": semantic_undetermined_count,
-        "duplicate_actual_count": _v3_duplicate_actual_count(actual_issues),
+        "duplicate_actual_count": duplicate_stats["duplicate_count"],
+        "duplicate_candidate_pair_count": duplicate_stats["candidate_pair_count"],
+        "semantic_rule_version": V3_CONTENT_JUDGMENT_VERSION,
         "root_cause_quality": root_cause_quality,
         "gold_match_details": _gold_match_details(fixture, matches, actual_issues),
         "finding_decisions": _finding_decisions(response, actual_issues, matches),
         "metric_change_reason": (
             "v3 final findings use runtime receipt/version/evidence bindings; "
             "semantic-v3-content-v1 consumes description, anchor, related_locations, "
-            "suggestion, and evidence_refs. Legacy narrative fields are not consulted."
+            "suggestion, and evidence_refs. Its conservative judgment version "
+            f"is {V3_CONTENT_JUDGMENT_VERSION}; nonidentical shared-evidence pairs "
+            "are candidates only and do not prove semantic or repair agreement. "
+            "Legacy narrative fields are not consulted."
         ),
         "token_accounting": _token_accounting(
             result, events, journal_rows, process_metrics
@@ -648,9 +725,11 @@ def rescore_experiment(
                     source_manifest.append(entry)
     source_manifest.sort(key=lambda item: item["path"])
     source_digest = _canonical_sha256(source_manifest)
+    worktree_trace = _git_worktree_trace(repo_root)
     return {
         "schema_version": "offline-rescore-result-v1",
         "rescore_version": RESCORE_VERSION,
+        "semantic_rule_version": V3_CONTENT_JUDGMENT_VERSION,
         "generated_at": str(summary.get("generated_at", "")),
         "source_experiment_id": str(raw.get("experiment_id", "")),
         "source_suite": str(raw.get("suite", summary.get("suite", ""))),
@@ -664,12 +743,15 @@ def rescore_experiment(
         "scoring_commit": _git_commit(repo_root),
         "scoring_code_digest": _canonical_sha256(
             {
+                "core_eval": _sha256(repo_root / "eval" / "core_eval.py"),
                 "module": _sha256(Path(__file__)),
                 "runner": _sha256(repo_root / "eval" / "runner.py"),
                 "run_summary": _sha256(repo_root / "eval" / "run_summary.py"),
                 "schemas": _sha256(repo_root / "eval" / "schemas.py"),
             }
         ),
+        "scoring_commit_role": "HEAD base for the current scoring worktree",
+        **worktree_trace,
         "finding_contract_version": "3.0",
         "source_matcher_versions": sorted(
             {

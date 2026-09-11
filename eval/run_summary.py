@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any, Literal, Mapping
 
 from pydantic import BaseModel, Field
 
@@ -25,6 +26,648 @@ class EvalRunSummaryReport(BaseModel):
     finding_contract_version: str = "unknown"
     report_path: str = ""
     runs: list[RunSummary] = Field(default_factory=list)
+
+
+class EvalRuntimeCloseout(BaseModel):
+    """Auditable runtime closeout facts kept separate from model finish facts.
+
+    ``submission_received`` is deliberately a handoff fact.  For finding
+    contract 3.0 it means that the runtime handed its current Registry
+    candidate set to the downstream gates; it is not evidence that the model
+    called ``finish_review``.  ``finish_seen`` is populated only from a
+    successful tool event in the event timeline.
+    """
+
+    schema_version: str = "eval-runtime-closeout-v1"
+    finding_contract_version: str = "unknown"
+    completion_status: Literal["complete", "incomplete", "unknown"] = "unknown"
+    finding_run_status: str = ""
+    finish_seen: bool = False
+    investigation_ready: bool = False
+    submission_received: bool = False
+    review_complete: bool = False
+    delivery_complete: bool = False
+    report_ready: bool = False
+    external_publish_status: str = "not_requested"
+    incomplete_reasons: list[str] = Field(default_factory=list)
+
+
+class EvalAttemptCost(BaseModel):
+    """Attempt-level token accounting for one eval run.
+
+    Costs include unsuccessful provider attempts.  A run with an attempt whose
+    usage is unavailable retains ``None`` for the affected total rather than
+    turning the missing usage into a misleading zero.
+    """
+
+    schema_version: str = "eval-attempt-cost-v1"
+    provider_attempt_count: int = Field(default=0, ge=0)
+    reviewer_provider_attempt_count: int = Field(default=0, ge=0)
+    verifier_provider_attempt_count: int = Field(default=0, ge=0)
+    successful_attempt_count: int = Field(default=0, ge=0)
+    failed_attempt_count: int = Field(default=0, ge=0)
+    known_usage_attempt_count: int = Field(default=0, ge=0)
+    unknown_usage_attempt_count: int = Field(default=0, ge=0)
+    reviewer_unknown_usage_attempt_count: int = Field(default=0, ge=0)
+    verifier_unknown_usage_attempt_count: int = Field(default=0, ge=0)
+    usage_known: bool = True
+    cost_status: Literal["no_provider_attempt", "complete", "partial_unknown_usage"] = (
+        "no_provider_attempt"
+    )
+    prompt_tokens: int | None = Field(default=None, ge=0)
+    completion_tokens: int | None = Field(default=None, ge=0)
+    reasoning_tokens: int | None = Field(default=None, ge=0)
+    total_tokens: int | None = Field(default=None, ge=0)
+    successful_prompt_tokens: int = Field(default=0, ge=0)
+    successful_completion_tokens: int = Field(default=0, ge=0)
+    successful_reasoning_tokens: int = Field(default=0, ge=0)
+    successful_total_tokens: int = Field(default=0, ge=0)
+    successful_cached_prompt_tokens: int = Field(default=0, ge=0)
+    successful_adjacent_common_prefix_tokens: int = Field(default=0, ge=0)
+    reviewer_total_tokens: int | None = Field(default=0, ge=0)
+    verifier_total_tokens: int | None = Field(default=0, ge=0)
+
+
+def extract_runtime_closeout(
+    event_log_path: str | Path | None,
+    *,
+    raw_output: Mapping[str, Any] | None = None,
+    finding_contract_version: str | None = None,
+) -> EvalRuntimeCloseout:
+    """Extract closeout status without treating handoff as model finish.
+
+    Status fields may be recovered from the response envelope when an event
+    log is unavailable, but ``finish_seen`` never is: only a successful
+    ``finish_review`` tool event is authoritative for that audit fact.
+    """
+
+    raw = raw_output if isinstance(raw_output, Mapping) else {}
+    contract_version = _first_non_empty_string(
+        finding_contract_version,
+        raw.get("finding_contract_version"),
+        _nested_report_value(raw, "schema_version"),
+    ) or "unknown"
+    completion_status: str | None = None
+    finding_run_status: str | None = None
+    submission_received: bool | None = None
+    investigation_ready: bool | None = None
+    review_complete: bool | None = None
+    delivery_complete: bool | None = None
+    report_ready: bool | None = None
+    external_publish_status: str | None = None
+    incomplete_reasons: list[str] | None = None
+    finish_seen = False
+
+    path = Path(event_log_path) if event_log_path else None
+    if path is not None and path.is_file():
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeError):
+            lines = []
+        for raw_line in lines:
+            if not raw_line.strip():
+                continue
+            try:
+                event = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            payload = event.get("payload", {})
+            if not isinstance(payload, Mapping):
+                payload = {}
+            event_type = str(event.get("event_type", ""))
+            phase = str(event.get("phase", ""))
+
+            # TOOL_CALL and TOOL_IO are two projections of the same action in
+            # current timelines.  This is a boolean audit fact, so observing
+            # both must not double count it.
+            if event_type in {"tool_call", "tool_io"}:
+                name = _first_non_empty_string(
+                    payload.get("name"), payload.get("tool_name")
+                )
+                if name == "finish_review" and payload.get("ok") is True:
+                    finish_seen = True
+
+            if event_type == "finding_funnel_completed" or (
+                event_type == "phase_end" and phase == "review_complete"
+            ):
+                candidate_contract = _first_non_empty_string(
+                    payload.get("finding_contract_version")
+                )
+                if candidate_contract:
+                    contract_version = candidate_contract
+                status = _first_non_empty_string(
+                    payload.get("completion_status"),
+                    payload.get("finding_run_status"),
+                    payload.get("run_status"),
+                )
+                if status in {"complete", "incomplete"}:
+                    completion_status = status
+                    finding_run_status = status
+                for name in (
+                    "investigation_ready",
+                    "submission_received",
+                    "review_complete",
+                    "delivery_complete",
+                    "report_ready",
+                ):
+                    value = payload.get(name)
+                    if isinstance(value, bool):
+                        if name == "submission_received":
+                            submission_received = value
+                        elif name == "investigation_ready":
+                            investigation_ready = value
+                        elif name == "review_complete":
+                            review_complete = value
+                        elif name == "delivery_complete":
+                            delivery_complete = value
+                        else:
+                            report_ready = value
+                publish_status = payload.get("external_publish_status")
+                if isinstance(publish_status, str) and publish_status.strip():
+                    external_publish_status = publish_status.strip()
+                reasons = payload.get("incomplete_reasons")
+                if isinstance(reasons, list):
+                    incomplete_reasons = [
+                        str(reason).strip()
+                        for reason in reasons
+                        if str(reason).strip()
+                    ]
+
+    # Status fallback is intentionally limited to explicit response fields.
+    # In particular, do not read a cached ``finish_seen`` value from a result
+    # projection: that would allow a report artifact to manufacture the model
+    # finish audit.
+    raw_status = _runtime_status_mapping(raw)
+    if not contract_version or contract_version == "unknown":
+        contract_version = _first_non_empty_string(
+            raw_status.get("finding_contract_version")
+        ) or "unknown"
+    if completion_status is None:
+        candidate = _first_non_empty_string(
+            raw.get("completion_status"),
+            raw.get("finding_run_status"),
+            raw_status.get("completion_status"),
+            raw_status.get("finding_run_status"),
+        )
+        if candidate in {"complete", "incomplete"}:
+            completion_status = candidate
+    if finding_run_status is None:
+        candidate = _first_non_empty_string(
+            raw.get("finding_run_status"),
+            raw.get("completion_status"),
+            raw_status.get("finding_run_status"),
+            raw_status.get("completion_status"),
+        )
+        if candidate:
+            finding_run_status = candidate
+    for name in (
+        "investigation_ready",
+        "submission_received",
+        "review_complete",
+        "delivery_complete",
+        "report_ready",
+    ):
+        raw_value = raw.get(name)
+        if not isinstance(raw_value, bool):
+            raw_value = raw_status.get(name)
+        if locals()[name] is None and isinstance(raw_value, bool):
+            if name == "investigation_ready":
+                investigation_ready = raw_value
+            elif name == "submission_received":
+                submission_received = raw_value
+            elif name == "review_complete":
+                review_complete = raw_value
+            elif name == "delivery_complete":
+                delivery_complete = raw_value
+            else:
+                report_ready = raw_value
+    if external_publish_status is None:
+        raw_publish_status = raw.get(
+            "external_publish_status", raw_status.get("external_publish_status")
+        )
+        if isinstance(raw_publish_status, str) and raw_publish_status.strip():
+            external_publish_status = raw_publish_status.strip()
+    if incomplete_reasons is None:
+        raw_reasons = raw.get("incomplete_reasons", raw_status.get("incomplete_reasons"))
+        if isinstance(raw_reasons, list):
+            incomplete_reasons = [
+                str(reason).strip()
+                for reason in raw_reasons
+                if str(reason).strip()
+            ]
+
+    if completion_status is None and finding_run_status in {"complete", "incomplete"}:
+        completion_status = finding_run_status
+    return EvalRuntimeCloseout(
+        finding_contract_version=contract_version,
+        completion_status=completion_status or "unknown",
+        finding_run_status=finding_run_status or "",
+        finish_seen=finish_seen,
+        investigation_ready=bool(investigation_ready),
+        submission_received=bool(submission_received),
+        review_complete=bool(review_complete),
+        delivery_complete=bool(delivery_complete),
+        report_ready=bool(report_ready),
+        external_publish_status=external_publish_status or "not_requested",
+        incomplete_reasons=incomplete_reasons or [],
+    )
+
+
+def extract_attempt_cost(
+    event_log_path: str | Path | None,
+    *,
+    metrics: ReviewProcessMetrics | None = None,
+    fallback_total_tokens: int | None = None,
+) -> EvalAttemptCost:
+    """Reconcile all provider attempts into reviewer/verifier/total cost.
+
+    The runtime emits reviewer attempts as ``model_call/provider_attempt``
+    events and semantic verifier aggregates as a
+    ``finding_verification_completed`` event.  If a direct verifier attempt
+    stream is present, its aggregate event is not counted a second time.
+    """
+
+    events = _read_jsonl_events(event_log_path)
+    provider_rows = [
+        event
+        for event in events
+        if event.get("event_type") == "model_call"
+        and event.get("phase") == "provider_attempt"
+    ]
+    verifier_provider_rows = [
+        event for event in provider_rows if _is_verifier_event(event)
+    ]
+    reviewer_provider_rows = [
+        event for event in provider_rows if not _is_verifier_event(event)
+    ]
+    semantic_rows = [
+        event
+        for event in events
+        if event.get("event_type") == "finding_verification_completed"
+        and _is_verifier_event(event)
+        and isinstance(event.get("payload"), Mapping)
+        and "provider_attempt_count" in event["payload"]
+    ]
+
+    reviewer = _cost_from_attempt_rows(reviewer_provider_rows)
+    verifier = _cost_from_attempt_rows(verifier_provider_rows)
+    verifier_from_events = bool(verifier_provider_rows)
+    if not verifier_from_events:
+        verifier = _cost_from_semantic_rows(semantic_rows)
+
+    if not provider_rows and not semantic_rows and metrics is not None:
+        return _cost_from_metrics(metrics, fallback_total_tokens)
+
+    provider_attempt_count = (
+        reviewer["attempt_count"] + verifier["attempt_count"]
+    )
+    failed_attempt_count = reviewer["failed_count"] + verifier["failed_count"]
+    known_usage_attempt_count = (
+        reviewer["known_count"] + verifier["known_count"]
+    )
+    unknown_usage_attempt_count = (
+        reviewer["unknown_count"] + verifier["unknown_count"]
+    )
+    total_tokens = (
+        reviewer["total_tokens"] + verifier["total_tokens"]
+        if unknown_usage_attempt_count == 0
+        else None
+    )
+    reviewer_total_tokens = (
+        reviewer["total_tokens"]
+        if reviewer["unknown_count"] == 0
+        else None
+    )
+    verifier_total_tokens = (
+        verifier["total_tokens"]
+        if verifier["unknown_count"] == 0
+        else None
+    )
+    if provider_attempt_count == 0:
+        cost_status: Literal[
+            "no_provider_attempt", "complete", "partial_unknown_usage"
+        ] = "no_provider_attempt"
+    elif unknown_usage_attempt_count:
+        cost_status = "partial_unknown_usage"
+    else:
+        cost_status = "complete"
+    return EvalAttemptCost(
+        provider_attempt_count=provider_attempt_count,
+        reviewer_provider_attempt_count=reviewer["attempt_count"],
+        verifier_provider_attempt_count=verifier["attempt_count"],
+        successful_attempt_count=reviewer["successful_count"]
+        + verifier["successful_count"],
+        failed_attempt_count=failed_attempt_count,
+        known_usage_attempt_count=known_usage_attempt_count,
+        unknown_usage_attempt_count=unknown_usage_attempt_count,
+        reviewer_unknown_usage_attempt_count=reviewer["unknown_count"],
+        verifier_unknown_usage_attempt_count=verifier["unknown_count"],
+        usage_known=unknown_usage_attempt_count == 0,
+        cost_status=cost_status,
+        prompt_tokens=_sum_or_none(reviewer["prompt_tokens"], verifier["prompt_tokens"]),
+        completion_tokens=_sum_or_none(
+            reviewer["completion_tokens"], verifier["completion_tokens"]
+        ),
+        reasoning_tokens=_sum_or_none(
+            reviewer["reasoning_tokens"], verifier["reasoning_tokens"]
+        ),
+        total_tokens=total_tokens,
+        successful_prompt_tokens=reviewer["successful_prompt_tokens"]
+        + verifier["successful_prompt_tokens"],
+        successful_completion_tokens=reviewer["successful_completion_tokens"]
+        + verifier["successful_completion_tokens"],
+        successful_reasoning_tokens=reviewer["successful_reasoning_tokens"]
+        + verifier["successful_reasoning_tokens"],
+        successful_total_tokens=reviewer["successful_total_tokens"]
+        + verifier["successful_total_tokens"],
+        successful_cached_prompt_tokens=reviewer["successful_cached_prompt_tokens"]
+        + verifier["successful_cached_prompt_tokens"],
+        successful_adjacent_common_prefix_tokens=(
+            reviewer["successful_adjacent_common_prefix_tokens"]
+            + verifier["successful_adjacent_common_prefix_tokens"]
+        ),
+        reviewer_total_tokens=reviewer_total_tokens,
+        verifier_total_tokens=verifier_total_tokens,
+    )
+
+
+def _read_jsonl_events(event_log_path: str | Path | None) -> list[dict[str, Any]]:
+    """Read parseable event rows without making a malformed log look valid."""
+
+    if not event_log_path:
+        return []
+    path = Path(event_log_path)
+    if not path.is_file():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return []
+    events: list[dict[str, Any]] = []
+    for raw_line in lines:
+        if not raw_line.strip():
+            continue
+        try:
+            event = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+def _first_non_empty_string(*values: object) -> str:
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _nested_report_value(raw: Mapping[str, Any], key: str) -> object:
+    report = raw.get("report")
+    return report.get(key) if isinstance(report, Mapping) else None
+
+
+def _runtime_status_mapping(raw: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Return a cached status projection, excluding finish audit semantics."""
+
+    direct = raw.get("eval_runtime_closeout")
+    if isinstance(direct, Mapping):
+        return direct
+    runtime = raw.get("eval_runtime")
+    if isinstance(runtime, Mapping):
+        closeout = runtime.get("closeout")
+        if isinstance(closeout, Mapping):
+            return closeout
+    return {}
+
+
+def _is_verifier_event(event: Mapping[str, Any]) -> bool:
+    payload = event.get("payload", {})
+    if not isinstance(payload, Mapping):
+        payload = {}
+    phase = str(event.get("phase", "")).strip().lower()
+    stage = _first_non_empty_string(
+        payload.get("stage"), payload.get("logical_stage")
+    ).lower()
+    verifier_kind = str(payload.get("verifier_kind", "")).strip().lower()
+    return (
+        phase in {"semantic_verify_findings", "semantic_verifier", "semantic_investigation"}
+        or stage in {"semantic_verify_findings", "semantic_verifier", "semantic_investigation"}
+        or "semantic" in phase
+        or "semantic" in stage
+        or verifier_kind == "semantic_model"
+    )
+
+
+def _empty_cost_bucket() -> dict[str, Any]:
+    return {
+        "attempt_count": 0,
+        "successful_count": 0,
+        "failed_count": 0,
+        "known_count": 0,
+        "unknown_count": 0,
+        "total_tokens": 0,
+        "prompt_tokens": None,
+        "completion_tokens": None,
+        "reasoning_tokens": None,
+        "successful_prompt_tokens": 0,
+        "successful_completion_tokens": 0,
+        "successful_reasoning_tokens": 0,
+        "successful_total_tokens": 0,
+        "successful_cached_prompt_tokens": 0,
+        "successful_adjacent_common_prefix_tokens": 0,
+        "prompt_missing": False,
+        "completion_missing": False,
+        "reasoning_missing": False,
+    }
+
+
+def _cost_from_attempt_rows(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
+    bucket = _empty_cost_bucket()
+    for event in rows:
+        payload = event.get("payload", {})
+        if not isinstance(payload, Mapping):
+            payload = {}
+        bucket["attempt_count"] += 1
+        success = payload.get("success") is True
+        bucket["successful_count"] += int(success)
+        bucket["failed_count"] += int(not success)
+        total_tokens = _token_or_none(payload.get("total_tokens"))
+        usage_present = payload.get("usage_present") is True
+        usage_known = usage_present and total_tokens is not None
+        if usage_known:
+            bucket["known_count"] += 1
+            bucket["total_tokens"] += total_tokens
+            for field_name, missing_name in (
+                ("prompt_tokens", "prompt_missing"),
+                ("completion_tokens", "completion_missing"),
+                ("reasoning_tokens", "reasoning_missing"),
+            ):
+                value = _token_or_none(payload.get(field_name))
+                if value is None:
+                    bucket[missing_name] = True
+                else:
+                    bucket[field_name] = (bucket[field_name] or 0) + value
+            if success:
+                bucket["successful_prompt_tokens"] += _non_negative_int(
+                    payload.get("prompt_tokens")
+                )
+                bucket["successful_completion_tokens"] += _non_negative_int(
+                    payload.get("completion_tokens")
+                )
+                bucket["successful_reasoning_tokens"] += _non_negative_int(
+                    payload.get("reasoning_tokens")
+                )
+                bucket["successful_total_tokens"] += total_tokens
+                bucket["successful_cached_prompt_tokens"] += _non_negative_int(
+                    payload.get("cached_prompt_tokens")
+                )
+                bucket[
+                    "successful_adjacent_common_prefix_tokens"
+                ] += _non_negative_int(payload.get("adjacent_common_prefix_tokens"))
+        else:
+            bucket["unknown_count"] += 1
+    if bucket["attempt_count"] == 0:
+        bucket["prompt_tokens"] = None
+        bucket["completion_tokens"] = None
+        bucket["reasoning_tokens"] = None
+    else:
+        for field_name, missing_name in (
+            ("prompt_tokens", "prompt_missing"),
+            ("completion_tokens", "completion_missing"),
+            ("reasoning_tokens", "reasoning_missing"),
+        ):
+            if bucket[missing_name]:
+                bucket[field_name] = None
+    return bucket
+
+
+def _cost_from_semantic_rows(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
+    bucket = _empty_cost_bucket()
+    for event in rows:
+        payload = event.get("payload", {})
+        if not isinstance(payload, Mapping):
+            continue
+        attempts = _non_negative_int(payload.get("provider_attempt_count"))
+        failed = min(
+            attempts,
+            _non_negative_int(
+                payload.get(
+                    "failed_provider_attempt_count",
+                    payload.get("failed_attempt_count"),
+                )
+            ),
+        )
+        unknown = min(
+            attempts,
+            _non_negative_int(payload.get("failed_unknown_usage_count")),
+        )
+        total_tokens = _token_or_none(payload.get("total_tokens"))
+        if attempts and total_tokens is None:
+            unknown = attempts
+        bucket["attempt_count"] += attempts
+        bucket["failed_count"] += failed
+        bucket["successful_count"] += max(0, attempts - failed)
+        bucket["unknown_count"] += unknown
+        bucket["known_count"] += max(0, attempts - unknown)
+        if total_tokens is not None and unknown == 0:
+            bucket["total_tokens"] += total_tokens
+            bucket["successful_total_tokens"] += total_tokens
+        elif total_tokens is not None:
+            # The runtime's semantic aggregate is the successful/known token
+            # total.  Preserve that diagnostic even though the all-attempt
+            # total remains unknown because at least one attempt is missing.
+            bucket["successful_total_tokens"] += total_tokens
+        for field_name in (
+            "prompt_tokens",
+            "completion_tokens",
+            "reasoning_tokens",
+        ):
+            value = _token_or_none(payload.get(field_name))
+            if value is not None:
+                bucket[field_name] = (bucket[field_name] or 0) + value
+        bucket["successful_prompt_tokens"] += _non_negative_int(
+            payload.get("prompt_tokens")
+        )
+        bucket["successful_completion_tokens"] += _non_negative_int(
+            payload.get("completion_tokens")
+        )
+        bucket["successful_reasoning_tokens"] += _non_negative_int(
+            payload.get("reasoning_tokens")
+        )
+        bucket["successful_cached_prompt_tokens"] += _non_negative_int(
+            payload.get("cached_prompt_tokens")
+        )
+        bucket[
+            "successful_adjacent_common_prefix_tokens"
+        ] += _non_negative_int(payload.get("adjacent_common_prefix_tokens"))
+    return bucket
+
+
+def _cost_from_metrics(
+    metrics: ReviewProcessMetrics,
+    fallback_total_tokens: int | None,
+) -> EvalAttemptCost:
+    attempts = max(0, int(metrics.provider_attempt_count))
+    failed = max(0, int(metrics.failed_attempt_count))
+    unknown = max(0, int(metrics.failed_unknown_usage_count))
+    total_value = (
+        fallback_total_tokens
+        if fallback_total_tokens is not None
+        else metrics.total_tokens
+    )
+    total_tokens = None if unknown else max(0, int(total_value or 0))
+    if attempts == 0:
+        status: Literal["no_provider_attempt", "complete", "partial_unknown_usage"] = (
+            "no_provider_attempt"
+        )
+    elif unknown:
+        status = "partial_unknown_usage"
+    else:
+        status = "complete"
+    return EvalAttemptCost(
+        provider_attempt_count=attempts,
+        reviewer_provider_attempt_count=attempts,
+        successful_attempt_count=max(0, attempts - failed),
+        failed_attempt_count=failed,
+        known_usage_attempt_count=max(0, attempts - unknown),
+        unknown_usage_attempt_count=unknown,
+        reviewer_unknown_usage_attempt_count=unknown,
+        usage_known=unknown == 0,
+        cost_status=status,
+        total_tokens=total_tokens,
+        successful_prompt_tokens=metrics.successful_prompt_tokens,
+        successful_completion_tokens=metrics.successful_completion_tokens,
+        successful_reasoning_tokens=metrics.successful_reasoning_tokens,
+        successful_total_tokens=metrics.successful_total_tokens,
+        successful_cached_prompt_tokens=metrics.successful_cached_prompt_tokens,
+        successful_adjacent_common_prefix_tokens=(
+            metrics.successful_adjacent_common_prefix_tokens
+        ),
+        reviewer_total_tokens=(
+            None if unknown else metrics.reviewer_total_tokens or total_tokens or 0
+        ),
+        verifier_total_tokens=metrics.verifier_total_tokens,
+    )
+
+
+def _sum_or_none(left: int | None, right: int | None) -> int | None:
+    if left is None and right is None:
+        return None
+    return (left or 0) + (right or 0)
+
+
+def _token_or_none(value: object) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0, parsed)
 
 
 def summarize_eval_report(

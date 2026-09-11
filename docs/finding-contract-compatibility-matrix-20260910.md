@@ -1,6 +1,8 @@
 # MergeWarden Harness v3 全链路版本兼容矩阵
 
 日期：2026-09-10
+
+后续更新：本矩阵的“Graph A/B pilot v2-only”记录已由 `docs/finding-delivery-python-three-v3-20260910.md` 所述小范围适配取代。pilot 现支持兼容 matcher 下的 v3 review 配对生命周期，仍拒绝不兼容 matcher 和 v3 debug；生产 root-cause consolidation 的 v3 隔离不变。
 范围：版本传播、数据适配、消费语义、验收覆盖。未调用真实模型、付费 provider 或真实发布接口；没有修改原始 finding、gold、receipt、.env 或全局 Git 配置。Harness v3 仍保持非默认状态。
 
 ## 先固定各版本轴
@@ -33,42 +35,42 @@
 | Final response → GitHub adapter/publisher | github_adapter.build_github_advisory_payload 展示 description/evidence_refs 的 v3 分支；GitHubPublisher.publish 在非 dry-run 前调用 validate_v3_publish_binding。 | v3 展示分支保留；dry-run 只生成本地计划，ready 不被改写为 published。真实发布仍需 receipt、内容版本和 evidence digest。 | 空 v3 需 complete、delivery_complete、report_ready 才可被判为 ready；缺批准不能进真实发布；legacy v2 分支保留。 | src/integrations/github_adapter.py、src/integrations/github_publisher.py；现有 GitHub v3/legacy dry-run 回归及空报告测试。**已修复/正确兼容**。 |
 | Funnel/journal → summary/status/cost | AgentOrchestrator._record_finding_funnel、src.analyzer.run_summary.RunSummary、eval.run_summary.extract_review_process_metrics、ReviewProcessMetrics。 | 版本从 finding funnel/response 的实际运行字段取；Reviewer、Verifier、调查、repair、provider attempt 分开计数。缺 usage 保持 unknown。 | report_ready、delivery_complete、external_publish_status 各自保留；natural stop 由 termination reason 表示，不由 finding 数量推断；malformed 历史证据不足不补造。 | src/analyzer/run_summary.py、eval/run_summary.py、四条 journal/event log；离线报告 token/accounting 和 Haystack A 诊断。**已修复/历史限制明确**。 |
 | Main eval entry → matcher | eval.runner.run_single/run_suite 先用 settings 做兼容预检，再在解析后用明确 report schema 二次校验。 | semantic-v2/历史 semantic-v3 的旧语义保持冻结；semantic-v3-content-v1 只消费 v3 自有内容。 | semantic-v4 + 3.0、历史 matcher + 3.0 等不支持组合启动前拒绝；混合 report 不评分；gold 只进入评分，不进入 registry/verifier/effective selection。 | eval/schemas.py::validate_eval_matcher_contract、eval/runner.py::_match_issues_for_version；首轮错配回归和新 content matcher 回归。**已修复**。 |
-| New v3 matcher → dimensions | eval.runner._match_issues_v3_content、_v3_content_dimensions。 | 逐维消费 location（anchor/related locations）、severity floor、description/suggestion semantic、repair suggestion、affected paths、evidence refs；一对一分配。 | semantic/repair 规则不足时输出 undetermined 原因；不以位置重叠即命中。approved count、location、severity、root/semantic、repair、duplicate 分列。 | EvalIssueMatch.role_match_diagnostics、EvalResult 新维度字段；四条产物逐维断言。**已修复**。 |
+| New v3 matcher → dimensions | eval.runner._match_issues_v3_content、_v3_content_dimensions。 | 逐维消费 location（anchor/related locations）、severity floor、description/suggestion semantic、repair suggestion、affected paths、evidence refs；一对一分配。`semantic-v3-content-v1-conservative-v3` 只把去除首尾空白并统一换行后的完整文本相等作为正向证明。 | 不同文本一律 undetermined；不做极性、动作方向、词项序列或主题启发式判断；不以位置重叠即命中。简单候选排序若存在也不影响 matched/undetermined 或可靠 duplicate。 | EvalIssueMatch.role_match_diagnostics、EvalResult 新维度字段；严格版逐维产物见新增 `finding-delivery-python-ab-20260910-v3-offline-rescore-v4.json`。**已修复并版本化**。 |
 | Eval result → Core Eval | eval.core_eval.match_review_findings 保留 v2 _extract_generated_findings；v3 用 CORE_V3_MATCHER_VERSION，要求完整 ReviewResponse、report_ready、delivery_complete 和 runtime approval。 | v3 Core 只读 description/suggestion，不读 confidence/旧 narrative；v3 public slim payload 可显示但不可独立评分。 | raw dict 有 v3 issue 但无显式 report schema 直接拒绝；Core report 的 runs 混合 2.0/3.0 或 explicit/unknown 拒绝；图 A/B pilot 明确 v2-only。 | eval/core_eval.py、eval/graph_ab_pilot.py；Core 历史测试和 v3 approval/description 回归。**已修复/图 pilot 明确不支持 v3**。 |
-| Raw experiment → offline rescore | eval.offline_rescore.rescore_experiment 读取原始 final response、runtime registration/receipt、journal 和 event log；新 adapter 为 v3-runtime-boundary-v1，评分为 semantic-v3-content-v1。 | 只做带来源的评估适配；不写回 finding、receipt 或原始产物。source matcher 与 scoring matcher 分开记录。 | report 不是 3.0、记录不完整或 fixture 缺失会失败/列出 missing；Haystack A 保留 historical_evidence_insufficient_for_field_level_diagnosis。重复执行输出相同。 | eval/offline_rescore.py、eval/reports/finding-delivery-python-ab-20260910-v3-offline-rescore-v2.json；test_offline_rescore.py。**已修复/可追溯**。 |
+| Raw experiment → offline rescore | eval.offline_rescore.rescore_experiment 读取原始 final response、runtime registration/receipt、journal 和 event log；新 adapter 为 v3-runtime-boundary-v1，评分为 semantic-v3-content-v1。 | 只做带来源的评估适配；不写回 finding、receipt 或原始产物。source matcher 与 scoring matcher 分开记录。`offline-rescore-v2`、`offline-rescore-v3` 均保留历史冻结结果；严格版使用 `offline-rescore-v4` 新文件。 | report 不是 3.0、记录不完整或 fixture 缺失会失败/列出 missing；Haystack A 保留 historical_evidence_insufficient_for_field_level_diagnosis。只有共享 evidence 且完整位置/范围、正文、建议、severity 等关键字段严格一致才计 duplicate；其余共享证据关系单列 candidate pair。重复执行输出相同。 | eval/offline_rescore.py、历史 `finding-delivery-python-ab-20260910-v3-offline-rescore-v2.json`/`...-v3.json`、新增 `finding-delivery-python-ab-20260910-v3-offline-rescore-v4.json`；test_offline_rescore.py。**已修复/可追溯**。 |
 | Eval result → suite report/summary | eval.metrics.build_eval_report、EvalReport、EvalRunSummaryReport。 | report 同时携带 matcher 和 finding contract；MetricSummary 聚合 approved、severity、semantic-undetermined、duplicate 等字段。 | matcher 或 contract 混合、explicit 与 unknown 混合不能生成伪 mixed report；没有版本证据则保留 unknown，不伪称 v2/v3。 | eval/metrics.py、eval/schemas.py、eval/run_summary.py；test_eval_report_builder_rejects_mixed_contracts_and_matchers。**已修复**。 |
 
 ## P0 错配的修正口径
 
 旧的 eval.runner._issue_matches_expected_location_v3 在位置检查后仍比较 mechanism_pattern/invariant_pattern 与 causal_mechanism/violated_invariant。v3 这些兼容字段为空，所以七条真实 finding 的旧语义失败不能被归因为位置/严重性失败；_v4_root_cause_matches 也不能作为 v3 修复。
 
-本轮保留上述历史 matcher 的可复现路径，并新增明确声明的 semantic-v3-content-v1。新的匹配结果按以下顺序解释：
+本轮保留上述历史 matcher 的可复现路径，并新增明确声明的 `semantic-v3-content-v1` 保守评分规则 `semantic-v3-content-v1-conservative-v3`。新的匹配结果按以下顺序解释：
 
 1. approved_finding_count：是否通过运行时批准绑定；不看 gold。
 2. location_matched_count：anchor、primary anchor 或 related location 是否满足 gold 位置。
 3. severity_matched_count：severity 是否达到 gold floor。
-4. root_cause_matched_count / semantic_status：只比较 gold 评分适配与 v3 description/suggestion，规则不能可靠判定就 undetermined。
-5. repair_unit_matched_count：只比较 v3 suggestion 与 gold repair unit。
+4. root_cause_matched_count / semantic_status：只比较 gold 评分适配与 v3 description；仅去除首尾空白、统一换行后的完整文本相等才给正向证明，不同文本保持 undetermined。
+5. repair_unit_matched_count：只比较 v3 suggestion 与 gold repair unit；同样只接受边界规范化后的完整文本相等，不凭词汇推断相反修复。
 6. matched_count：以上必需维度完整满足后的 gold 一对一命中；不是位置重叠计数。
-7. duplicate_actual_count：同一运行内共享 evidence refs 且内容 tag/Jaccard 一致的 approved findings 的重复数，独立于 recall，不删除 finding。
+7. duplicate_actual_count：同一运行内只有在共享非空 evidence refs 且完整位置/范围（含适用的 related locations）、description、suggestion、severity 等关键字段严格一致时才计重复；不确定关系单列 candidate pair，独立于 recall，不删除 finding。
 
-因此，“位置/严重性失败”的旧诊断已修正为逐维事实；Pydantic 的未知键丢失与 gold 的私有键重新分类被判为不同 semantic，而不是位置重叠命中。
+因此，“位置/严重性失败”的旧诊断已修正为逐维事实；Pydantic 的未知键丢失不足以证明与 gold 的私有键重新分类属于同一 semantic，保守保持 undetermined，而不是位置重叠命中。自动未判定不等于真实漏检或误报。
 
 ## 四条固定真实产物的离线结果
 
 输入固定为现有 raw.json、summary.json、checkpoint.jsonl、四份 journal/event log 和现有 fixtures。下表中的 A/B2 由 variant_id 区分；未修改任何输入。
 
-| 运行 | raw finding | runtime approved | matched | location | severity | semantic/root | repair | semantic undetermined | duplicate | status / ready / external |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| Pydantic A (A-agent-search) | 2 | 2 | 0 | 1 | 1 | 0 | 1 | 0 | 1 | complete / true / ready |
-| Pydantic B2 (B2-graph-hybrid-warm) | 2 | 2 | 0 | 1 | 1 | 0 | 0 | 0 | 1 | complete / true / ready |
-| Haystack B2 (B2-graph-hybrid-warm) | 3 | 3 | 1 | 1 | 1 | 1 | 1 | 0 | 2 | complete / true / ready |
-| Haystack A (A-agent-search) | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | incomplete / false / not_requested |
+| 运行 | raw finding | runtime approved | matched | location | severity | semantic/root | repair | semantic undetermined | duplicate | duplicate candidates | status / ready / external |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| Pydantic A (A-agent-search) | 2 | 2 | 0 | 1 | 1 | 0 | 0 | 1 | 0 | 1 | complete / true / ready |
+| Pydantic B2 (B2-graph-hybrid-warm) | 2 | 2 | 0 | 1 | 1 | 0 | 0 | 1 | 0 | 1 | complete / true / ready |
+| Haystack B2 (B2-graph-hybrid-warm) | 3 | 3 | 0 | 1 | 1 | 0 | 0 | 1 | 0 | 3 | complete / true / ready |
+| Haystack A (A-agent-search) | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | incomplete / false / not_requested |
 
 解释：
 
-- Pydantic 两个 approved finding 位于同一根问题相关区域，但 v3 description 是“未知键丢失”，gold 是“私有属性重新分类”，所以 semantic 不匹配；位置和严重性各自通过，不能折叠成“位置失败”，也不能位置重叠即命中。
-- Haystack B2 三个位置描述同一 unsafe file_path metadata access；只有一个 gold 命中，另外两个进入独立 duplicate 计数（2），不是三个 gold 命中。
+- Pydantic 两个 approved finding 位于同一根问题相关区域，但 v3 description 是“未知键丢失”，gold 是“私有属性重新分类”；保守规则没有足够正文证据，因此 semantic 为 undetermined，不强行维持旧分数。位置和严重性各自通过，不能折叠成“位置失败”，也不能位置重叠即命中。
+- Pydantic A/B2 的共享 evidence 关系均不满足完整严格 fingerprint，只列候选（各 1），不计 duplicate；Haystack B2 的 3 对共享 evidence 关系同样全部列 candidate，不自动计 duplicate。
 - Haystack A 的历史记录能证明 malformed verifier decision 和 unresolved；没有原始 verifier response/request 绑定，字段级原因不可恢复，保持 unknown/证据不足。
 - 三条已完成内部交付的 external 状态都是 ready 而非 published；本轮没有调用发布接口。
 
@@ -99,12 +101,13 @@
 
 - 没有重新调用真实模型，所以没有对模型准确率、provider 兼容性、实际费用或真实 external publish 成功作结论。
 - v3 root-cause 合并仍待未来单独设计和验收；当前边界是安全隔离。
-- 离线语义规则未覆盖的 gold 语义保持 undetermined，没有启用 LLM judge。
+- 离线语义规则未覆盖的 gold 语义保持 undetermined；严格文本相等只证明文本一致，不声称通用语义能力；人工语义审计独立于自动分数，也不把自动未判定描绘成真实漏检/误报。
 
 ## 验证命令与结果
 
-- 聚焦兼容、主评估、Core、离线重评分、Harness v3、API/CLI、v2 回放和 artifact 回归：见 tests/test_v3_compatibility_regressions.py、tests/test_offline_rescore.py 及受影响测试集合。
-- python -m ruff check ...：通过。
-- python -m compileall -q -i -（rg 列出 src、eval、tests 中的 Python 源文件，排除历史 eval/outputs、experiments、replays 缓存）：通过；直接递归历史缓存目录不作为源码验证入口。
+- 聚焦兼容、主评估、Core、离线重评分、Harness v3、API/CLI、v2 回放和 artifact 回归：见 tests/test_v3_compatibility_regressions.py、tests/test_offline_rescore.py 及受影响测试集合；新增保守规则成对反例回归。
+- `python -m ruff check .`：通过。
+- `python -m mypy src`：通过，94 个 source files；没有用未执行的“101 个旧错误”与父提交作无证据对照。
+- `python -m compileall -q eval/runner.py eval/core_eval.py eval/offline_rescore.py tests/test_v3_compatibility_regressions.py tests/test_offline_rescore.py`：通过。
 - git diff --check：通过；LF/CRLF warning 是仓库工作树基线，不是代码错误。
-- 全量 pytest、mypy 和最终 diff check 在本地交付前执行并记录在本次任务结果中；没有真实 provider 网络调用。
+- 新增版本化离线产物 `eval/reports/finding-delivery-python-ab-20260910-v3-offline-rescore-v4.json`，保留历史 `...-v2.json` 与 `...-v3.json`；没有真实 provider 网络调用。

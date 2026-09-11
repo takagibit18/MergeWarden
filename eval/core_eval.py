@@ -14,7 +14,11 @@ import click
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
-from eval.runner import _v3_eval_eligibility, run_single
+from eval.runner import (
+    _v3_eval_eligibility,
+    _v3_semantic_text_judgment,
+    run_single,
+)
 from eval.schemas import (
     DEFAULT_EVAL_MATCHER_VERSION,
     EvalResult,
@@ -696,11 +700,10 @@ def _match_review_findings_v3(
                 severity=issue.severity,
                 location=issue.location,
                 root_cause_id=issue.root_cause_id,
-                text=" ".join(
-                    value
-                    for value in (issue.description, issue.suggestion)
-                    if value.strip()
-                ),
+                # The v3 semantic decision is about the description.  Repair
+                # text remains a separate dimension in the main matcher and
+                # must not change Core's semantic proof input.
+                text=issue.description,
                 contract_version="3.0",
                 evidence_refs=[
                     str(item).strip()
@@ -796,17 +799,12 @@ def _generated_findings_are_duplicates(
     right: GeneratedFinding,
 ) -> bool:
     if left.contract_version == "3.0" or right.contract_version == "3.0":
-        shared_refs = set(left.evidence_refs).intersection(right.evidence_refs)
-        if not shared_refs:
-            return False
-        if (
-            left.root_cause_id
-            and left.root_cause_id == right.root_cause_id
-        ):
-            return True
-        left_tokens = _semantic_tokens(left.text)
-        right_tokens = _semantic_tokens(right.text)
-        return _jaccard(left_tokens, right_tokens) >= 0.35
+        # GeneratedFinding is an intentional Core projection.  It has no v3
+        # suggestion, related locations, or complete evidence content, so it
+        # cannot supply the strict duplicate fingerprint without losing fields.
+        # Keep v3 findings separate until that projection carries all required
+        # duplicate fields; do not infer equality from the remaining text.
+        return False
     if left.root_cause_id and left.root_cause_id == right.root_cause_id:
         return True
     left_location = normalize_location(left.location)
@@ -892,32 +890,20 @@ def _underlying_issue_score_v3(
     gold: GoldFinding,
     generated: GeneratedFinding,
 ) -> float | None:
-    """Use v3 description text, with a conservative semantic-tag guard."""
+    """Use the shared conservative v3 description judgment."""
 
     parsed = normalize_location(generated.location)
     if not parsed.valid or parsed.path != gold.file.replace("\\", "/"):
         return None
-    from eval.runner import _v3_semantic_tag
-
-    expected_text = " ".join((gold.description, gold.root_cause))
-    expected_tag = _v3_semantic_tag(expected_text)
-    actual_tag = _v3_semantic_tag(generated.text)
-    if expected_tag and actual_tag and expected_tag != actual_tag:
-        return None
-    expected_tokens = _semantic_tokens(expected_text)
-    actual_tokens = _semantic_tokens(generated.text)
-    common_count = len(expected_tokens & actual_tokens)
-    coverage = common_count / len(expected_tokens) if expected_tokens else 0.0
-    similarity = _jaccard(expected_tokens, actual_tokens)
-    semantic_match = (
-        bool(expected_tag and actual_tag and expected_tag == actual_tag)
-        or (common_count >= 3 and coverage >= 0.2 and similarity >= 0.12)
+    semantic_status, _ = _v3_semantic_text_judgment(
+        gold.description,
+        generated.text,
     )
-    if not semantic_match:
+    if semantic_status != "matched":
         return None
     if parsed.line is None:
-        location_score = 0.45
-    elif _ranges_near(
+        return None
+    if _ranges_near(
         parsed.line,
         parsed.end_line,
         gold.location.start_line,
@@ -935,14 +921,9 @@ def _underlying_issue_score_v3(
         location_score = 0.8
     else:
         location_score = 0.2
-    if location_score < 0.8 and not (
-        expected_tag and actual_tag and expected_tag == actual_tag
-    ):
+    if location_score < 0.8:
         return None
-    score = 0.45 * location_score + 0.4 * coverage + 0.15 * similarity
-    if expected_tag and actual_tag and expected_tag == actual_tag:
-        score = max(score, 0.9)
-    return min(1.0, round(score, 6))
+    return round(location_score, 6)
 
 
 def _ranges_near(
