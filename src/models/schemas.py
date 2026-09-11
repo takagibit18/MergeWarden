@@ -17,6 +17,12 @@ class ModelConfig(BaseModel):
     max_tokens: int = Field(
         default=2048, ge=1, le=128000, description="Maximum response tokens"
     )
+    call_token_budget: int | None = Field(
+        default=None,
+        ge=0,
+        exclude=True,
+        description="Runtime-only token allowance for this logical model call",
+    )
     top_p: float = Field(default=1.0, ge=0.0, le=1.0, description="Nucleus sampling")
     timeout: float = Field(
         default=90.0, gt=0.0, le=600.0, description="Request timeout in seconds"

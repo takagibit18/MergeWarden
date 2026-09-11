@@ -43,7 +43,9 @@ class RequestAssembler:
             "model": config.model,
             "messages": RequestAssembler._wire_messages(messages, profile),
             "temperature": config.temperature,
-            "max_tokens": config.max_tokens,
+            (
+                profile.compat.output_limit_parameter if profile else "max_tokens"
+            ): config.max_tokens,
             "top_p": config.top_p,
         }
         if tools:
@@ -52,6 +54,20 @@ class RequestAssembler:
             payload["tool_choice"] = config.tool_choice
         if config.extra_body is not None:
             payload["extra_body"] = config.extra_body
+        if profile is not None:
+            compat = profile.compat
+            if compat.fixed_temperature is not None:
+                payload["temperature"] = compat.fixed_temperature
+            if compat.fixed_top_p is not None:
+                payload["top_p"] = compat.fixed_top_p
+            if (
+                compat.thinking_format == "dashscope"
+                and not compat.supports_thinking_disable
+            ):
+                payload["extra_body"] = {
+                    **(config.extra_body or {}),
+                    "enable_thinking": True,
+                }
         if profile is not None and profile.compat.supports_reasoning_effort:
             if policy.thinking == "high":
                 payload["reasoning_effort"] = (
@@ -145,15 +161,12 @@ class RequestAssembler:
             )
 
         if estimate_request(selected) > budget:
-            removable = [
-                index
-                for index, item in enumerate(selected)
-                if item.role in {"assistant", "tool"} and not item.preserve_on_trim
-            ]
-            for index in reversed(removable):
+            removable_groups = cls._trim_groups(selected)
+            for group in reversed(removable_groups):
                 if estimate_request(selected) <= budget:
                     break
-                selected.pop(index)
+                for index in reversed(group):
+                    selected.pop(index)
                 trimmed = True
 
         if estimate_request(selected) > budget:
@@ -223,6 +236,26 @@ class RequestAssembler:
             trimmed=trimmed,
             dropped_message_count=max(0, original_count - len(selected)),
         )
+
+    @staticmethod
+    def _trim_groups(messages: list[Message]) -> list[list[int]]:
+        """Return removable assistant/tool units without creating orphans."""
+
+        groups: list[list[int]] = []
+        index = 0
+        while index < len(messages):
+            message = messages[index]
+            end = index + 1
+            if message.role == "assistant" and message.tool_calls:
+                while end < len(messages) and messages[end].role == "tool":
+                    end += 1
+            group = list(range(index, end))
+            if any(
+                messages[item].role in {"assistant", "tool"} for item in group
+            ) and all(not messages[item].preserve_on_trim for item in group):
+                groups.append(group)
+            index = end
+        return groups
 
     @staticmethod
     def _wire_messages(

@@ -23,6 +23,11 @@ class ProviderCompat(BaseModel):
     supports_tool_choice_with_thinking: bool = True
     requires_reasoning_replay_for_tool_calls: bool = False
     requires_assistant_content_for_tool_calls: bool = False
+    fixed_temperature: float | None = None
+    fixed_top_p: float | None = None
+    output_limit_parameter: Literal["max_tokens", "max_completion_tokens"] = (
+        "max_tokens"
+    )
 
 
 class ModelProfile(BaseModel):
@@ -82,6 +87,16 @@ def resolve_model_profile(settings: Settings, model: str) -> ModelProfile:
         compat = _DEEPSEEK_COMPAT
     elif provider == "dashscope":
         compat = _DASHSCOPE_COMPAT
+        if model.strip().lower() == "kimi-k3":
+            compat = ProviderCompat(
+                thinking_format="dashscope",
+                supports_thinking_disable=False,
+                requires_reasoning_replay_for_tool_calls=True,
+                requires_assistant_content_for_tool_calls=True,
+                fixed_temperature=1.0,
+                fixed_top_p=0.95,
+                output_limit_parameter="max_completion_tokens",
+            )
     elif provider in {"zhipu", "bigmodel", "zhipuai"}:
         provider = "zhipu"
         compat = _zhipu_compat(model)

@@ -31,6 +31,7 @@ from src.models.exceptions import (
 from src.models.compat import ModelCallPolicy, ModelProfile, resolve_model_profile
 from src.models.conversation import ModelConversation
 from src.models.request_assembler import RequestAssembler
+from src.models.receive_trace import ReceiveTrace, observe_headers, observed_await
 from src.models.schemas import Message, ModelConfig, ModelResponse, TokenUsage
 from src.models.token_telemetry import (
     common_prefix_tokens,
@@ -54,10 +55,16 @@ class ModelClient:
         if not self._settings.openai_api_key:
             raise AuthenticationError("OPENAI_API_KEY is empty or missing")
 
+        http_client = self._build_http_client()
+        http_client.event_hooks["response"].append(observe_headers)
         self._client = AsyncOpenAI(
             api_key=self._settings.openai_api_key,
             base_url=str(self._settings.openai_base_url),
-            http_client=self._build_http_client(),
+            http_client=http_client,
+            # The application loop below owns retry accounting.  Leaving the
+            # SDK default enabled would add hidden HTTP attempts and make the
+            # provider-attempt ledger and hard-budget checks inaccurate.
+            max_retries=0,
         )
         default_config_kwargs: dict[str, Any] = {
             "model": self._settings.model_name,
@@ -76,6 +83,9 @@ class ModelClient:
         self._last_call_attempts: list[dict[str, Any]] = []
         self._last_request_text = ""
         self._request_telemetry: dict[str, Any] = {}
+        self._last_call_budget_reserved_tokens = 0
+        self._last_call_budget_remaining_tokens: int | None = None
+        self._current_attempt_budget_tokens: int | None = None
 
     @staticmethod
     def _build_http_client() -> httpx.AsyncClient:
@@ -152,15 +162,55 @@ class ModelClient:
         }
         self._last_request_text = request_text
 
+        call_token_budget = runtime_config.call_token_budget
+        attempt_token_budget = self._estimate_attempt_token_budget(
+            request_text, runtime_config.max_tokens
+        )
+        remaining_token_budget = (
+            max(0, int(call_token_budget))
+            if call_token_budget is not None
+            else None
+        )
+        self._last_call_budget_reserved_tokens = 0
+        self._last_call_budget_remaining_tokens = remaining_token_budget
+        self._current_attempt_budget_tokens = None
+
         last_error: ModelClientError | None = None
         error: ModelClientError
         for attempt in range(self._max_retries):
+            if remaining_token_budget is not None:
+                if remaining_token_budget < attempt_token_budget:
+                    self._current_attempt_budget_tokens = None
+                    if last_error is not None:
+                        # The previous provider failure is already recorded;
+                        # this preflight must not become a synthetic failure
+                        # or incur a retry delay.
+                        raise last_error
+                    raise ModelClientError(
+                        "Logical call token budget is insufficient for a provider attempt",
+                        code="call_token_budget_exhausted",
+                    )
+                remaining_token_budget -= attempt_token_budget
+                self._last_call_budget_reserved_tokens += attempt_token_budget
+                self._last_call_budget_remaining_tokens = remaining_token_budget
+                self._current_attempt_budget_tokens = attempt_token_budget
+            else:
+                self._current_attempt_budget_tokens = None
+            sdk_await_entered = False
+            self._receive_trace = ReceiveTrace(
+                self._request_telemetry["request_hash"], attempt + 1, runtime_config.timeout,
+                model=profile.model, provider=profile.provider,
+                input_estimate=self._request_telemetry["request_estimated_tokens"],
+                output_limit=runtime_config.max_tokens,
+            )
             try:
+                sdk_request = self._client.chat.completions.create(
+                    **payload,
+                    timeout=runtime_config.timeout,
+                )
+                sdk_await_entered = True
                 completion = await asyncio.wait_for(
-                    self._client.chat.completions.create(
-                        **payload,
-                        timeout=runtime_config.timeout,
-                    ),
+                    observed_await(sdk_request, self._receive_trace),
                     timeout=runtime_config.timeout,
                 )
                 response = self._parse_completion(completion)
@@ -168,6 +218,13 @@ class ModelClient:
                     self._field_value(completion, "id", "") or ""
                 )
                 response.actual_reasoning_effort = actual_reasoning_effort
+                self._receive_trace.phase = "response_parsed"
+                self._receive_trace.emit(
+                    "response_parsed", finish_reason=response.finish_reason,
+                    content_chars=len(response.content), tool_call_count=len(response.tool_calls),
+                    usage_present=response.usage_present,
+                    usage=response.usage.model_dump() if response.usage_present else None,
+                )
                 self._last_call_attempts.append(
                     self._attempt_payload(
                         attempt=attempt + 1,
@@ -188,8 +245,22 @@ class ModelClient:
                         content=response.content,
                         thinking=self._extract_thinking(completion),
                         tool_calls=response.tool_calls,
-                    )
+                )
                 return response
+            except asyncio.CancelledError:
+                if not sdk_await_entered:
+                    raise
+                self._last_call_attempts.append(
+                    self._attempt_payload(
+                        attempt=attempt + 1,
+                        success=False,
+                        runtime_policy=runtime_policy,
+                        actual_reasoning_effort=actual_reasoning_effort,
+                        tool_schema_count=len(tools or []),
+                        cancelled=True,
+                    )
+                )
+                raise
             except OpenAIAuthenticationError as exc:
                 error = AuthenticationError(
                     "Authentication failed for the model provider",
@@ -312,6 +383,14 @@ class ModelClient:
                 )
 
             if attempt < self._max_retries - 1 and last_error is not None:
+                if (
+                    remaining_token_budget is not None
+                    and remaining_token_budget < attempt_token_budget
+                ):
+                    # Do not sleep for a retry that the logical-call budget
+                    # will reject.  The already issued failure remains the
+                    # only provider attempt in the telemetry ledger.
+                    raise last_error
                 await asyncio.sleep(2**attempt)
                 continue
 
@@ -466,6 +545,7 @@ class ModelClient:
         usage_present: bool = False,
         provider_request_id: str = "",
         error: ModelClientError | None = None,
+        cancelled: bool = False,
     ) -> dict[str, Any]:
         usage = usage or TokenUsage()
         payload: dict[str, Any] = {
@@ -487,6 +567,13 @@ class ModelClient:
             "success": success,
             "provider_request_id": provider_request_id,
             "usage_unknown": bool(not success and not usage_present),
+            "cancelled": cancelled,
+            "call_budget_reserved_tokens": getattr(
+                self, "_current_attempt_budget_tokens", None
+            ),
+            "call_budget_remaining_tokens": getattr(
+                self, "_last_call_budget_remaining_tokens", None
+            ),
         }
         if error is not None:
             payload.update(
@@ -496,8 +583,32 @@ class ModelClient:
                     "provider_code": error.code or "",
                 }
             )
+        if cancelled:
+            payload.update(
+                {
+                    "failure_type": "cancelled",
+                    "failure_status": None,
+                    "provider_code": "cancelled",
+                }
+            )
         payload.update(getattr(self, "_request_telemetry", {}))
+        trace = getattr(self, "_receive_trace", None)
+        if trace is not None:
+            trace.finish(success, cancelled, error.code if error and error.code else "")
+            payload["receive_observation_id"] = trace.id
+            payload["receive_observation_phase"] = trace.phase
+            payload["receive_observation_write_failed"] = trace.write_failed
         return payload
+
+    @staticmethod
+    def _estimate_attempt_token_budget(
+        serialized_wire_payload: str, max_output_tokens: int
+    ) -> int:
+        """Estimate one provider attempt from the exact wire payload envelope."""
+
+        return estimate_tokens(serialized_wire_payload) + max(
+            0, int(max_output_tokens)
+        )
 
     @staticmethod
     def _serialize_messages(
