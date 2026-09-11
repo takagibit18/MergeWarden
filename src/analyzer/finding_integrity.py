@@ -455,6 +455,8 @@ class FindingIntegrityGuard:
                 changed=changed,
                 context=contexts_by_id.get(candidate.candidate_id),
                 evidence_ledger=evidence_ledger,
+                snapshot_id=snapshot_id,
+                revision=revision,
             )
             prepared_candidates.append(prepared)
             preparation_failures[candidate.candidate_id] = failures
@@ -471,6 +473,8 @@ class FindingIntegrityGuard:
                     *preparation_failures.get(candidate.candidate_id, ()),
                 ),
                 validation_context_digest=validation_context_digest,
+                snapshot_id=snapshot_id,
+                revision=revision,
             )
             for candidate in prepared_candidates
         )
@@ -519,6 +523,8 @@ class FindingIntegrityGuard:
         changed: dict[str, set[int]],
         context: dict[str, Any] | None,
         evidence_ledger: EvidenceLedger | None,
+        snapshot_id: str = "",
+        revision: str = "",
     ) -> tuple[FindingCandidate, tuple[IntegrityFailure, ...]]:
         """Drop invalid optional structured evidence before final publication."""
 
@@ -535,6 +541,8 @@ class FindingIntegrityGuard:
                         context=context,
                         evidence_ledger=evidence_ledger,
                         field=f"evidence_refs[{index}]",
+                        snapshot_id=snapshot_id,
+                        revision=revision,
                     )
                 )
             return candidate, tuple(failures)
@@ -568,6 +576,8 @@ class FindingIntegrityGuard:
                     context=context,
                     evidence_ledger=evidence_ledger,
                     field=f"{role}_evidence[{index}]",
+                    snapshot_id=snapshot_id,
+                    revision=revision,
                 )
                 if not failures:
                     valid_items.append(evidence_item)
@@ -605,6 +615,8 @@ class FindingIntegrityGuard:
         context: dict[str, Any] | None,
         evidence_ledger: EvidenceLedger | None,
         field: str,
+        snapshot_id: str = "",
+        revision: str = "",
     ) -> list[IntegrityFailure]:
         """Validate one evidence role and return failures with full provenance."""
 
@@ -641,6 +653,30 @@ class FindingIntegrityGuard:
             evidence=evidence_item,
         )
         metadata = _evidence_failure_metadata(evidence_item)
+        expected_identity = {
+            "snapshot_id": str(snapshot_id or "").strip(),
+            "revision": str(revision or "").strip(),
+        }
+        if any(expected_identity.values()):
+            for identity_field, expected_value in expected_identity.items():
+                if not expected_value:
+                    continue
+                actual_value = str(
+                    getattr(evidence_item, identity_field, "") or ""
+                ).strip()
+                if actual_value != expected_value:
+                    failures.append(
+                        IntegrityFailure(
+                            "evidence_identity_mismatch",
+                            (
+                                "Evidence provenance does not match the expected "
+                                f"run {identity_field}."
+                            ),
+                            field=f"{field}.{identity_field}",
+                            location=evidence_item.location,
+                            **metadata,
+                        )
+                    )
         if not evidence_item.retrieval_source:
             failures.append(
                 IntegrityFailure(
@@ -780,6 +816,8 @@ class FindingIntegrityGuard:
         evidence_ledger: EvidenceLedger | None,
         initial_failures: tuple[IntegrityFailure, ...],
         validation_context_digest: str = "",
+        snapshot_id: str = "",
+        revision: str = "",
     ) -> FindingIntegrityResult:
         issue = candidate.issue
         failures: list[IntegrityFailure] = list(initial_failures)
@@ -939,6 +977,8 @@ class FindingIntegrityGuard:
                         context=context,
                         evidence_ledger=evidence_ledger,
                         field=f"{role}_evidence[{index}]",
+                        snapshot_id=snapshot_id,
+                        revision=revision,
                     )
                 )
 
@@ -953,6 +993,8 @@ class FindingIntegrityGuard:
                         context=context,
                         evidence_ledger=evidence_ledger,
                         field=f"evidence_refs[{index}]",
+                        snapshot_id=snapshot_id,
+                        revision=revision,
                     )
                 )
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from src.analyzer.context_state import ContextState
 from src.analyzer.finding_contract import (
@@ -89,6 +89,55 @@ class DebugRequest(BaseModel):
     )
 
 
+class V3ActionCallRef(BaseModel):
+    """Runtime-only binding from one raw v3 action to its plan/journal call.
+
+    ``provider_call_id`` is empty only when an offline/direct plan has no
+    provider call record.  It must never be populated with an orchestrator
+    synthetic journal id, because that would make a journal fallback look like
+    a provider conversation pairing.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        str_strip_whitespace=True,
+    )
+
+    name: Literal["save_finding", "revise_finding", "finish_review"]
+    provider_call_id: str = Field(
+        default="",
+        description=(
+            "Exact provider raw tool-call id; empty only for an offline plan "
+            "without a provider conversation record."
+        ),
+    )
+    raw_arguments: Any = Field(
+        default=None,
+        description="Original raw arguments for journal/error correlation only.",
+    )
+    raw_call_index: int = Field(
+        ...,
+        ge=0,
+        description="Original zero-based index in the provider response tool_calls list.",
+    )
+    action_index: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Zero-based index among validated actions with this same name in the "
+            "AnalysisPlan action list; null marks an invalid raw action."
+        ),
+    )
+    validation_error: str = Field(
+        default="",
+        description=(
+            "Non-empty only when the raw v3 action failed validation and needs an "
+            "error receipt bound to its original provider call id."
+        ),
+    )
+
+
 class ReviewResponse(BaseModel):
     """Structured output for a review run."""
 
@@ -130,7 +179,11 @@ class ReviewResponse(BaseModel):
     )
     submission_received: bool = Field(
         default=False,
-        description="A valid submit_review action was actually received.",
+        description=(
+            "A structured report was handed off: an actual submit_review action "
+            "in v2, or the runtime-owned Registry candidate set in v3. "
+            "This does not assert that the model called finish_review."
+        ),
     )
     review_complete: bool = Field(
         default=False,
@@ -142,8 +195,8 @@ class ReviewResponse(BaseModel):
     delivery_complete: bool = Field(
         default=False,
         description=(
-            "All submitted candidates reached a terminal delivery disposition; "
-            "false means a candidate remains needs_repair or invalid."
+            "The internal review delivery completed without limiting or unresolved "
+            "conditions. A false value may still accompany approved partial findings."
         ),
     )
     finding_run_status: Literal["complete", "incomplete"] = Field(
@@ -156,7 +209,10 @@ class ReviewResponse(BaseModel):
     )
     semantic_verifier_completed: bool = Field(
         default=False,
-        description="Whether every submitted 3.0 candidate received a semantic receipt.",
+        description=(
+            "Whether the handed-off 3.0 candidate set has completed independent "
+            "verification without unresolved or pending-revision candidates."
+        ),
     )
     semantic_accepted_count: int = Field(default=0, ge=0)
     semantic_rejected_count: int = Field(default=0, ge=0)
@@ -360,6 +416,14 @@ class AnalysisPlan(BaseModel):
     v3_finish_review: ModelFinishReviewActionV3 | None = Field(
         default=None,
         description="Validated v3 finish_review action without finding contents",
+    )
+    v3_action_call_refs: list[V3ActionCallRef] = Field(
+        default_factory=list,
+        exclude=True,
+        description=(
+            "Runtime-only exact associations from validated v3 actions to provider "
+            "raw call ids/order; not model finding content or provider output."
+        ),
     )
     draft_review: ReviewReport | None = Field(
         default=None,

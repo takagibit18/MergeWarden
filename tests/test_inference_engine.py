@@ -112,6 +112,141 @@ class RecordingFakeModelClient:
         )
 
 
+def test_v3_final_call_allows_content_actions_without_exploration(monkeypatch) -> None:
+    from src.orchestrator.tool_schemas import build_v3_finding_action_tool_schemas
+
+    monkeypatch.setenv("CONTEXT_SUMMARY_ENABLED", "false")
+    client = RecordingFakeModelClient()
+    engine = InferenceEngine(model_client=client)  # type: ignore[arg-type]
+    request = ReviewRequest(repo_path=".")
+    asyncio.run(
+        engine.analyze(
+            state=ContextState(),
+            request=request,
+            tool_specs=[],
+            tool_schemas=build_v3_finding_action_tool_schemas()
+            + [
+                {
+                    "type": "function",
+                    "function": {"name": "read_file", "parameters": {}},
+                }
+            ],
+            force_submit=True,
+            contract_version="3.0",
+            submit_tool_name="finish_review",
+        )
+    )
+    assert {tool["function"]["name"] for tool in client.tools[-1]} == {
+        "save_finding",
+        "revise_finding",
+        "finish_review",
+    }
+    assert client.configs[-1].tool_choice == "auto"
+    assert client.policies[-1].forced_tool is None
+    finding = {
+        "anchor": {"file": "src/app.py", "line": 1},
+        "description": "A supported behavior change.",
+        "evidence_refs": ["ev-1"],
+        "severity": "warning",
+    }
+    plan, metadata = engine._parse_tool_calls(  # noqa: SLF001
+        [
+            {"function": {"name": name, "arguments": json.dumps(arguments)}}
+            for name, arguments in [
+                ("save_finding", {"finding": finding}),
+                ("finish_review", {"summary": "One finding saved."}),
+                ("read_file", {"path": "src/app.py"}),
+            ]
+        ],
+        request,
+        force_submit=True,
+        contract_version="3.0",
+    )
+    assert len(plan.v3_save_findings) == 1
+    assert plan.v3_finish_review is not None
+    assert not plan.tool_calls
+    assert metadata["force_submit_discarded_count"] == 1
+
+
+def test_repair_target_survives_tiny_optional_feedback_budget(monkeypatch) -> None:
+    from src.orchestrator.tool_schemas import build_repair_tool_schemas
+
+    monkeypatch.setenv("CONTEXT_SUMMARY_ENABLED", "false")
+    monkeypatch.setenv("FINAL_SUBMIT_FEEDBACK_TOKEN_BUDGET", "1")
+    client = RecordingFakeModelClient()
+    engine = InferenceEngine(model_client=client)  # type: ignore[arg-type]
+    asyncio.run(
+        engine.analyze(
+            state=ContextState(),
+            request=ReviewRequest(repo_path="."),
+            tool_specs=[],
+            tool_schemas=build_repair_tool_schemas(contract_version="3.0"),
+            force_submit=True,
+            repair_mode=True,
+            contract_version="3.0",
+            validator_result={
+                "unresolved_evidence_gaps": [
+                    {
+                        "target_handle": "repair_target_exact",
+                        "candidate_content": {},
+                        "gaps": [{"required_action": "Correct severity to info."}],
+                    }
+                ]
+            },
+        )
+    )
+    assert client.calls
+    protocols = [
+        message
+        for message in client.calls[-1]
+        if "target_handle=repair_target_exact" in message.content
+    ]
+    assert len(protocols) == 1
+    assert protocols[0].preserve_on_trim
+    assert "Correct severity to info." in protocols[0].content
+    assert client.policies[-1].forced_tool == "repair_review"
+    wire_text = "\n".join(message.content for message in client.calls[-1])
+    assert "Save each supported finding" not in wire_text
+    assert "When the saved set is ready" not in wire_text
+    assert "Submit minimal patches through repair_review" in wire_text
+
+
+def test_repair_without_complete_target_context_never_calls_provider(
+    monkeypatch,
+) -> None:
+    from src.orchestrator.tool_schemas import build_repair_tool_schemas
+
+    monkeypatch.setenv("CONTEXT_SUMMARY_ENABLED", "false")
+    for validator_result in [
+        None,
+        {
+            "unresolved_evidence_gaps": [
+                {
+                    "target_handle": "repair_target_exact",
+                    "candidate_content": {},
+                    "gaps": [{"required_action": "specific correction " * 20000}],
+                }
+            ]
+        },
+    ]:
+        client = RecordingFakeModelClient()
+        engine = InferenceEngine(model_client=client)  # type: ignore[arg-type]
+        plan, _ = asyncio.run(
+            engine.analyze(
+                state=ContextState(),
+                request=ReviewRequest(repo_path="."),
+                tool_specs=[],
+                tool_schemas=build_repair_tool_schemas(contract_version="3.0"),
+                force_submit=True,
+                repair_mode=True,
+                contract_version="3.0",
+                validator_result=validator_result,
+            )
+        )
+        assert not client.calls
+        assert plan.incomplete_reason == "final_submit_context_insufficient"
+
+
 class InvalidThenValidSubmitClient(RecordingFakeModelClient):
     """Return one invalid submit_review call, then a repaired valid one."""
 

@@ -965,6 +965,7 @@ def test_semantic_verifier_schema_matches_conditional_runtime_contract() -> None
     ]
     assert decision["properties"]["reason"]["minLength"] == 1
     assert decision["properties"]["opaque_handle"]["minLength"] == 1
+    assert "unresolved" in decision["properties"]["verdict"]["enum"]
     conditional = decision["allOf"][0]
     assert conditional["then"]["required"] == ["request"]
     assert conditional["then"]["properties"]["request"]["minLength"] == 1
@@ -1058,6 +1059,7 @@ def test_semantic_verifier_investigates_once_only_for_concrete_revision_request(
                         "verdict": "needs_revision",
                         "reason": "The called helper's return contract is missing.",
                         "request": "Read helper.py:8 to confirm its return contract.",
+                        "investigation": {"tool": "read_file", "file": "helper.py", "start_line": 8},
                     }
                 ]
             },
@@ -1078,6 +1080,9 @@ def test_semantic_verifier_investigates_once_only_for_concrete_revision_request(
         question: str, candidate: SemanticVerifierCandidate, max_calls: int
     ) -> InvestigationResult:
         investigation_calls.append((question, max_calls))
+        action = json.loads(question)["action"]
+        assert action["tool"] == "read_file"
+        assert action["file"] == "helper.py"
         assert candidate.opaque_handle == "h-1"
         return InvestigationResult(
             answer="helper returns the incompatible value", tool_call_count=2
@@ -1168,6 +1173,7 @@ def test_semantic_recheck_mixed_handles_fails_closed_for_the_target() -> None:
                         "verdict": "needs_revision",
                         "reason": "A targeted source check is required.",
                         "request": "Read the exact helper range.",
+                        "investigation": {"tool": "read_file", "file": "src/app.py", "start_line": 2},
                     }
                 ]
             },
@@ -1409,6 +1415,7 @@ def test_semantic_recheck_is_skipped_when_investigation_consumes_wall_clock() ->
                         "verdict": "needs_revision",
                         "reason": "The helper range is required.",
                         "request": "Read the exact helper range.",
+                        "investigation": {"tool": "read_file", "file": "src/app.py", "start_line": 2},
                     }
                 ]
             }
@@ -1626,9 +1633,13 @@ def test_v3_contract_rejects_duplicate_or_empty_core_fields(
         ModelFindingInputV3.model_validate(payload)
 
 
+@pytest.mark.parametrize("max_iterations", [1, 2])
+@pytest.mark.parametrize("repair_outcome", ["valid", "unknown_handle", "unchanged", "no_progress"])
 def test_v3_run_review_closes_verifier_severity_repair_and_independent_recheck(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
+    max_iterations: int,
+    repair_outcome: str,
 ) -> None:
     monkeypatch.setenv("CONTEXT_SUMMARY_ENABLED", "false")
     source = tmp_path / "src" / "app.py"
@@ -1643,16 +1654,43 @@ def test_v3_run_review_closes_verifier_severity_repair_and_independent_recheck(
         "+return_value = changed\n"
     )
     client = _ScriptedV3RunClient()
+    original_chat = client.chat
+    before_repair: list[tuple[str, str]] = []
+
+    async def replay_repair(*args, **kwargs):  # type: ignore[no-untyped-def]
+        model_response = await original_chat(*args, **kwargs)
+        for call in model_response.tool_calls:
+            if call["function"]["name"] != "repair_review":
+                continue
+            assert client.orchestrator is not None
+            before_repair.extend(
+                (record.candidate_content_version, record.semantic_verdict)
+                for record in client.orchestrator._candidate_registry.records  # noqa: SLF001
+            )
+            payload = json.loads(call["function"]["arguments"])
+            item = payload["repairs"][0]
+            if repair_outcome == "unknown_handle":
+                item["target_handle"] = "opaque:autodraft-1"
+            elif repair_outcome == "unchanged":
+                item.pop("repair_patch")
+                item["repair_status"] = "unchanged"
+                item["repair_reason"] = "Cannot apply the requested correction."
+            elif repair_outcome == "no_progress":
+                item["repair_patch"] = {"severity": "warning"}
+            call["function"]["arguments"] = json.dumps(payload)
+        return model_response
+
+    monkeypatch.setattr(client, "chat", replay_repair)
     orchestrator = AgentOrchestrator(
         registry=ToolRegistry(),
-        review_max_iterations=2,
-        review_min_tool_iterations=0,
+        review_max_iterations=max_iterations,
+        review_min_tool_iterations=1 if max_iterations == 1 else 0,
         review_workflow_enforcement="off",
     )
     orchestrator._settings.finding_contract_version = "3.0"  # type: ignore[assignment]  # noqa: SLF001
     orchestrator._settings.review_repair_max_attempts = 1  # noqa: SLF001
     orchestrator._settings.semantic_verifier_max_model_calls = 2  # noqa: SLF001
-    orchestrator._settings.semantic_verifier_max_investigation_calls = 0  # noqa: SLF001
+    orchestrator._settings.semantic_verifier_max_investigation_calls = 1  # noqa: SLF001
     client.orchestrator = orchestrator
     client.diff_text = diff
     orchestrator._model_client = client  # type: ignore[assignment]  # noqa: SLF001
@@ -1674,6 +1712,25 @@ def test_v3_run_review_closes_verifier_severity_repair_and_independent_recheck(
         )
     )
 
+    if repair_outcome != "valid":
+        assert client.stages == ["reviewer", "verify", "repair"]
+        transaction = orchestrator._repair_transactions[0]  # noqa: SLF001
+        assert transaction.status == "incomplete"
+        assert not transaction.applied_response_fingerprints
+        assert "revised" not in transaction.target_results.values()
+        assert not response.report_ready
+        assert not response.delivery_complete
+        assert before_repair == [
+            (record.candidate_content_version, record.semantic_verdict)
+            for record in orchestrator._candidate_registry.records  # noqa: SLF001
+        ]
+        assert orchestrator._run_journal is not None  # noqa: SLF001
+        transactions = [entry.payload["transaction"]
+                        for entry in orchestrator._run_journal.replay()  # noqa: SLF001
+                        if entry.type == "repair_transaction"]
+        assert transactions[-1]["status"] == "incomplete"
+        return
+
     assert client.stages == ["reviewer", "verify", "repair", "recheck"], (
         client.stages,
         client.name_history,
@@ -1686,12 +1743,17 @@ def test_v3_run_review_closes_verifier_severity_repair_and_independent_recheck(
     assert response.report.issues[0].severity.value == "info"
     assert response.semantic_verifier_completed is True
     assert response.semantic_needs_revision_count == 0
-    assert response.report_ready is True, (
-        response.incomplete_reasons,
-        orchestrator._integrity_needs_repair_count,  # noqa: SLF001
-        orchestrator._integrity_invalid_count,  # noqa: SLF001
-        orchestrator._semantic_unresolved_count,  # noqa: SLF001
-    )
+    if max_iterations == 1:
+        assert response.report_ready is False
+        assert response.delivery_complete is False
+        assert "max_iterations" in response.incomplete_reasons
+    else:
+        assert response.report_ready is True, (
+            response.incomplete_reasons,
+            orchestrator._integrity_needs_repair_count,  # noqa: SLF001
+            orchestrator._integrity_invalid_count,  # noqa: SLF001
+            orchestrator._semantic_unresolved_count,  # noqa: SLF001
+        )
     assert orchestrator._review_repair_attempt_count == 1  # noqa: SLF001
     assert orchestrator._repair_model_call_count == 1  # noqa: SLF001
     assert orchestrator._repair_transactions[0].status == "accepted"  # noqa: SLF001
@@ -1719,21 +1781,25 @@ def test_v3_run_review_closes_verifier_severity_repair_and_independent_recheck(
         for payload in receipt_payloads
     )
     publisher_client = _NoNetworkPublisherClient()
-    publish_result = asyncio.run(
-        GitHubPublisher(publisher_client).publish(
-            GitHubPublishRequest(
-                owner_repo="owner/repo",
-                pr_number=7,
-                head_sha="head-sha",
-                response=response,
-                changed_lines={"src/app.py": [1]},
-                dry_run=False,
-                publish_comments=False,
-            )
-        )
+    publish_request = GitHubPublishRequest(
+        owner_repo="owner/repo",
+        pr_number=7,
+        head_sha="head-sha",
+        response=response,
+        changed_lines={"src/app.py": [1]},
+        dry_run=False,
+        publish_comments=False,
     )
-    assert publish_result.status == "published"
-    assert publisher_client.calls == ["create_check_run"]
+    if max_iterations == 1:
+        with pytest.raises(ValueError, match="finding_run_incomplete"):
+            asyncio.run(GitHubPublisher(publisher_client).publish(publish_request))
+        assert publisher_client.calls == []
+    else:
+        publish_result = asyncio.run(
+            GitHubPublisher(publisher_client).publish(publish_request)
+        )
+        assert publish_result.status == "published"
+        assert publisher_client.calls == ["create_check_run"]
 
 
 @pytest.mark.parametrize("mode", ["partial", "unresolved"])

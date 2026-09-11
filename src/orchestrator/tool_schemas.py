@@ -104,15 +104,34 @@ def build_v3_finding_action_tool_schemas(
     definitions: list[tuple[str, str, Any]] = []
     if include_save:
         definitions.append(
-            ("save_finding", "Save one finding body in the runtime registry.", ModelSaveFindingActionV3)
+            (
+                "save_finding",
+                "Save one supported finding in the runtime Registry during exploration; "
+                "this is not a model finish or external submission. Save only a new "
+                "independent defect; use revise_finding for an existing cause.",
+                ModelSaveFindingActionV3,
+            )
         )
     if include_revise:
         definitions.append(
-            ("revise_finding", "Apply an atomic patch to one saved finding.", ModelReviseFindingActionV3)
+            (
+                "revise_finding",
+                "Apply an atomic patch to one saved finding using its opaque runtime handle; "
+                "this does not finish the review. Use it for same-cause extra evidence or "
+                "locations; retain existing array items because arrays replace rather than "
+                "append.",
+                ModelReviseFindingActionV3,
+            )
         )
     if include_finish:
         definitions.append(
-            ("finish_review", "Finish exploration and submit the saved finding set.", ModelFinishReviewActionV3)
+            (
+                "finish_review",
+                "Optionally request an active model stop with a concise summary and no "
+                "finding body; runtime closeout may hand off the current Registry "
+                "contents without this action.",
+                ModelFinishReviewActionV3,
+            )
         )
     for name, description, model_type in definitions:
         actions.append(
@@ -191,9 +210,10 @@ def build_repair_tool_schemas(*, contract_version: str = "2.0") -> list[dict[str
                     "Repair only the exact opaque targets listed in the active "
                     "runtime transaction. Return one item per target you address. "
                     "This is not a new finding submission: do not include summary, "
-                    "issues, finding ids, candidate ids, content versions, paths, "
+                    "issues, finding ids, candidate ids, content versions, "
                     "snapshots, hashes, or full finding objects. For repaired, put "
-                    "only changed semantic fields in repair_patch; omitted fields "
+                    "only changed semantic fields in repair_patch, including supported "
+                    "anchor or related-location corrections using delivered source paths; omitted fields "
                     "are preserved. Use delete_fields for explicit deletion and "
                     "never use null to mean omission."
                 ),

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
 import re
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal, cast
 
 from pydantic import ValidationError
 
@@ -53,6 +54,7 @@ from src.analyzer.schemas import (
     DebugResponse,
     ReviewRequest,
     ReviewHandoff,
+    V3ActionCallRef,
 )
 from src.analyzer.trace import TraceRecorder
 from src.config import get_settings
@@ -77,6 +79,12 @@ from src.analyzer.verifier_context import capture_verifier_tool_evidence
 logger = logging.getLogger(__name__)
 _SUBMIT_MAX_TOKENS = 4096
 _EXPLORATION_MAX_TOKENS = 12288
+
+
+class _CallTokenBudgetExceeded(RuntimeError):
+    """Raised when a provider request cannot fit its runtime token reserve."""
+
+
 _SYNTHETIC_CONTEXT_MAX_CHARS = 3600
 _FINAL_EVIDENCE_ENTRY_MAX_CHARS = 2400
 _FINAL_EVIDENCE_TOOL_NAMES = {
@@ -125,6 +133,13 @@ class InferenceEngine:
         self._trace_event_writer = trace_event_writer
         self._model_response_writer = model_response_writer
         self._conversation = conversation or ModelConversation()
+        self._last_call_budget_tokens_used = 0
+
+    @property
+    def last_call_budget_tokens_used(self) -> int:
+        """Conservative charge for provider attempts in the latest analyze call."""
+
+        return self._last_call_budget_tokens_used
 
     async def analyze(
         self,
@@ -153,12 +168,26 @@ class InferenceEngine:
         repair_mode: bool = False,
         submit_tool_name: str | None = None,
         contract_version: str = "2.0",
+        remaining_call_token_budget: int | None = None,
+        current_finding_handles: list[dict[str, str]] | None = None,
     ) -> tuple[AnalysisPlan, TokenUsage]:
+        self._last_call_budget_tokens_used = 0
+        remaining_call_token_budget = _optional_non_negative_int(
+            remaining_call_token_budget
+        )
         file_contents = file_contents or {}
         settings = get_settings()
-        submit_only = force_submit or (
-            near_last_iteration and not allow_exploration
-        ) or stage == "submit_only"
+        if contract_version == "3.0":
+            # v3 iteration limits stop exploration at the runtime boundary; they
+            # do not turn an ordinary reviewer call into a submission ceremony.
+            # Only an explicit force/repair request may use the bounded final
+            # call. In particular, ignore the legacy near-last stage label here.
+            submit_only = repair_mode or force_submit
+        else:
+            submit_only = repair_mode or force_submit or (
+                near_last_iteration and not allow_exploration
+            ) or stage == "submit_only"
+        defer_submit = defer_submit and not submit_only
         inferred_stage = (
             "validate"
             if any(
@@ -170,14 +199,21 @@ class InferenceEngine:
             )
             else "explore"
         )
-        # A final/near-limit call is submit-only even when an older caller did
-        # not pass the newer explicit stage label.
+        effective_stage = (
+            None
+            if contract_version == "3.0"
+            and not submit_only
+            and stage == "submit_only"
+            else stage
+        )
+        # A final/near-limit call is submit-only for historical contracts even
+        # when an older caller did not pass the newer explicit stage label.
         call_stage = (
             "repair"
             if repair_mode
             else "submit_only"
             if submit_only
-            else (stage or inferred_stage)
+            else (effective_stage or inferred_stage)
         )
         requested_budget = (
             prompt_input_token_budget
@@ -238,6 +274,7 @@ class InferenceEngine:
                     telemetry_sink=context_telemetry,
                     skill_selection=skill_selection,
                     contract_version=contract_version,
+                    repair_mode=repair_mode,
                 )
             else:
                 messages = build_review_messages(
@@ -251,6 +288,7 @@ class InferenceEngine:
                     telemetry_sink=context_telemetry,
                     skill_selection=skill_selection,
                     contract_version=contract_version,
+                    repair_mode=repair_mode,
                 )
         else:
             if summary_enabled:
@@ -280,6 +318,11 @@ class InferenceEngine:
                     telemetry_sink=context_telemetry,
                 )
 
+        current_handles_message = self._build_current_finding_handles_message(
+            current_finding_handles
+        )
+        if current_handles_message is not None:
+            messages.append(current_handles_message)
         if skill_telemetry is not None:
             context_telemetry["review_skills"] = dict(skill_telemetry)
 
@@ -294,6 +337,7 @@ class InferenceEngine:
                     feedback_digest_index or {},
                     draft_findings or [],
                     validator_result=validator_result,
+                    include_validator_feedback=not repair_mode,
                     candidate_context_manifests=state.candidate_context_manifests,
                     draft_states=state.draft_findings,
                     evidence_ledger=state.evidence_ledger,
@@ -302,6 +346,19 @@ class InferenceEngine:
             )
             if final_evidence is not None:
                 messages.append(final_evidence)
+            if repair_mode:
+                # Transaction instructions are mandatory input, not optional
+                # evidence-summary entries that may disappear under its budget.
+                repair_feedback = self._build_repair_feedback_message(
+                    validator_result, token_budget=None
+                )
+                if repair_feedback is not None:
+                    messages.append(repair_feedback)
+                else:
+                    final_evidence_telemetry["context_insufficient"] = True
+                    final_evidence_telemetry["context_insufficient_reason"] = (
+                        "repair_target_context_missing"
+                    )
         else:
             window_iterations = {
                 item.get("iteration")
@@ -383,22 +440,32 @@ class InferenceEngine:
                 else FINALIZE_DEBUG_NOTICE
             )
             messages.append(Message(role="user", content=notice))
-        elif near_last_iteration:
-            messages.append(
-                Message(
-                    role="user",
-                    content=(
-                        "Note: you are at the last allowed iteration. Prefer finishing now via "
-                        + (
-                            "finish_review"
-                            if contract_version == "3.0"
-                            else "submit_review/submit_debug"
-                        )
-                        + " using what you already have, unless a tool "
-                        "call is strictly necessary and has not been made with identical args."
-                    ),
+        elif near_last_iteration and not defer_submit:
+            if contract_version == "3.0":
+                messages.append(
+                    Message(
+                        role="user",
+                        content=(
+                            "Note: this is the last allowed Reviewer iteration. You may still "
+                            "use strictly necessary read-only tools and save_finding or "
+                            "revise_finding. finish_review is optional and only records the "
+                            "model's explicit request to stop; runtime closeout receives the "
+                            "current Registry contents even when no finish_review call is made. "
+                            "Do not repeat saved finding bodies."
+                        ),
+                    )
                 )
-            )
+            else:
+                messages.append(
+                    Message(
+                        role="user",
+                        content=(
+                            "Note: you are at the last allowed iteration. Prefer finishing now via "
+                            "submit_review/submit_debug using what you already have, unless a tool "
+                            "call is strictly necessary and has not been made with identical args."
+                        ),
+                    )
+                )
 
         tools = (
             self._submit_only_tools(
@@ -406,7 +473,10 @@ class InferenceEngine:
                 request,
                 expected_name=(
                     submit_tool_name
-                    or ("repair_review" if repair_mode else None)
+                    or (
+                        "repair_review" if repair_mode
+                        else self._submit_tool_name(request, contract_version=contract_version)
+                    )
                 ),
             )
             if submit_only
@@ -415,6 +485,10 @@ class InferenceEngine:
         config = None
         if submit_only:
             config = self._build_submit_config(request)
+            if contract_version == "3.0" and not repair_mode:
+                # Retain the ordinary multi-tool selection protocol rather than
+                # forcing finish_review before content can be saved.
+                config.tool_choice = "auto"
         else:
             config = self._model_client.default_config.model_copy(
                 update={
@@ -430,6 +504,10 @@ class InferenceEngine:
                 )
             else:
                 config.model = request.model_name
+        config = self._with_call_token_budget(
+            config,
+            remaining_call_token_budget,
+        )
         policy = ModelCallPolicy(
             thinking="off" if submit_only else "high",
             forced_tool=(
@@ -442,21 +520,33 @@ class InferenceEngine:
                     )
                 )
             )
-            if submit_only
+            if submit_only and not (contract_version == "3.0" and not repair_mode)
             else None,
         )
         # Once deterministic validation has passed, the submit-only call is a
         # fresh, bounded handoff.  Replaying every prior assistant/tool turn
         # would re-send repeated source/tool feedback.  Legacy forced-finalize
         # callers without validator state retain the provider replay contract.
+        # v3 forced closeout remains allowed to save/revise, so it must retain
+        # any registry action handles from the canonical conversation.
         minimal_submit_only = bool(
             submit_only
-            and isinstance(validator_result, dict)
-            and validator_result.get("submit_allowed") is True
+            and (
+                repair_mode
+                or (
+                    contract_version != "3.0"
+                    and isinstance(validator_result, dict)
+                    and validator_result.get("submit_allowed") is True
+                )
+            )
         )
         conversation_messages = (
             [] if minimal_submit_only else self._conversation.messages()
         )
+        if contract_version == "3.0" and conversation_messages:
+            conversation_messages = self._preserve_v3_registry_turns(
+                conversation_messages
+            )
         conversation_history_count = len(conversation_messages)
         if submit_only:
             assert finalize_conversation_insert_at is not None
@@ -481,12 +571,21 @@ class InferenceEngine:
         prepare_call = getattr(self._model_client, "prepare_call", None)
         if callable(prepare_call):
             wire_config, wire_policy, wire_profile = prepare_call(config, policy)
+        wire_config = self._with_call_token_budget(
+            wire_config,
+            remaining_call_token_budget,
+        )
+        fit_budget = self._call_fit_budget(
+            request_budget,
+            remaining_call_token_budget,
+            wire_config.max_tokens,
+        )
         assembled_request = RequestAssembler.fit(
             messages,
             tools,
             wire_config,
             wire_policy,
-            budget=request_budget,
+            budget=fit_budget,
             profile=wire_profile,
         )
         messages = assembled_request.messages
@@ -515,6 +614,23 @@ class InferenceEngine:
                 else "assembled_request_over_budget"
             )
 
+        call_input_estimate = max(0, int(assembled_request.estimated_tokens))
+        call_output_reserve = max(0, int(wire_config.max_tokens))
+        call_budget_required = call_input_estimate + call_output_reserve
+        context_telemetry.update(
+            {
+                "remaining_call_token_budget": remaining_call_token_budget,
+                "call_input_token_estimate": call_input_estimate,
+                "call_output_token_reserve": call_output_reserve,
+                "call_token_budget_required": call_budget_required,
+                "call_token_budget_used": self._last_call_budget_tokens_used,
+                "call_token_budget_exhausted": (
+                    remaining_call_token_budget is not None
+                    and call_budget_required > remaining_call_token_budget
+                ),
+            }
+        )
+
         self._record_context_telemetry(
             context_telemetry=context_telemetry,
             messages=messages,
@@ -533,7 +649,7 @@ class InferenceEngine:
             stage=call_stage,
             relation_graph_summary=state.relation_graph_summary,
             assembled_request=assembled_request,
-            assembled_request_budget=request_budget,
+            assembled_request_budget=fit_budget,
         )
         if submit_only and final_evidence_telemetry.get("context_insufficient"):
             reason = str(
@@ -589,6 +705,31 @@ class InferenceEngine:
                 ),
                 TokenUsage(),
             )
+        if (
+            remaining_call_token_budget is not None
+            and call_budget_required > remaining_call_token_budget
+        ):
+            context_telemetry["call_token_budget_exhausted"] = True
+            if self._trace_event_writer is not None:
+                self._trace_event_writer(
+                    EventType.ERROR,
+                    "analyze",
+                    {
+                        "iteration": iteration,
+                        "reason": "call_token_budget_exhausted",
+                        "call_token_budget_required": call_budget_required,
+                        "remaining_call_token_budget": remaining_call_token_budget,
+                    },
+                )
+            return (
+                AnalysisPlan(
+                    needs_tools=False,
+                    tool_calls=[],
+                    incomplete_reason="call_token_budget_exhausted",
+                    recovery_required=True,
+                ),
+                TokenUsage(),
+            )
         response = await self._chat_with_telemetry(
             messages=messages,
             config=config,
@@ -597,6 +738,8 @@ class InferenceEngine:
             iteration=iteration,
             stage=call_stage,
             force_submit=submit_only,
+            request_estimated_tokens=call_input_estimate,
+            max_output_tokens=call_output_reserve,
         )
         if isinstance(request, ReviewRequest):
             self._record_delivered_review_evidence(
@@ -637,51 +780,62 @@ class InferenceEngine:
             repair_allowed = repair_attempt_budget is None or repair_attempt_budget > 0
             if repair_allowed:
                 initial_usage = response.usage
-                (
-                    repair_plan,
-                    repair_response,
-                    repair_meta,
-                    repair_response_id,
-                    repair_assembled_request,
-                ) = await self._retry_submit_review_validation_repair(
-                    messages=messages,
-                    request=request,
-                    tool_schemas=tool_schemas or [],
-                    validation_error=str(parse_meta["submit_review_validation_error"]),
-                    iteration=iteration,
-                    prior_history_start=conversation_history_start,
-                    prior_history_count=conversation_history_count,
-                    invalid_tool_calls=response.tool_calls,
-                    stage=call_stage,
-                    evidence_catalog=state.evidence_ledger,
-                    contract_version=contract_version,
-                )
-                self._record_delivered_review_evidence(
-                    state,
-                    repair_assembled_request,
-                    tool_feedback or [],
-                    repo_path=request.repo_path,
-                )
-                repair_response.usage.total_tokens += initial_usage.total_tokens
-                repair_response.usage.prompt_tokens += initial_usage.prompt_tokens
-                repair_response.usage.completion_tokens += initial_usage.completion_tokens
-                repair_response.usage.reasoning_tokens += initial_usage.reasoning_tokens
-                repair_response.usage_present = (
-                    repair_response.usage_present or response.usage_present
-                )
-                plan.schema_repair_attempted_count += 1
-                repair_plan.schema_repair_attempted_count += 1
-                if repair_plan.draft_review is not None:
-                    repair_plan.draft_finding_calls = plan.draft_finding_calls
-                    repair_plan.draft_finding_source_response_id = (
-                        plan.draft_finding_source_response_id
+                try:
+                    (
+                        repair_plan,
+                        repair_response,
+                        repair_meta,
+                        repair_response_id,
+                        repair_assembled_request,
+                    ) = await self._retry_submit_review_validation_repair(
+                        messages=messages,
+                        request=request,
+                        tool_schemas=tool_schemas or [],
+                        validation_error=str(
+                            parse_meta["submit_review_validation_error"]
+                        ),
+                        iteration=iteration,
+                        prior_history_start=conversation_history_start,
+                        prior_history_count=conversation_history_count,
+                        invalid_tool_calls=response.tool_calls,
+                        stage=call_stage,
+                        evidence_catalog=state.evidence_ledger,
+                        contract_version=contract_version,
+                        remaining_call_token_budget=remaining_call_token_budget,
                     )
-                    plan = repair_plan
-                    response = repair_response
-                    parse_meta = repair_meta
-                    response_id = repair_response_id
+                except _CallTokenBudgetExceeded:
+                    parse_meta["schema_repair_skipped_budget"] = True
+                    plan.incomplete_reason = (
+                        "schema_repair_call_token_budget_exhausted"
+                    )
+                    plan.recovery_required = True
                 else:
-                    response.usage = repair_response.usage
+                    self._record_delivered_review_evidence(
+                        state,
+                        repair_assembled_request,
+                        tool_feedback or [],
+                        repo_path=request.repo_path,
+                    )
+                    repair_response.usage.total_tokens += initial_usage.total_tokens
+                    repair_response.usage.prompt_tokens += initial_usage.prompt_tokens
+                    repair_response.usage.completion_tokens += initial_usage.completion_tokens
+                    repair_response.usage.reasoning_tokens += initial_usage.reasoning_tokens
+                    repair_response.usage_present = (
+                        repair_response.usage_present or response.usage_present
+                    )
+                    plan.schema_repair_attempted_count += 1
+                    repair_plan.schema_repair_attempted_count += 1
+                    if repair_plan.draft_review is not None:
+                        repair_plan.draft_finding_calls = plan.draft_finding_calls
+                        repair_plan.draft_finding_source_response_id = (
+                            plan.draft_finding_source_response_id
+                        )
+                        plan = repair_plan
+                        response = repair_response
+                        parse_meta = repair_meta
+                        response_id = repair_response_id
+                    else:
+                        response.usage = repair_response.usage
             else:
                 parse_meta["schema_repair_skipped_budget"] = True
                 plan.incomplete_reason = "schema_repair_budget_exhausted"
@@ -761,6 +915,8 @@ class InferenceEngine:
         iteration: int,
         stage: str,
         force_submit: bool,
+        request_estimated_tokens: int,
+        max_output_tokens: int,
     ) -> ModelResponse:
         """Call the provider and emit one safe event for every provider attempt."""
 
@@ -772,9 +928,17 @@ class InferenceEngine:
                 policy=policy,
                 conversation=self._conversation,
             )
-        except Exception as exc:
+        except asyncio.CancelledError as exc:
+            attempts = self._consume_provider_attempts()
+            budget_charges = self._charge_call_budget(
+                request_estimated_tokens=request_estimated_tokens,
+                max_output_tokens=max_output_tokens,
+                response=None,
+                attempts=attempts,
+                error=exc,
+            )
             self._record_provider_attempts(
-                attempts=self._consume_provider_attempts(),
+                attempts=attempts,
                 response=None,
                 error=exc,
                 iteration=iteration,
@@ -782,11 +946,40 @@ class InferenceEngine:
                 force_submit=force_submit,
                 policy=policy,
                 tool_schema_count=len(tools),
+                budget_charges=budget_charges,
+            )
+            raise
+        except Exception as exc:
+            attempts = self._consume_provider_attempts()
+            budget_charges = self._charge_call_budget(
+                request_estimated_tokens=request_estimated_tokens,
+                max_output_tokens=max_output_tokens,
+                response=None,
+                attempts=attempts,
+                error=exc,
+            )
+            self._record_provider_attempts(
+                attempts=attempts,
+                response=None,
+                error=exc,
+                iteration=iteration,
+                stage=stage,
+                force_submit=force_submit,
+                policy=policy,
+                tool_schema_count=len(tools),
+                budget_charges=budget_charges,
             )
             raise
 
+        attempts = self._consume_provider_attempts()
+        budget_charges = self._charge_call_budget(
+            request_estimated_tokens=request_estimated_tokens,
+            max_output_tokens=max_output_tokens,
+            response=response,
+            attempts=attempts,
+        )
         self._record_provider_attempts(
-            attempts=self._consume_provider_attempts(),
+            attempts=attempts,
             response=response,
             error=None,
             iteration=iteration,
@@ -794,8 +987,69 @@ class InferenceEngine:
             force_submit=force_submit,
             policy=policy,
             tool_schema_count=len(tools),
+            budget_charges=budget_charges,
         )
         return response
+
+    def _charge_call_budget(
+        self,
+        *,
+        request_estimated_tokens: int,
+        max_output_tokens: int,
+        response: ModelResponse | None,
+        attempts: list[dict[str, Any]],
+        error: BaseException | None = None,
+    ) -> list[int]:
+        """Charge each provider attempt with a conservative runtime estimate."""
+
+        input_estimate = max(0, int(request_estimated_tokens))
+        output_reserve = max(0, int(max_output_tokens))
+        if (
+            not attempts
+            and response is None
+            and getattr(error, "code", "") == "call_token_budget_exhausted"
+        ):
+            # ModelClient performs its own exact wire preflight.  It reports a
+            # zero-attempt budget rejection with this code, so no provider
+            # request was sent and no conservative charge is due.
+            return []
+        attempt_records = attempts or [{}]
+        charges: list[int] = []
+        for raw in attempt_records:
+            success = bool(raw.get("success", response is not None))
+            usage_present = bool(
+                raw.get(
+                    "usage_present",
+                    response is not None and response.usage_present,
+                )
+            )
+            attempt_input = max(
+                0,
+                int(raw.get("request_estimated_tokens", input_estimate) or input_estimate),
+            )
+            if not success or not usage_present:
+                charges.append(attempt_input + output_reserve)
+                continue
+
+            fallback_usage = response.usage if response is not None else TokenUsage()
+            completion_tokens = max(
+                0,
+                int(raw.get("completion_tokens", fallback_usage.completion_tokens) or 0),
+            )
+            reported_total = max(
+                0,
+                int(raw.get("total_tokens", fallback_usage.total_tokens) or 0),
+            )
+            charges.append(
+                max(
+                    # ``reasoning_tokens`` is provider-reported detail nested
+                    # inside completion_tokens, not an additional bucket.
+                    attempt_input + completion_tokens,
+                    reported_total,
+                )
+            )
+        self._last_call_budget_tokens_used += sum(charges)
+        return charges
 
     def _consume_provider_attempts(self) -> list[dict[str, Any]]:
         consumer = getattr(self._model_client, "consume_call_telemetry", None)
@@ -812,14 +1066,23 @@ class InferenceEngine:
         *,
         attempts: list[dict[str, Any]],
         response: ModelResponse | None,
-        error: Exception | None,
+        error: BaseException | None,
         iteration: int,
         stage: str,
         force_submit: bool,
         policy: ModelCallPolicy,
         tool_schema_count: int,
+        budget_charges: list[int] | None = None,
     ) -> None:
         if self._trace_event_writer is None:
+            return
+        if (
+            not attempts
+            and response is None
+            and getattr(error, "code", "") == "call_token_budget_exhausted"
+        ):
+            # Keep a provider preflight rejection distinct from a sent,
+            # usage-unknown attempt; there is no tool/provider call to audit.
             return
         if not attempts:
             attempts = [
@@ -847,7 +1110,7 @@ class InferenceEngine:
                     "usage_unknown": response is None,
                 }
             ]
-        for raw in attempts:
+        for attempt_index, raw in enumerate(attempts):
             success = bool(raw.get("success", response is not None))
             usage_present = bool(raw.get("usage_present", success))
             payload: dict[str, Any] = {
@@ -901,6 +1164,12 @@ class InferenceEngine:
                 "usage_unknown": bool(
                     raw.get("usage_unknown", not success and not usage_present)
                 ),
+                "budget_tokens_used": (
+                    max(0, int(budget_charges[attempt_index]))
+                    if budget_charges is not None
+                    and attempt_index < len(budget_charges)
+                    else 0
+                ),
             }
             if not success:
                 if error is not None:
@@ -931,6 +1200,7 @@ class InferenceEngine:
         stage: str = "submit_only",
         evidence_catalog: list[dict[str, Any]] | None = None,
         contract_version: str = "2.0",
+        remaining_call_token_budget: int | None = None,
     ) -> tuple[AnalysisPlan, ModelResponse, dict[str, Any], str, AssembledRequest]:
         for raw_call in invalid_tool_calls:
             call_id = str(raw_call.get("id", "")).strip()
@@ -960,7 +1230,13 @@ class InferenceEngine:
                 ),
             ),
         ]
-        config = self._build_submit_config(request)
+        repair_remaining_budget = self._remaining_call_token_budget(
+            remaining_call_token_budget
+        )
+        config = self._with_call_token_budget(
+            self._build_submit_config(request),
+            repair_remaining_budget,
+        )
         policy = ModelCallPolicy(thinking="off", forced_tool="submit_review")
         repair_tools = self._submit_only_tools(tool_schemas, request)
         wire_config = config
@@ -969,15 +1245,33 @@ class InferenceEngine:
         prepare_call = getattr(self._model_client, "prepare_call", None)
         if callable(prepare_call):
             wire_config, wire_policy, wire_profile = prepare_call(config, policy)
+        wire_config = self._with_call_token_budget(
+            wire_config,
+            repair_remaining_budget,
+        )
         assembled_request = RequestAssembler.fit(
             repair_messages,
             repair_tools,
             wire_config,
             wire_policy,
-            budget=get_settings().final_submit_request_token_budget,
+            budget=self._call_fit_budget(
+                get_settings().final_submit_request_token_budget,
+                repair_remaining_budget,
+                wire_config.max_tokens,
+            ),
             profile=wire_profile,
         )
         repair_messages = assembled_request.messages
+        repair_input_estimate = max(0, int(assembled_request.estimated_tokens))
+        repair_output_reserve = max(0, int(wire_config.max_tokens))
+        repair_required = repair_input_estimate + repair_output_reserve
+        if (
+            repair_remaining_budget is not None
+            and repair_required > repair_remaining_budget
+        ):
+            raise _CallTokenBudgetExceeded(
+                "schema_repair_call_token_budget_exhausted"
+            )
         response = await self._chat_with_telemetry(
             messages=repair_messages,
             config=config,
@@ -986,6 +1280,8 @@ class InferenceEngine:
             iteration=iteration,
             stage=stage,
             force_submit=True,
+            request_estimated_tokens=repair_input_estimate,
+            max_output_tokens=repair_output_reserve,
         )
         response_id = self._persist_model_response(response, iteration)
         plan, parse_meta = self._parse_tool_calls(
@@ -1036,11 +1332,16 @@ class InferenceEngine:
         expected = expected_name or (
             "submit_review" if isinstance(request, ReviewRequest) else "submit_debug"
         )
+        allowed = (
+            {"save_finding", "revise_finding", "finish_review"}
+            if expected == "finish_review"
+            else {expected}
+        )
         return [
             tool
             for tool in tool_schemas
             if isinstance(tool.get("function"), dict)
-            and tool["function"].get("name") == expected
+            and tool["function"].get("name") in allowed
         ]
 
     @staticmethod
@@ -1048,6 +1349,39 @@ class InferenceEngine:
         if config is None:
             return None
         return config.tool_choice
+
+    @staticmethod
+    def _with_call_token_budget(
+        config: ModelConfig,
+        remaining_tokens: int | None,
+    ) -> ModelConfig:
+        """Set C's runtime-only provider reserve when that field is available."""
+
+        fields = getattr(config.__class__, "model_fields", {})
+        if "call_token_budget" not in fields:
+            return config
+        return config.model_copy(
+            update={"call_token_budget": remaining_tokens},
+        )
+
+    @staticmethod
+    def _call_fit_budget(
+        request_budget: int,
+        remaining_tokens: int | None,
+        max_output_tokens: int,
+    ) -> int:
+        if remaining_tokens is None:
+            return max(1, int(request_budget))
+        input_budget = max(1, int(remaining_tokens) - max(0, int(max_output_tokens)))
+        return max(1, min(int(request_budget), input_budget))
+
+    def _remaining_call_token_budget(
+        self,
+        remaining_tokens: int | None,
+    ) -> int | None:
+        if remaining_tokens is None:
+            return None
+        return max(0, int(remaining_tokens) - self._last_call_budget_tokens_used)
 
     def _parse_tool_calls(
         self,
@@ -1065,6 +1399,13 @@ class InferenceEngine:
         v3_save_findings: list[ModelSaveFindingActionV3] = []
         v3_revise_findings: list[ModelReviseFindingActionV3] = []
         v3_finish_review: ModelFinishReviewActionV3 | None = None
+        v3_action_call_refs: list[V3ActionCallRef] = []
+        v3_action_indexes: dict[str, int] = {
+            "save_finding": 0,
+            "revise_finding": 0,
+            "finish_review": 0,
+        }
+        seen_raw_provider_call_ids: set[str] = set()
         draft_review: ReviewReport | None = None
         repair_response: ModelRepairResponse | ModelRepairResponseV3 | None = None
         draft_debug: DebugResponse | None = None
@@ -1086,7 +1427,44 @@ class InferenceEngine:
             "format_recovery_validation_error": "",
         }
 
-        for raw in raw_calls:
+        def add_v3_action_call_ref(
+            name: str,
+            raw_call_index: int,
+            raw: dict[str, Any],
+            *,
+            action_index: int | None = None,
+            validation_error: str = "",
+        ) -> None:
+            function_block = raw.get("function", {})
+            raw_arguments = (
+                function_block.get("arguments")
+                if isinstance(function_block, dict)
+                else None
+            )
+            v3_action_call_refs.append(
+                V3ActionCallRef(
+                    name=cast(
+                        Literal["save_finding", "revise_finding", "finish_review"],
+                        name,
+                    ),
+                    provider_call_id=str(raw.get("id", "")).strip(),
+                    raw_arguments=raw_arguments,
+                    raw_call_index=raw_call_index,
+                    action_index=action_index,
+                    validation_error=validation_error,
+                )
+            )
+
+        for raw_call_index, raw in enumerate(raw_calls):
+            raw_provider_call_id = (
+                str(raw.get("id", "")).strip() if isinstance(raw, dict) else ""
+            )
+            duplicate_raw_provider_call_id = bool(
+                raw_provider_call_id
+                and raw_provider_call_id in seen_raw_provider_call_ids
+            )
+            if raw_provider_call_id:
+                seen_raw_provider_call_ids.add(raw_provider_call_id)
             function_block = raw.get("function") if isinstance(raw, dict) else None
             if not isinstance(function_block, dict):
                 continue
@@ -1153,31 +1531,88 @@ class InferenceEngine:
                 "revise_finding",
                 "finish_review",
             }:
-                if force_submit and name != "finish_review":
+                if repair_mode:
                     parse_meta["force_submit_discarded_count"] += 1
+                    add_v3_action_call_ref(
+                        name,
+                        raw_call_index,
+                        raw,
+                        validation_error=(
+                            "v3 registry actions are not allowed inside an active repair transaction"
+                        ),
+                    )
                     continue
                 if argument_error or not isinstance(payload, dict):
+                    validation_error = argument_error or (
+                        f"Invalid {name} arguments type: {type(payload).__name__}"
+                    )
                     parse_meta.setdefault("v3_action_validation_errors", []).append(
-                        argument_error
-                        or f"Invalid {name} arguments type: {type(payload).__name__}"
+                        validation_error
+                    )
+                    add_v3_action_call_ref(
+                        name,
+                        raw_call_index,
+                        raw,
+                        validation_error=validation_error,
                     )
                     continue
                 try:
+                    validated_action: Any
                     if name == "save_finding":
-                        v3_save_findings.append(
-                            ModelSaveFindingActionV3.model_validate(payload)
-                        )
-                    elif name == "revise_finding":
-                        v3_revise_findings.append(
-                            ModelReviseFindingActionV3.model_validate(payload)
-                        )
-                    else:
-                        v3_finish_review = ModelFinishReviewActionV3.model_validate(
+                        validated_action = ModelSaveFindingActionV3.model_validate(
                             payload
                         )
+                    elif name == "revise_finding":
+                        validated_action = ModelReviseFindingActionV3.model_validate(
+                            payload
+                        )
+                    else:
+                        if v3_finish_review is not None:
+                            raise ValueError(
+                                "only one finish_review action is accepted per response"
+                            )
+                        validated_action = ModelFinishReviewActionV3.model_validate(
+                            payload
+                        )
+                    if duplicate_raw_provider_call_id:
+                        raise ValueError(
+                            "duplicate provider call id for v3 action; association is ambiguous"
+                        )
+                    action_index = v3_action_indexes[name]
+                    v3_action_indexes[name] += 1
+                    if name == "save_finding":
+                        v3_save_findings.append(validated_action)
+                    elif name == "revise_finding":
+                        v3_revise_findings.append(validated_action)
+                    else:
+                        v3_finish_review = validated_action
+                    add_v3_action_call_ref(
+                        name,
+                        raw_call_index,
+                        raw,
+                        action_index=action_index,
+                    )
                 except ValidationError as exc:
+                    validation_error = f"{name}: {exc}"
                     parse_meta.setdefault("v3_action_validation_errors", []).append(
-                        f"{name}: {exc}"
+                        validation_error
+                    )
+                    add_v3_action_call_ref(
+                        name,
+                        raw_call_index,
+                        raw,
+                        validation_error=validation_error,
+                    )
+                except ValueError as exc:
+                    validation_error = f"{name}: {exc}"
+                    parse_meta.setdefault("v3_action_validation_errors", []).append(
+                        validation_error
+                    )
+                    add_v3_action_call_ref(
+                        name,
+                        raw_call_index,
+                        raw,
+                        validation_error=validation_error,
                     )
                 continue
             if name == "submit_review":
@@ -1191,7 +1626,8 @@ class InferenceEngine:
                 if contract_version == "3.0":
                     parse_meta["submit_review_validation_error"] = (
                         "submit_review is not supported for finding contract 3.0; "
-                        "call finish_review"
+                        "use save_finding or revise_finding for Registry changes; "
+                        "finish_review is optional and only records an active model stop"
                     )
                     continue
                 if argument_error or not isinstance(payload, dict):
@@ -1325,6 +1761,7 @@ class InferenceEngine:
                     v3_save_findings=v3_save_findings,
                     v3_revise_findings=v3_revise_findings,
                     v3_finish_review=v3_finish_review,
+                    v3_action_call_refs=v3_action_call_refs,
                     draft_review=draft_review,
                     repair_response=repair_response,
                 ),
@@ -1717,6 +2154,63 @@ class InferenceEngine:
             )
         return Message(role="user", content="\n".join(lines))
 
+    @staticmethod
+    def _build_current_finding_handles_message(
+        handles: list[dict[str, str]] | None,
+    ) -> Message | None:
+        """Build the runtime-only current Registry directory for the model.
+
+        The directory is deliberately separate from the provider conversation:
+        it exposes only opaque handles and short display labels, never finding
+        bodies, versions, candidate ids, or evidence semantics.  ``anchor`` is
+        copied as display text and is not parsed or used for authorization.
+        """
+
+        if not handles:
+            return None
+        entries: list[dict[str, str]] = []
+        seen_handles: set[str] = set()
+        for raw in handles:
+            if not isinstance(raw, dict):
+                continue
+            opaque_handle = str(raw.get("opaque_handle", "") or "").strip()
+            if not opaque_handle or opaque_handle in seen_handles:
+                continue
+            seen_handles.add(opaque_handle)
+            entries.append(
+                {
+                    "opaque_handle": opaque_handle,
+                    "anchor": str(raw.get("anchor", "") or "").strip()[:256],
+                    "description_short": str(
+                        raw.get("description_short", "") or ""
+                    ).strip()[:240],
+                }
+            )
+        if not entries:
+            return None
+        return Message(
+            role="user",
+            content=(
+                "runtime_current_finding_handles (runtime directory only; "
+                "anchor is display text):\n"
+                + serialize_json(entries)
+            ),
+            preserve_on_trim=True,
+        )
+
+    @staticmethod
+    def _preserve_v3_registry_turns(messages: list[Message]) -> list[Message]:
+        """Return the canonical v3 transcript unchanged.
+
+        The runtime directory carries the current opaque handles separately;
+        this helper name remains for compatibility with callers that used the
+        earlier preservation hint.  Conversation history must retain original
+        provider calls/results so the assembler can trim complete turns without
+        rewriting finding arguments or silently dropping ordinary tool feedback.
+        """
+
+        return messages
+
     @classmethod
     def _build_tool_feedback_messages(
         cls,
@@ -1847,6 +2341,7 @@ class InferenceEngine:
         draft_findings: list[DraftFinding],
         *,
         validator_result: dict[str, Any] | None = None,
+        include_validator_feedback: bool = True,
         candidate_context_manifests: list[dict[str, Any]] | None = None,
         draft_states: list[DraftFindingState] | None = None,
         evidence_ledger: list[dict[str, Any]] | None = None,
@@ -1892,7 +2387,7 @@ class InferenceEngine:
                 )
             )
 
-        if validator_result:
+        if validator_result and include_validator_feedback:
             repair_feedback = cls._build_repair_feedback_message(
                 validator_result,
                 token_budget=max(1, token_budget),

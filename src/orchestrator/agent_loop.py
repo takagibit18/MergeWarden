@@ -86,7 +86,9 @@ from src.orchestrator.draft_findings import (
     extract_visible_draft_finding,
 )
 from src.orchestrator.run_journal import (
+    CandidateRegistrationJournalPayload,
     DraftFindingStateJournalPayload,
+    FindingFinalizationJournalPayload,
     FormatRecoveryJournalPayload,
     LengthRecoveryJournalPayload,
     ModelResponseJournalPayload,
@@ -183,8 +185,10 @@ class AgentOrchestrator:
         self._submit_iteration: int | None = None
         self._submit_debug_seen_any = False
         self._latest_tokens = 0
+        self._latest_budget_tokens = 0
         self._model_conversation = ModelConversation()
         self._total_tokens = 0
+        self._conservative_budget_tokens_used = 0
         self._successful_prompt_tokens = 0
         self._successful_completion_tokens = 0
         self._successful_reasoning_tokens = 0
@@ -205,7 +209,12 @@ class AgentOrchestrator:
         self._last_decision_reason: str = ""
         self._iteration_guard_hit = False
         self._run_timeout_hit = False
+        self._analysis_time_reserve_hit = False
+        self._analysis_time_reserve_reason = ""
         self._provider_error_seen = False
+        self._active_state: ContextState | None = None
+        self._cancellation_persisted = False
+        self._cancelled = False
         self._tool_bearing_iterations: set[int] = set()
         self._workspace_root: Path | None = None
         self._run_started_at = 0.0
@@ -289,6 +298,23 @@ class AgentOrchestrator:
         self._semantic_model_call_count = 0
         self._semantic_investigation_call_count = 0
         self._semantic_investigation_tool_call_count = 0
+        self._semantic_telemetry_totals: dict[str, int] = {
+            "successful_model_call_count": 0,
+            "failed_model_call_count": 0,
+            "provider_attempt_count": 0,
+            "failed_provider_attempt_count": 0,
+            "failed_unknown_usage_count": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "reasoning_tokens": 0,
+            "total_tokens": 0,
+            "budget_tokens_used": 0,
+            "cached_prompt_tokens": 0,
+            "cache_observation_count": 0,
+            "cache_hit_count": 0,
+        }
+        self._runtime_closeout_done = False
+        self._runtime_closeout_reason = ""
         self._semantic_receipts: list[dict[str, Any]] = []
         self._semantic_handles: dict[str, str] = {}
         self._v3_handle_to_candidate: dict[str, str] = {}
@@ -349,6 +375,15 @@ class AgentOrchestrator:
         )
 
     async def run_review(self, request: ReviewRequest) -> ReviewResponse:
+        """Run review mode and persist a cancellation snapshot before propagating it."""
+
+        try:
+            return await self._run_review(request)
+        except asyncio.CancelledError:
+            self._persist_cancelled_run(self._active_state)
+            raise
+
+    async def _run_review(self, request: ReviewRequest) -> ReviewResponse:
         """Run review mode through the orchestrator loop."""
         self._reset_run(
             max_iterations=(
@@ -364,6 +399,7 @@ class AgentOrchestrator:
                 review_context=review_context,
             )
         state = self.prepare_context(request)
+        self._active_state = state
         await self._prepare_review_context(state, request)
         reviewer_started = perf_counter()
         await self._maybe_prefetch_review_changed_files(state, request)
@@ -428,7 +464,10 @@ class AgentOrchestrator:
                 self._record_pre_budget_submit("completed", state, submit_plan)
                 break
             self._iteration += 1
-        response = await self._maybe_force_submit_review(state, request, response)
+        if self._settings.finding_contract_version == "3.0":
+            response = self._closeout_v3_response(state, response)
+        else:
+            response = await self._maybe_force_submit_review(state, request, response)
         assert isinstance(response, ReviewResponse)
         response = await self._maybe_recover_review_workflow(response, request, state)
         response = await self._maybe_repair_review_findings(response, request, state)
@@ -446,6 +485,66 @@ class AgentOrchestrator:
         self._record_finding_funnel(response)
         self._record_review_telemetry(state, response=response)
         self._close_event_log()
+        return response
+
+    def _closeout_v3_response(
+        self,
+        state: ContextState,
+        response: ReviewResponse | DebugResponse | None,
+    ) -> ReviewResponse | DebugResponse:
+        """Hand the current registry candidate set to the v3 verification path."""
+
+        assert response is not None
+        if not isinstance(response, ReviewResponse):
+            return response
+        if self._runtime_closeout_done:
+            # Idempotence means returning the caller's current response, not
+            # restoring the first closeout snapshot over later verification or
+            # mechanical repair changes.
+            return response
+
+        issues = self._candidate_registry.closeout_issues()
+        if self._v3_finish_seen:
+            summary = (
+                self._v3_finish_summary.strip()
+                or response.report.summary.strip()
+                or "Review completed with no findings."
+            )
+        elif issues:
+            summary = "Review results from runtime-collected finding candidates."
+        else:
+            # A natural stop without a finish action is not evidence that the
+            # repository is clean.  Keep the report neutral and incomplete.
+            summary = "Review stopped before an explicit finish; no finding was confirmed."
+        closeout_report = self._result_processor.build_runtime_closeout_report(
+            response.report,
+            issues,
+            summary=summary,
+            contract_version="3.0",
+        )
+        self._runtime_closeout_done = True
+        self._runtime_closeout_reason = self._last_decision_reason or "runtime_closeout"
+        self._submit_review_seen_any = True
+        self._submit_iteration = self._iteration
+        self._finalization_status = "runtime_closeout"
+        self._review_stage = "complete"
+        state.candidate_registrations = self._candidate_registry.snapshot()
+        response.report = closeout_report
+        response.context = state
+        response.submission_received = True
+        self._record_event(
+            EventType.DECISION,
+            "runtime_closeout",
+            {
+                "iteration": self._iteration,
+                "candidate_count": len(issues),
+                "finish_seen": self._v3_finish_seen,
+                "submission_received": True,
+                "reason": self._runtime_closeout_reason,
+                "budget_state": self._budget_state,
+                "incomplete_reasons": list(self._completion_incomplete_reasons),
+            },
+        )
         return response
 
     async def _prepare_review_context(
@@ -481,11 +580,26 @@ class AgentOrchestrator:
         request: ReviewRequest,
         state: ContextState,
     ) -> ReviewResponse:
-        submitted_report = (
-            self._last_plan.draft_review
-            if self._last_plan is not None and self._last_plan.draft_review is not None
-            else response.report
-        )
+        if (
+            self._settings.finding_contract_version == "3.0"
+            and self._runtime_closeout_done
+        ):
+            # Mechanical repair is allowed to advance Registry content before
+            # semantic verification.  Rebuild from the live registry so the
+            # initial closeout snapshot can never roll a valid revision back.
+            submitted_report = self._result_processor.build_runtime_closeout_report(
+                response.report,
+                self._candidate_registry.closeout_issues(),
+                summary=response.report.summary,
+                contract_version="3.0",
+            )
+        else:
+            submitted_report = (
+                self._last_plan.draft_review
+                if self._last_plan is not None
+                and self._last_plan.draft_review is not None
+                else response.report
+            )
         guarded = self._verify_with_integrity_guard(
             response,
             submitted_report,
@@ -631,6 +745,9 @@ class AgentOrchestrator:
             for candidate_id, failures in guard_result.failures.items()
         }
         self._integrity_failure_details = guard_result.failure_details
+        candidate_statuses: dict[str, str] = {
+            result.candidate_id: result.status for result in guard_result.results
+        }
         self._record_event(
             EventType.FINDING_VERIFICATION_COMPLETED,
             "verify_findings",
@@ -652,10 +769,7 @@ class AgentOrchestrator:
                     for candidate_id, codes in self._integrity_failure_codes.items()
                 },
                 "integrity_failure_details": self._integrity_failure_details,
-                "candidate_statuses": {
-                    result.candidate_id: result.status
-                    for result in guard_result.results
-                },
+                "candidate_statuses": candidate_statuses,
                 "review_outcome": self._review_outcome,
                 "verifier_kind": "integrity_guard",
             },
@@ -944,13 +1058,26 @@ class AgentOrchestrator:
             return investigation
 
         diff_text = request.diff_text or ""
+        remaining_model_calls = max(
+            0,
+            self._settings.semantic_verifier_max_model_calls
+            - self._semantic_model_call_count,
+        )
+        remaining_investigation_calls = max(
+            0,
+            self._settings.semantic_verifier_max_investigation_calls
+            - self._semantic_investigation_call_count,
+        )
+        remaining_investigation_tool_calls = max(
+            0,
+            self._settings.semantic_verifier_max_investigation_tool_calls
+            - self._semantic_investigation_tool_call_count,
+        )
         budget = SemanticVerifierBudget(
             batch_size=self._settings.semantic_verifier_batch_size,
-            max_model_calls=self._settings.semantic_verifier_max_model_calls,
-            max_investigation_calls=self._settings.semantic_verifier_max_investigation_calls,
-            max_investigation_tool_calls=(
-                self._settings.semantic_verifier_max_investigation_tool_calls
-            ),
+            max_model_calls=remaining_model_calls,
+            max_investigation_calls=remaining_investigation_calls,
+            max_investigation_tool_calls=remaining_investigation_tool_calls,
             timeout_seconds=max(
                 0.001,
                 min(
@@ -960,12 +1087,20 @@ class AgentOrchestrator:
             ),
             token_budget=self._settings.token_budget,
             hard_token_budget=self._settings.token_hard_budget,
-            initial_tokens_used=self._total_tokens,
+            # This is the conservative run-wide budget ledger, not the actual
+            # provider-cost ledger.  It preserves estimated input charges when
+            # usage is missing or under-reported across a recursive recheck.
+            initial_tokens_used=self._conservative_budget_tokens_used,
             request_token_budget=self._settings.assembled_request_token_budget,
         )
-        if self._budget_exhausted or self._run_timeout_exceeded():
-            # The semantic gate shares the report-level budget.  A depleted
-            # budget is an unresolved verifier result, never a guard-only pass.
+        if (
+            self._conservative_budget_tokens_used
+            >= self._settings.token_hard_budget
+            or self._budget_state == "hard_capped"
+            or self._run_timeout_exceeded()
+        ):
+            # The semantic gate may use the protected soft-budget reserve, but
+            # a hard cap or expired run deadline forbids another model call.
             budget.max_model_calls = 0
         verifier = SemanticVerifier(self._model_client, budget=budget)
         def observe_semantic_usage(
@@ -998,25 +1133,52 @@ class AgentOrchestrator:
                     self._cache_observation_count += 1
                     self._successful_cached_prompt_tokens += max(0, int(cached))
                     self._provider_cache_hit_count += int(cached > 0)
-            self._budget_state = self._result_processor.budget_state(self._total_tokens)
-            self._budget_exhausted = self._budget_state != "none"
+            self._refresh_budget_state()
 
-        semantic_result = await verifier.verify(
-            candidate_items,
-            changed_diff=diff_text,
-            evidence=evidence,
-            context=semantic_context,
-            content_versions=versions,
-            evidence_context_digests=evidence_digests,
-            investigator=investigate,
-            investigation_evidence_refs=investigation_evidence_refs,
-            usage_observer=observe_semantic_usage,
+        try:
+            semantic_result = await verifier.verify(
+                candidate_items,
+                changed_diff=diff_text,
+                evidence=evidence,
+                context=semantic_context,
+                content_versions=versions,
+                evidence_context_digests=evidence_digests,
+                investigator=investigate,
+                investigation_evidence_refs=investigation_evidence_refs,
+                usage_observer=observe_semantic_usage,
+            )
+        except asyncio.CancelledError:
+            # The verifier consumes the provider attempt ledger before
+            # propagating cancellation.  Its private aggregate includes both
+            # completed calls and the in-flight unknown-output attempt; commit
+            # that conservative charge once while leaving actual usage in the
+            # observer's separate cost ledger.
+            self._conservative_budget_tokens_used += max(
+                0,
+                int(getattr(verifier, "last_budget_tokens_used", 0) or 0),
+            )
+            self._refresh_budget_state()
+            raise
+        # Semantic repair recursively invokes this method.  These counters are
+        # run-wide ledgers, so a recheck consumes only the remaining quota and
+        # never replaces the first pass's telemetry.
+        self._semantic_model_call_count += semantic_result.model_call_count
+        self._semantic_investigation_call_count += (
+            semantic_result.investigation_call_count
         )
-        self._semantic_model_call_count = semantic_result.model_call_count
-        self._semantic_investigation_call_count = semantic_result.investigation_call_count
-        self._semantic_investigation_tool_call_count = (
+        self._semantic_investigation_tool_call_count += (
             semantic_result.investigation_tool_call_count
         )
+        for field in self._semantic_telemetry_totals:
+            self._semantic_telemetry_totals[field] += max(
+                0,
+                int(getattr(semantic_result, field, 0) or 0),
+            )
+        self._conservative_budget_tokens_used += max(
+            0,
+            int(semantic_result.budget_tokens_used or 0),
+        )
+        self._refresh_budget_state()
         self._semantic_accepted_count = semantic_result.accepted_count
         self._semantic_rejected_count = semantic_result.rejected_count
         self._semantic_needs_revision_count = semantic_result.needs_revision_count
@@ -1045,7 +1207,6 @@ class AgentOrchestrator:
                     evidence_context_digest=receipt.evidence_context_digest,
                 )
                 if not receipt_saved:
-                    self._semantic_unresolved_count += 1
                     self._add_incomplete_reason(
                         state, "semantic_receipt_binding_failed"
                     )
@@ -1056,6 +1217,20 @@ class AgentOrchestrator:
             if receipt.verdict == "accept" and not receipt.severity_correction:
                 accepted_handles.add(receipt.opaque_handle)
 
+        (
+            projected_total,
+            projected_accepted,
+            projected_rejected,
+            projected_needs_revision,
+            projected_unresolved,
+            projected_accepted_issues,
+        ) = self._project_current_semantic_closeout(
+            fallback_candidates={
+                candidate.candidate_id: candidate.issue
+                for candidate in candidate_by_handle.values()
+            },
+            fallback_integrity_blocked_count=integrity_blocked_v3_count,
+        )
         accepted_issues = [
             candidate_by_handle[handle].issue
             for handle in accepted_handles
@@ -1110,12 +1285,21 @@ class AgentOrchestrator:
                     preserve_issues=preserved_for_recheck,
                     allow_semantic_repair=False,
                 )
+        # The recursive recheck may have covered only repaired targets.  The
+        # Registry remains the closeout authority, so project every current
+        # version's latest valid receipt before exposing report-level counts.
+        total = projected_total
+        self._semantic_accepted_count = projected_accepted
+        self._semantic_rejected_count = projected_rejected
+        self._semantic_needs_revision_count = projected_needs_revision
+        self._semantic_unresolved_count = projected_unresolved
+        if total:
+            accepted_issues = projected_accepted_issues
         response.report = ReviewReport(
             summary=submitted_report.summary,
             issues=accepted_issues,
             schema_version=submitted_report.schema_version,
         )
-        total = len(candidate_items) + integrity_blocked_v3_count
         self._semantic_verifier_completed = (
             total > 0
             and self._semantic_unresolved_count == 0
@@ -1133,8 +1317,11 @@ class AgentOrchestrator:
             self._semantic_verifier_completed
             and not self._integrity_needs_repair_count
             and not self._integrity_invalid_count
+            and not self._completion_incomplete_reasons
         )
-        response.external_publish_status = "ready" if response.report_ready else "not_requested"
+        response.external_publish_status = (
+            "ready" if response.report_ready else "not_requested"
+        )
         semantic_reasons = list(semantic_result.errors)
         if self._semantic_unresolved_count:
             semantic_reasons.append("semantic_verifier_unresolved")
@@ -1164,19 +1351,41 @@ class AgentOrchestrator:
                 "needs_revision_count": self._semantic_needs_revision_count,
                 "unresolved_count": self._semantic_unresolved_count,
                 "model_call_count": self._semantic_model_call_count,
-                "successful_model_call_count": semantic_result.successful_model_call_count,
-                "failed_model_call_count": semantic_result.failed_model_call_count,
-                "prompt_tokens": semantic_result.prompt_tokens,
-                "completion_tokens": semantic_result.completion_tokens,
-                "reasoning_tokens": semantic_result.reasoning_tokens,
-                "total_tokens": semantic_result.total_tokens,
-                "provider_attempt_count": semantic_result.provider_attempt_count,
-                "failed_provider_attempt_count": semantic_result.failed_provider_attempt_count,
-                "failed_unknown_usage_count": semantic_result.failed_unknown_usage_count,
-                "budget_tokens_used": semantic_result.budget_tokens_used,
-                "cached_prompt_tokens": semantic_result.cached_prompt_tokens,
-                "cache_observation_count": semantic_result.cache_observation_count,
-                "cache_hit_count": semantic_result.cache_hit_count,
+                "successful_model_call_count": self._semantic_telemetry_totals[
+                    "successful_model_call_count"
+                ],
+                "failed_model_call_count": self._semantic_telemetry_totals[
+                    "failed_model_call_count"
+                ],
+                "prompt_tokens": self._semantic_telemetry_totals["prompt_tokens"],
+                "completion_tokens": self._semantic_telemetry_totals[
+                    "completion_tokens"
+                ],
+                "reasoning_tokens": self._semantic_telemetry_totals[
+                    "reasoning_tokens"
+                ],
+                "total_tokens": self._semantic_telemetry_totals["total_tokens"],
+                "provider_attempt_count": self._semantic_telemetry_totals[
+                    "provider_attempt_count"
+                ],
+                "failed_provider_attempt_count": self._semantic_telemetry_totals[
+                    "failed_provider_attempt_count"
+                ],
+                "failed_unknown_usage_count": self._semantic_telemetry_totals[
+                    "failed_unknown_usage_count"
+                ],
+                "budget_tokens_used": self._semantic_telemetry_totals[
+                    "budget_tokens_used"
+                ],
+                "cached_prompt_tokens": self._semantic_telemetry_totals[
+                    "cached_prompt_tokens"
+                ],
+                "cache_observation_count": self._semantic_telemetry_totals[
+                    "cache_observation_count"
+                ],
+                "cache_hit_count": self._semantic_telemetry_totals[
+                    "cache_hit_count"
+                ],
                 "investigation_call_count": self._semantic_investigation_call_count,
                 "investigation_tool_call_count": self._semantic_investigation_tool_call_count,
                 "receipts": [
@@ -1197,6 +1406,112 @@ class AgentOrchestrator:
             state=state,
         )
         return response
+
+    def _project_current_semantic_closeout(
+        self,
+        *,
+        fallback_candidates: dict[str, ReviewIssue],
+        fallback_integrity_blocked_count: int,
+    ) -> tuple[int, int, int, int, int, list[ReviewIssue]]:
+        """Project one report-level semantic view from current Registry state.
+
+        A recursive semantic recheck intentionally receives only repaired
+        candidates.  Counting that target-only result would erase prior
+        unresolved/rejected/accepted candidates.  Registry records are the
+        current closeout set; a receipt is valid only when its content version
+        still matches the record, so old-version receipts cannot participate in
+        the final report.
+        """
+
+        records = list(self._candidate_registry.records)
+        total = 0
+        accepted = 0
+        rejected = 0
+        needs_revision = 0
+        unresolved = 0
+        accepted_issues: list[ReviewIssue] = []
+        seen_candidate_ids: set[str] = set()
+        valid_statuses = {"verified", "published"}
+
+        for record in records:
+            issue = self._candidate_registry.authoritative_issue(record.candidate_id)
+            if issue is None or issue.schema_version != "3.0":
+                continue
+            candidate_id = record.candidate_id
+            seen_candidate_ids.add(candidate_id)
+            total += 1
+            current_version = str(record.candidate_content_version or "").strip()
+            current_receipts = [
+                item
+                for item in record.semantic_receipts
+                if str(item.get("content_version", "")).strip()
+                == current_version
+            ]
+            receipt = current_receipts[-1] if current_receipts else None
+            if receipt is None:
+                unresolved += 1
+                continue
+            receipt_version = str(receipt.get("content_version", "")).strip()
+            receipt_digest = str(receipt.get("evidence_context_digest", "")).strip()
+            registered_digest = str(
+                record.semantic_validated_evidence_context_digest or ""
+            ).strip()
+            receipt_candidate_id = str(receipt.get("candidate_id", "")).strip()
+            binding_valid = bool(
+                record.status in valid_statuses
+                and current_version
+                and record.semantic_validated_content_version == current_version
+                and receipt_version == current_version
+                and receipt.get("status") == "completed"
+                and receipt_digest
+                and receipt_digest == registered_digest
+                and (not receipt_candidate_id or receipt_candidate_id == candidate_id)
+                and candidate_content_version(issue) == current_version
+            )
+            if not binding_valid:
+                unresolved += 1
+                continue
+            verdict = str(receipt.get("verdict", "")).strip()
+            if verdict == "accept":
+                correction = str(
+                    getattr(
+                        receipt.get("severity_correction"),
+                        "value",
+                        receipt.get("severity_correction", ""),
+                    )
+                    or ""
+                ).strip()
+                if correction:
+                    needs_revision += 1
+                else:
+                    accepted += 1
+                    accepted_issues.append(issue)
+            elif verdict == "reject":
+                rejected += 1
+            elif verdict == "needs_revision":
+                needs_revision += 1
+            else:
+                unresolved += 1
+
+        # Keep direct/offline callers fail-closed when they provide semantic
+        # candidates without populating the runtime Registry.  Normal v3 runs
+        # take the Registry branch above.
+        for candidate_id, issue in fallback_candidates.items():
+            if candidate_id in seen_candidate_ids:
+                continue
+            total += 1
+            unresolved += 1
+        if not records:
+            unresolved += max(0, int(fallback_integrity_blocked_count))
+            total += max(0, int(fallback_integrity_blocked_count))
+        return (
+            total,
+            accepted,
+            rejected,
+            needs_revision,
+            unresolved,
+            accepted_issues,
+        )
 
     def _journal_semantic_receipt(
         self,
@@ -1525,6 +1840,7 @@ class AgentOrchestrator:
             return None
 
         diagnostics: list[dict[str, Any]] = []
+        applied_before_merge = list(transaction.applied_response_fingerprints)
         merged = self._merge_repair_response(
             repair_report,
             repair_plan.repair_response,
@@ -1545,6 +1861,33 @@ class AgentOrchestrator:
             ]
             for code in dict.fromkeys(codes):
                 self._add_incomplete_reason(state, code)
+
+        if diagnostics or any(
+            transaction.target_results.get(candidate_id) != "repaired"
+            for candidate_id in target_ids
+        ):
+            # Merge is only staging. A structurally valid unchanged original
+            # must not turn a rejected or deferred patch into a committed repair.
+            transaction.applied_response_fingerprints = applied_before_merge
+            reason_codes = list(dict.fromkeys(
+                str(item["code"]) for item in diagnostics if item.get("code")
+            )) or ["semantic_repair_not_applied"]
+            for code in reason_codes:
+                self._add_incomplete_reason(state, code)
+            self._finish_repair_transaction(
+                status="incomplete",
+                target_results={
+                    candidate_id: (
+                        transaction.target_results.get(candidate_id, "incomplete")
+                        if transaction.target_results.get(candidate_id) != "repaired"
+                        else "incomplete"
+                    )
+                    for candidate_id in target_ids
+                },
+                reasons=reason_codes,
+                state=state,
+            )
+            return None
 
         merged_candidates = build_candidates(
             merged,
@@ -2159,7 +2502,7 @@ class AgentOrchestrator:
     ) -> None:
         """Persist final candidate dispositions without leaking source secrets."""
 
-        statuses = {
+        statuses: dict[str, str] = {
             result.candidate_id: result.status for result in guard_result.results
         }
         if self._active_repair_transaction is not None:
@@ -3597,6 +3940,14 @@ class AgentOrchestrator:
         request: ReviewRequest,
         state: ContextState,
     ) -> ReviewResponse:
+        if (
+            self._settings.finding_contract_version == "3.0"
+            or self._runtime_closeout_done
+        ):
+            # v3 closeout is a one-way runtime handoff.  Recovery here used to
+            # re-enter analyze/execute after the loop and could append candidates
+            # after the authoritative snapshot had already been taken.
+            return response
         if self._workflow_enforcement != "enforce":
             return response
         has_candidates = bool(response.report.issues)
@@ -3683,6 +4034,14 @@ class AgentOrchestrator:
         workflow_filtered_issue_count = 0
         workflow_invalid = bool(missing)
         if missing and self._workflow_enforcement == "enforce":
+            # Filtering findings is a safety restriction, not evidence that the
+            # remaining report is complete.  Keep the limiting reason attached
+            # to the run even when partial content survives the filter.
+            self._add_incomplete_reason(
+                state,
+                "workflow_incomplete",
+                close_pending_drafts=False,
+            )
             before_filter_count = len(response.report.issues)
             response.report.issues = [
                 issue
@@ -3985,6 +4344,15 @@ class AgentOrchestrator:
         )
 
     async def run_debug(self, request: DebugRequest) -> DebugResponse:
+        """Run debug mode and persist a cancellation snapshot before propagating it."""
+
+        try:
+            return await self._run_debug(request)
+        except asyncio.CancelledError:
+            self._persist_cancelled_run(self._active_state)
+            raise
+
+    async def _run_debug(self, request: DebugRequest) -> DebugResponse:
         """Run debug mode through the orchestrator loop."""
         self._reset_run(
             max_iterations=(
@@ -3996,6 +4364,7 @@ class AgentOrchestrator:
         if self._external_registry is None:
             self._registry = create_default_registry(include_execute=True)
         state = self.prepare_context(request)
+        self._active_state = state
         response: ReviewResponse | DebugResponse | None = None
         while True:
             self._iteration_progress = False
@@ -4034,6 +4403,10 @@ class AgentOrchestrator:
     ) -> ReviewResponse | DebugResponse:
         """Finalize normal runs or recover a truncated review submission."""
         assert response is not None
+        if self._settings.finding_contract_version == "3.0":
+            # Compatibility callers may still invoke this hook, but v3 never
+            # asks the model for a submit-only supplement or infers finish.
+            return self._closeout_v3_response(state, response)
         if self._permission_mode == "plan":
             self._finalization_status = "skipped_plan_mode"
             return response
@@ -4341,6 +4714,7 @@ class AgentOrchestrator:
     ) -> AnalysisPlan:
         """Run model analysis and return structured plan."""
         start = perf_counter()
+        self._latest_budget_tokens = 0
         self._last_actual_reasoning_effort = "unknown"
         self._iteration_state_action_applied = False
         pending_draft_exploration = (
@@ -4352,9 +4726,30 @@ class AgentOrchestrator:
             )
         )
         explicit_exploration_allowed = allow_exploration or pending_draft_exploration
-        submit_only_call = force_submit or (
+        contract_version = (
+            self._settings.finding_contract_version
+            if isinstance(request, ReviewRequest)
+            else "2.0"
+        )
+        v3_normal_review = (
+            isinstance(request, ReviewRequest)
+            and contract_version == "3.0"
+            and not repair_mode
+        )
+        near_last_iteration = (
             self._iteration + 1 >= self._max_iterations
             and not explicit_exploration_allowed
+            and not v3_normal_review
+        )
+        submit_only_call = repair_mode or (
+            not v3_normal_review
+            and (
+                force_submit
+                or (
+                    self._iteration + 1 >= self._max_iterations
+                    and not explicit_exploration_allowed
+                )
+            )
         )
         logical_stage = (
             "repair"
@@ -4365,13 +4760,13 @@ class AgentOrchestrator:
             if any(spec.name == "validate_review_draft" for spec in tool_specs)
             else "explore"
         )
-        contract_version = (
-            self._settings.finding_contract_version
-            if isinstance(request, ReviewRequest)
-            else "2.0"
-        )
         model_call_success = False
         wire_tool_schema_count = 0
+        engine_force_submit = (
+            submit_only_call
+            if contract_version == "3.0"
+            else (force_submit or repair_mode)
+        )
         state.decisions.append(
             DecisionStep(
                 phase="analyze",
@@ -4418,6 +4813,13 @@ class AgentOrchestrator:
             snapshot_id=self._evidence_snapshot_id,
             revision=self._evidence_revision,
         ).to_payload()
+        remaining_call_token_budget = self._remaining_call_token_budget(
+            request,
+            repair_mode=repair_mode,
+        )
+        current_finding_handles = (
+            self._current_v3_finding_handles() if v3_normal_review else None
+        )
 
         engine = self._build_engine()
         if engine is None:
@@ -4432,10 +4834,12 @@ class AgentOrchestrator:
             result = self._fallback_plan(request)
             self._latest_tokens = 0
         else:
+            exploration_time_limit = False
+            soft_exploration_deadline_elapsed = 0.0
             try:
                 defer_review_submit = (
                     isinstance(request, ReviewRequest)
-                    and not force_submit
+                    and not submit_only_call
                     and self._iteration < self._review_min_tool_iterations
                     and self._permission_mode != "plan"
                 )
@@ -4444,11 +4848,6 @@ class AgentOrchestrator:
                     request=request,
                     defer_submit=defer_review_submit,
                 )
-                near_last_iteration = (
-                    self._iteration + 1 >= self._max_iterations
-                    and not explicit_exploration_allowed
-                )
-                submit_only_call = force_submit or near_last_iteration
                 call_stage = (
                     "submit_only"
                     if submit_only_call
@@ -4465,11 +4864,11 @@ class AgentOrchestrator:
                     serialized_tools = build_repair_tool_schemas(
                         contract_version=contract_version
                     )
-                elif force_submit:
+                elif submit_only_call:
                     serialized_tools = (
                         build_v3_finding_action_tool_schemas(
-                            include_save=False,
-                            include_revise=False,
+                            include_save=True,
+                            include_revise=True,
                             include_finish=True,
                         )
                         if contract_version == "3.0"
@@ -4489,7 +4888,9 @@ class AgentOrchestrator:
                         serialized_tools.append(build_draft_finding_tool_schema())
                         serialized_tools.append(build_draft_finding_update_tool_schema())
                     if contract_version == "3.0":
-                        serialized_tools += build_v3_finding_action_tool_schemas()
+                        serialized_tools += build_v3_finding_action_tool_schemas(
+                            include_finish=not defer_review_submit
+                        )
                     elif not defer_review_submit:
                         serialized_tools += build_submit_tool_schemas(
                             model_input=True,
@@ -4498,46 +4899,123 @@ class AgentOrchestrator:
                         )
                 wire_tool_schema_count = len(serialized_tools)
                 self._final_submit_attempt_count += int(submit_only_call)
-                result, usage = await engine.analyze(
-                    state=state,
-                    request=request,
-                    tool_specs=active_tool_specs,
-                    tool_schemas=serialized_tools,
-                    diff_text=diff_text,
-                    error_log=error_log_text,
-                    project_structure=project_structure,
-                    file_contents=file_contents,
-                    tool_feedback=self._tool_feedback,
-                    feedback_digest_index=self._feedback_digest_index,
-                    draft_findings=self._draft_finding_store.all(),
-                    validator_result=self._last_validator_result,
-                    prompt_input_token_budget=self._settings.prompt_input_token_budget,
-                    iteration=self._iteration,
-                    force_submit=force_submit,
-                    near_last_iteration=near_last_iteration,
-                    defer_submit=defer_review_submit,
-                    stage=call_stage,
-                    skill_selection=skill_selection,
-                    skill_telemetry=skill_telemetry,
-                    repair_attempt_budget=(
-                        max(
-                            0,
-                            self._settings.review_repair_max_attempts
-                            - self._review_repair_attempt_count,
-                        )
-                        if isinstance(request, ReviewRequest)
-                        else None
-                    ),
-                    allow_exploration=explicit_exploration_allowed,
+                charged_tokens = max(
+                    self._total_tokens,
+                    self._conservative_budget_tokens_used,
+                )
+                if (
+                    self._budget_state == "hard_capped"
+                    or charged_tokens >= self._settings.token_hard_budget
+                ):
+                    # A hard cap is a no-new-provider-call boundary.  The
+                    # semantic verifier has the same guard for its reserve.
+                    raise ModelClientError(
+                        "Model analysis skipped after the hard token budget was reached.",
+                        code="runtime_token_hard_preflight",
+                    )
+                if (
+                    remaining_call_token_budget is not None
+                    and remaining_call_token_budget <= 0
+                ):
+                    # Soft-cap exhaustion stops normal exploration while
+                    # leaving the protected post-processing reserve available.
+                    raise ModelClientError(
+                        "Model analysis skipped after the protected token reserve was reached.",
+                        code="runtime_token_soft_preflight",
+                    )
+                remaining_run_seconds = (
+                    self._run_timeout_seconds - self._run_elapsed_seconds()
+                )
+                if remaining_run_seconds <= 0:
+                    raise asyncio.TimeoutError
+                time_reserve = self._postprocessing_time_reserve_seconds(
+                    request,
                     repair_mode=repair_mode,
-                    submit_tool_name=(
-                        "repair_review"
-                        if repair_mode
-                        else "finish_review"
-                        if contract_version == "3.0" and submit_only_call
-                        else None
+                )
+                call_timeout = remaining_run_seconds - time_reserve
+                exploration_time_limit = bool(
+                    v3_normal_review and time_reserve > 0
+                )
+                soft_exploration_deadline_elapsed = (
+                    self._run_elapsed_seconds() + max(0.0, call_timeout)
+                )
+                if call_timeout <= 0:
+                    raise ModelClientError(
+                        "Model analysis stopped to preserve post-processing time.",
+                        code="runtime_time_reserve",
+                    )
+                engine_parameters = inspect.signature(engine.analyze).parameters
+                accepts_runtime_kwargs = any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD
+                    for parameter in engine_parameters.values()
+                )
+                runtime_kwargs: dict[str, Any] = {}
+                if (
+                    "remaining_call_token_budget" in engine_parameters
+                    or accepts_runtime_kwargs
+                ):
+                    runtime_kwargs["remaining_call_token_budget"] = (
+                        remaining_call_token_budget
+                    )
+                if (
+                    v3_normal_review
+                    and (
+                        "current_finding_handles" in engine_parameters
+                        or accepts_runtime_kwargs
+                    )
+                ):
+                    runtime_kwargs["current_finding_handles"] = (
+                        current_finding_handles or []
+                    )
+                result, usage = await asyncio.wait_for(
+                    engine.analyze(
+                        state=state,
+                        request=request,
+                        tool_specs=active_tool_specs,
+                        tool_schemas=serialized_tools,
+                        diff_text=diff_text,
+                        error_log=error_log_text,
+                        project_structure=project_structure,
+                        file_contents=file_contents,
+                        tool_feedback=self._tool_feedback,
+                        feedback_digest_index=self._feedback_digest_index,
+                        draft_findings=self._draft_finding_store.all(),
+                        validator_result=self._last_validator_result,
+                        prompt_input_token_budget=self._settings.prompt_input_token_budget,
+                        iteration=self._iteration,
+                        # v2 keeps the historical split: near-last iteration
+                        # is expressed through near_last_iteration/stage, while
+                        # force_submit remains reserved for an explicit caller
+                        # request or repair.  v3 normal turns never become
+                        # submit-only merely because the loop is closing.
+                        force_submit=engine_force_submit,
+                        near_last_iteration=near_last_iteration,
+                        defer_submit=defer_review_submit,
+                        stage=call_stage,
+                        skill_selection=skill_selection,
+                        skill_telemetry=skill_telemetry,
+                        repair_attempt_budget=(
+                            max(
+                                0,
+                                self._settings.review_repair_max_attempts
+                                - self._review_repair_attempt_count,
+                            )
+                            if isinstance(request, ReviewRequest)
+                            else None
+                        ),
+                        allow_exploration=explicit_exploration_allowed,
+                        repair_mode=repair_mode,
+                        submit_tool_name=(
+                            "repair_review"
+                            if repair_mode
+                            else "finish_review"
+                            if contract_version == "3.0" and submit_only_call
+                            else None
+                        ),
+                        contract_version=contract_version,
+                        **runtime_kwargs,
                     ),
-                    contract_version=contract_version,
+                    timeout=call_timeout,
                 )
                 self._prepare_format_recovery(result, state)
                 # The engine updates the ledger only after it has confirmed which
@@ -4581,8 +5059,67 @@ class AgentOrchestrator:
                 if result.draft_debug is not None:
                     self._submit_debug_seen_any = True
                 model_call_success = True
+            except asyncio.TimeoutError:
+                soft_exploration_timeout = bool(
+                    exploration_time_limit
+                    and not self._run_timeout_exceeded()
+                    and self._run_elapsed_seconds()
+                    >= soft_exploration_deadline_elapsed - 0.05
+                )
+                if soft_exploration_timeout:
+                    self._analysis_time_reserve_hit = True
+                    self._analysis_time_reserve_reason = "exploration_time_limit"
+                else:
+                    self._run_timeout_hit = True
+                error_detail = ErrorDetail(
+                    file=request.repo_path,
+                    message=(
+                        "Model exploration stopped at the protected time reserve."
+                        if soft_exploration_timeout
+                        else "Model analysis stopped at the run wall-clock deadline."
+                    ),
+                    category="runtime",
+                )
+                state.errors.append(error_detail)
+                self._record_event(
+                    EventType.ERROR,
+                    "analyze",
+                    {
+                        "iteration": self._iteration,
+                        "error_type": (
+                            "ExplorationTimeLimit"
+                            if soft_exploration_timeout
+                            else "RunTimeoutError"
+                        ),
+                        "message": error_detail.message,
+                    },
+                )
+                result = self._fallback_plan(request)
+                self._latest_tokens = 0
             except ModelClientError as exc:
-                self._provider_error_seen = True
+                runtime_limit_reasons = {
+                    "runtime_time_reserve": "runtime_time_reserve",
+                    "runtime_token_soft_preflight": "token_budget_exhausted",
+                    "runtime_token_hard_preflight": "token_budget_exhausted",
+                    "token_soft_limit": "token_budget_exhausted",
+                    "token_hard_limit": "token_budget_exhausted",
+                }
+                runtime_limit_reason = runtime_limit_reasons.get(exc.code or "")
+                if exc.code == "runtime_time_reserve":
+                    self._analysis_time_reserve_hit = True
+                    self._analysis_time_reserve_reason = "runtime_time_reserve"
+                if runtime_limit_reason:
+                    # These failures happen before a provider request.  They
+                    # are bounded runtime termination, not provider health
+                    # errors, so semantic verification may still use the
+                    # protected reserve when the global deadline permits it.
+                    self._add_incomplete_reason(
+                        state,
+                        runtime_limit_reason,
+                        close_pending_drafts=False,
+                    )
+                else:
+                    self._provider_error_seen = True
                 if isinstance(exc, ModelTimeoutError):
                     self._model_timeout_seen = True
                 error_detail = ErrorDetail(
@@ -4625,6 +5162,25 @@ class AgentOrchestrator:
                 )
                 result = self._fallback_plan(request)
                 self._latest_tokens = 0
+            finally:
+                # B's engine charge includes every actually sent attempt and
+                # any internal schema-repair request.  Read it even when the
+                # provider raises so the conservative run ledger cannot lose a
+                # partial/unknown-usage request.  It never replaces TokenUsage.
+                try:
+                    self._latest_budget_tokens = max(
+                        0,
+                        int(
+                            getattr(
+                                engine,
+                                "last_call_budget_tokens_used",
+                                0,
+                            )
+                            or 0
+                        ),
+                    )
+                except (TypeError, ValueError):
+                    self._latest_budget_tokens = 0
 
         self._record_event(
             EventType.MODEL_CALL,
@@ -4636,6 +5192,7 @@ class AgentOrchestrator:
                 "elapsed_ms": int((perf_counter() - start) * 1000),
                 "tokens": self._latest_tokens,
                 "total_tokens": self._latest_tokens,
+                "budget_tokens_used": self._latest_budget_tokens,
                 "success": model_call_success,
                 "usage_present": model_call_success and self._latest_tokens > 0,
                 "stage": logical_stage,
@@ -4647,7 +5204,7 @@ class AgentOrchestrator:
                 "tool_schema_count": wire_tool_schema_count,
                 "model_request_timeout_seconds": self._settings.model_request_timeout_seconds,
                 "model_max_retries": self._settings.model_max_retries,
-                "force_submit": submit_only_call,
+                "force_submit": engine_force_submit,
                 "model_finish_reason": result.model_finish_reason,
                 "model_length_finish_seen": (
                     self._model_length_finish_seen
@@ -4796,7 +5353,7 @@ class AgentOrchestrator:
 
         if not isinstance(request, ReviewRequest):
             return tool_specs
-        if self._settings.finding_contract_version == "3.0" and len(tool_specs) > 2:
+        if self._settings.finding_contract_version == "3.0":
             # 3.0 deliberately removes the old draft/whole-report preflight
             # ritual from the model-visible path.  The runtime registry still
             # retains crash recovery and bounded repair facts, but the reviewer
@@ -4843,6 +5400,7 @@ class AgentOrchestrator:
             plan.v3_save_findings
             or plan.v3_revise_findings
             or plan.v3_finish_review is not None
+            or getattr(plan, "v3_action_call_refs", ())
         )
         state.decisions.append(
             DecisionStep(
@@ -4873,6 +5431,9 @@ class AgentOrchestrator:
             return results
         index = 0
         while index < len(plan.tool_calls):
+            if self._run_timeout_hit or self._run_timeout_exceeded():
+                self._run_timeout_hit = True
+                break
             if self._tool_call_count >= self._settings.agent_max_tool_calls:
                 state.errors.append(
                     ErrorDetail(
@@ -5171,6 +5732,10 @@ class AgentOrchestrator:
     ) -> list[tuple[dict[str, Any], ToolResult]]:
         """Execute v3 registry actions before ordinary read-only tools."""
 
+        if self._runtime_closeout_done:
+            # Closeout freezes the candidate set.  A compatibility recovery
+            # path must not mutate it after verification input was snapshotted.
+            return []
         catalog = list(self._live_evidence_catalog or state.evidence_ledger)
         actions: list[tuple[dict[str, Any], ToolResult]] = []
         # Source indexes are audit-only.  They are deliberately allocated from
@@ -5179,20 +5744,37 @@ class AgentOrchestrator:
             len(record.source_issue_indexes)
             for record in self._candidate_registry.records
         )
+        runtime_bindings = self._v3_runtime_action_bindings(plan)
 
         def record(
             name: str,
             payload: dict[str, Any],
             result: ToolResult,
+            action_index: int,
         ) -> None:
             nonlocal source_index
+            binding = runtime_bindings.get((name, action_index))
+            provider_call_id = (
+                str(binding.get("provider_id", "")).strip()
+                if binding is not None
+                else ""
+            )
+            synthetic = not provider_call_id
+            call_id = provider_call_id or (
+                f"runtime_v3_{plan.source_response_id or self._run_id}_"
+                f"{name}_{action_index}"
+            )
             raw_call = {
-                "id": f"v3_{name}_{source_index}",
+                "id": call_id,
                 "type": "function",
                 "function": {
                     "name": name,
                     "arguments": _json.dumps(payload, ensure_ascii=True),
                 },
+                "synthetic_runtime_action": synthetic,
+                "provider_action_ordinal": (
+                    binding.get("ordinal") if binding is not None else None
+                ),
             }
             self._journal_tool_result(plan, raw_call, result)
             self._record_event(
@@ -5204,10 +5786,97 @@ class AgentOrchestrator:
                     elapsed_ms=0,
                 ),
             )
-            self._tool_call_count += 1
-            self._tool_name_counts[name] = self._tool_name_counts.get(name, 0) + 1
             actions.append((raw_call, result))
             source_index += 1
+
+        def record_invalid(ref: Any) -> None:
+            """Journal one parser-rejected v3 action at its raw call boundary.
+
+            Invalid refs are runtime receipts, not executable finding actions.
+            Their provider id and raw arguments are retained exactly so a
+            provider transcript can be joined without guessing from candidate
+            content.  An offline ref without a provider id is explicitly
+            synthetic and is never added to the provider conversation.
+            """
+
+            if isinstance(ref, dict):
+                name_value = ref.get("name", "")
+                provider_value = ref.get("provider_call_id", "")
+                ordinal_value = ref.get("raw_call_index", -1)
+                raw_arguments = ref.get("raw_arguments")
+                validation_error = ref.get("validation_error", "")
+            else:
+                name_value = getattr(ref, "name", "")
+                provider_value = getattr(ref, "provider_call_id", "")
+                ordinal_value = getattr(ref, "raw_call_index", -1)
+                raw_arguments = getattr(ref, "raw_arguments", None)
+                validation_error = getattr(ref, "validation_error", "")
+            name = str(name_value or "").strip() or "unknown"
+            provider_call_id = str(provider_value or "").strip()
+            try:
+                ordinal = int(ordinal_value)
+            except (TypeError, ValueError):
+                ordinal = -1
+            error = str(validation_error or "").strip() or (
+                f"Invalid v3 {name} action"
+            )
+            synthetic = not provider_call_id
+            call_id = provider_call_id or (
+                f"runtime_v3_{plan.source_response_id or self._run_id}"
+                f"_invalid_{ordinal}"
+            )
+            if isinstance(raw_arguments, str):
+                wire_arguments = raw_arguments
+            else:
+                wire_arguments = _json.dumps(
+                    raw_arguments if raw_arguments is not None else {},
+                    ensure_ascii=True,
+                    default=str,
+                )
+            raw_call = {
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": wire_arguments,
+                },
+                "synthetic_runtime_action": synthetic,
+                "provider_action_ordinal": ordinal,
+            }
+            result = ToolResult(
+                ok=False,
+                error=error,
+                error_type="v3_action_validation_error",
+                failure_class="parameter_error",
+                recoverable=True,
+                data={
+                    "ok": False,
+                    "error_type": "v3_action_validation_error",
+                    "message": error,
+                    "name": name,
+                    "raw_call_index": ordinal,
+                    "action_index": None,
+                    "provider_call_id": provider_call_id,
+                },
+            )
+            state.errors.append(
+                ErrorDetail(
+                    file="",
+                    message=f"Invalid v3 {name} action: {error}",
+                    category="runtime",
+                )
+            )
+            self._journal_tool_result(plan, raw_call, result)
+            self._record_event(
+                EventType.TOOL_CALL,
+                "execute_tools",
+                self._build_tool_call_event_payload(
+                    name=name,
+                    result=result,
+                    elapsed_ms=0,
+                ),
+            )
+            actions.append((raw_call, result))
 
         def safe_action_payload(action: Any) -> dict[str, Any]:
             """Keep a malformed action failure journalable without re-raising."""
@@ -5218,120 +5887,171 @@ class AgentOrchestrator:
                 return {"serialization_error": "action_payload_unserializable"}
             return payload if isinstance(payload, dict) else {}
 
-        for save_action in plan.v3_save_findings:
-            try:
-                normalized = normalize_model_finding_v3_payload(
-                    save_action.finding.model_dump(mode="json"),
-                    evidence_catalog=catalog,
-                )
-                issue = ReviewIssue.model_validate(normalized)
-                registration = self._candidate_registry.save_finding(
-                    issue,
-                    source_issue_index=source_index,
-                    iteration=self._iteration,
-                )
-                handle = self._candidate_registry.opaque_handle(
-                    registration.candidate_id
-                )
-                self._iteration_progress = True
-                self._iteration_state_action_applied = True
-                record(
-                    "save_finding",
-                    safe_action_payload(save_action),
-                    ToolResult(
-                        ok=True,
-                        data={
-                            "saved": True,
-                            "opaque_handle": handle,
-                            "mechanical_gaps": canonical_contract_gaps(issue),
-                        },
-                    ),
-                )
-            except Exception as exc:  # noqa: BLE001
-                record(
-                    "save_finding",
-                    safe_action_payload(save_action),
-                    ToolResult(
-                        ok=False,
-                        error=str(exc),
-                        error_type="finding_action_invalid",
-                        failure_class="parameter_error",
-                        recoverable=True,
-                    ),
-                )
-
-        for revise_action in plan.v3_revise_findings:
-            candidate_id = self._candidate_registry.candidate_for_handle(
-                revise_action.opaque_handle
+        ordered_actions: list[tuple[int, int, str, Any, bool]] = []
+        fallback_ordinal = 10**9
+        for name, action_index, action in (
+            *[
+                ("save_finding", index, action)
+                for index, action in enumerate(plan.v3_save_findings)
+            ],
+            *[
+                ("revise_finding", index, action)
+                for index, action in enumerate(plan.v3_revise_findings)
+            ],
+            *(
+                [("finish_review", 0, plan.v3_finish_review)]
+                if plan.v3_finish_review is not None
+                else []
+            ),
+        ):
+            binding = runtime_bindings.get((name, action_index))
+            ordinal = (
+                int(binding["ordinal"])
+                if binding is not None
+                else fallback_ordinal
             )
-            current = self._candidate_registry.authoritative_issue(candidate_id)
+            fallback_ordinal += 1
+            ordered_actions.append((ordinal, action_index, name, action, False))
+        for ref in self._v3_invalid_action_refs(plan):
             try:
-                if not candidate_id or current is None:
-                    raise ValueError("unknown opaque finding handle")
-                bound_version = self._candidate_registry.version_for_handle(
-                    revise_action.opaque_handle
+                ordinal = int(
+                    ref.get("raw_call_index", -1)
+                    if isinstance(ref, dict)
+                    else getattr(ref, "raw_call_index", -1)
                 )
-                current_version = self._candidate_registry.expected_version(candidate_id)
-                if not bound_version or bound_version != current_version:
-                    raise ValueError("opaque finding handle is stale")
-                patch_payload = revise_action.patch.model_dump(
-                    mode="json", exclude_unset=True, exclude_none=True
-                )
-                delete_fields = list(patch_payload.pop("delete_fields", []))
-                replacement = self._apply_v3_repair_patch(
-                    current,
-                    patch_payload,
-                    delete_fields=delete_fields,
-                    candidate_id=candidate_id,
-                    evidence_catalog=catalog,
-                )
-                if not self._candidate_registry.revise_finding(
-                    candidate_id,
-                    replacement,
-                    base_version=current_version,
-                ):
-                    raise ValueError("opaque finding handle is stale")
-                next_handle = self._candidate_registry.opaque_handle(candidate_id)
-                self._iteration_progress = True
-                self._iteration_state_action_applied = True
-                record(
-                    "revise_finding",
-                    safe_action_payload(revise_action),
-                    ToolResult(
-                        ok=True,
-                        data={
-                            "revised": True,
-                            "opaque_handle": next_handle,
-                        },
-                    ),
-                )
-            except Exception as exc:  # noqa: BLE001
-                record(
-                    "revise_finding",
-                    safe_action_payload(revise_action),
-                    ToolResult(
-                        ok=False,
-                        error=str(exc),
-                        error_type="finding_action_invalid",
-                        failure_class="parameter_error",
-                        recoverable=True,
-                    ),
-                )
+            except (TypeError, ValueError):
+                continue
+            name_value = (
+                ref.get("name", "")
+                if isinstance(ref, dict)
+                else getattr(ref, "name", "")
+            )
+            ordered_actions.append((ordinal, -1, str(name_value), ref, True))
+        ordered_actions.sort(key=lambda item: (item[0], item[2], item[1]))
 
-        if plan.v3_finish_review is not None:
+        for _, action_index, name, action, invalid in ordered_actions:
+            if invalid:
+                record_invalid(action)
+                continue
+            if name == "save_finding":
+                try:
+                    normalized = normalize_model_finding_v3_payload(
+                        action.finding.model_dump(mode="json"),
+                        evidence_catalog=catalog,
+                    )
+                    issue = ReviewIssue.model_validate(normalized)
+                    registration = self._candidate_registry.save_finding(
+                        issue,
+                        source_issue_index=source_index,
+                        iteration=self._iteration,
+                    )
+                    handle = self._candidate_registry.opaque_handle(
+                        registration.candidate_id
+                    )
+                    self._iteration_progress = True
+                    self._iteration_state_action_applied = True
+                    record(
+                        name,
+                        safe_action_payload(action),
+                        ToolResult(
+                            ok=True,
+                            data={
+                                "saved": True,
+                                "opaque_handle": handle,
+                                "mechanical_gaps": canonical_contract_gaps(issue),
+                            },
+                        ),
+                        action_index,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    record(
+                        name,
+                        safe_action_payload(action),
+                        ToolResult(
+                            ok=False,
+                            error=str(exc),
+                            error_type="finding_action_invalid",
+                            failure_class="parameter_error",
+                            recoverable=True,
+                        ),
+                        action_index,
+                    )
+                continue
+
+            if name == "revise_finding":
+                candidate_id = self._candidate_registry.candidate_for_handle(
+                    action.opaque_handle
+                )
+                current = self._candidate_registry.authoritative_issue(candidate_id)
+                try:
+                    if not candidate_id or current is None:
+                        raise ValueError("unknown opaque finding handle")
+                    bound_version = self._candidate_registry.version_for_handle(
+                        action.opaque_handle
+                    )
+                    current_version = self._candidate_registry.expected_version(candidate_id)
+                    if not bound_version or bound_version != current_version:
+                        raise ValueError("opaque finding handle is stale")
+                    patch_payload = action.patch.model_dump(
+                        mode="json", exclude_unset=True, exclude_none=True
+                    )
+                    delete_fields = list(patch_payload.pop("delete_fields", []))
+                    replacement = self._apply_v3_repair_patch(
+                        current,
+                        patch_payload,
+                        delete_fields=delete_fields,
+                        candidate_id=candidate_id,
+                        evidence_catalog=catalog,
+                    )
+                    if not self._candidate_registry.revise_finding(
+                        candidate_id,
+                        replacement,
+                        base_version=current_version,
+                    ):
+                        raise ValueError("opaque finding handle is stale")
+                    next_handle = self._candidate_registry.opaque_handle(candidate_id)
+                    self._iteration_progress = True
+                    self._iteration_state_action_applied = True
+                    record(
+                        name,
+                        safe_action_payload(action),
+                        ToolResult(
+                            ok=True,
+                            data={
+                                "revised": True,
+                                "opaque_handle": next_handle,
+                            },
+                        ),
+                        action_index,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    record(
+                        name,
+                        safe_action_payload(action),
+                        ToolResult(
+                            ok=False,
+                            error=str(exc),
+                            error_type="finding_action_invalid",
+                            failure_class="parameter_error",
+                            recoverable=True,
+                        ),
+                        action_index,
+                    )
+                continue
+
             self._v3_finish_seen = True
-            self._v3_finish_summary = plan.v3_finish_review.summary
+            self._v3_finish_summary = action.summary
             self._submit_review_seen_any = True
             self._submit_iteration = self._iteration
             plan.draft_review = ReviewReport(
-                summary=plan.v3_finish_review.summary,
+                summary=action.summary,
                 issues=list(self._candidate_registry.finish_review()),
                 schema_version="3.0",
             )
             self._iteration_progress = True
             record(
-                "finish_review",
-                plan.v3_finish_review.model_dump(mode="json"),
+                name,
+                action.model_dump(mode="json"),
                 ToolResult(
                     ok=True,
                     data={
@@ -5340,8 +6060,123 @@ class AgentOrchestrator:
                         "content_in_payload": False,
                     },
                 ),
+                action_index,
             )
         return actions
+
+    @staticmethod
+    def _v3_invalid_action_refs(plan: AnalysisPlan) -> list[Any]:
+        """Return parser-invalid refs without interpreting their payload.
+
+        ``action_index=None`` is the parser's explicit marker that a raw
+        provider action did not enter the validated action sequence.  These
+        refs must still receive an error receipt, including when the response
+        contains no executable v3 action.  No candidate identity or semantic
+        matching is involved here.
+        """
+
+        raw_refs = getattr(plan, "v3_action_call_refs", ())
+        if not isinstance(raw_refs, (list, tuple)):
+            return []
+        allowed = {"save_finding", "revise_finding", "finish_review"}
+        invalid: list[Any] = []
+        seen_ordinals: set[int] = set()
+        for ref in raw_refs:
+            if isinstance(ref, dict):
+                name_value = ref.get("name", "")
+                action_value = ref.get("action_index")
+                error_value = ref.get("validation_error", "")
+                ordinal_value = ref.get("raw_call_index", -1)
+            else:
+                name_value = getattr(ref, "name", "")
+                action_value = getattr(ref, "action_index", None)
+                error_value = getattr(ref, "validation_error", "")
+                ordinal_value = getattr(ref, "raw_call_index", -1)
+            name = str(name_value or "").strip()
+            if name not in allowed:
+                continue
+            if action_value is not None and not str(error_value or "").strip():
+                continue
+            try:
+                ordinal = int(ordinal_value)
+            except (TypeError, ValueError):
+                continue
+            if ordinal < 0 or ordinal in seen_ordinals:
+                # Duplicate raw positions cannot be mechanically associated;
+                # do not emit a second receipt by semantic guesswork.
+                continue
+            seen_ordinals.add(ordinal)
+            invalid.append(ref)
+        return invalid
+
+    @staticmethod
+    def _v3_runtime_action_bindings(
+        plan: AnalysisPlan,
+    ) -> dict[tuple[str, int], dict[str, Any]]:
+        """Validate B's exact provider-id/order bridge for parsed v3 actions.
+
+        This deliberately binds by the parser's action kind and parsed index.
+        Candidate content, finding ids, handles, and prose are never used to
+        select a provider call.  Ambiguous or malformed entries are discarded
+        so the caller falls back to an explicitly synthetic journal id.
+        """
+
+        raw_bindings = getattr(plan, "v3_action_call_refs", ())
+        if not isinstance(raw_bindings, (list, tuple)):
+            return {}
+        allowed = {"save_finding", "revise_finding", "finish_review"}
+        action_lengths = {
+            "save_finding": len(plan.v3_save_findings),
+            "revise_finding": len(plan.v3_revise_findings),
+            "finish_review": int(plan.v3_finish_review is not None),
+        }
+        bindings: dict[tuple[str, int], dict[str, Any]] = {}
+        used_provider_ids: set[str] = set()
+        used_ordinals: set[int] = set()
+        ambiguous: set[tuple[str, int]] = set()
+        for raw in raw_bindings:
+            if isinstance(raw, dict):
+                name_value = raw.get("name", "")
+                provider_value = raw.get("provider_call_id", "")
+                action_value = raw.get("action_index", -1)
+                ordinal_value = raw.get("raw_call_index", -1)
+            else:
+                name_value = getattr(raw, "name", "")
+                provider_value = getattr(raw, "provider_call_id", "")
+                action_value = getattr(raw, "action_index", -1)
+                ordinal_value = getattr(raw, "raw_call_index", -1)
+            kind = str(name_value or "").strip()
+            provider_id = str(provider_value or "").strip()
+            try:
+                action_index = int(action_value)
+                ordinal = int(ordinal_value)
+            except (TypeError, ValueError):
+                continue
+            key = (kind, action_index)
+            if (
+                kind not in allowed
+                or action_index < 0
+                or action_index >= action_lengths[kind]
+                or ordinal < 0
+                or key in bindings
+                or key in ambiguous
+                or provider_id in used_provider_ids
+                or ordinal in used_ordinals
+            ):
+                if kind in allowed and action_index >= 0:
+                    ambiguous.add(key)
+                    bindings.pop(key, None)
+                continue
+            bindings[key] = {
+                "provider_id": provider_id,
+                "ordinal": ordinal,
+            }
+            if provider_id:
+                used_provider_ids.add(provider_id)
+            used_ordinals.add(ordinal)
+        for key in ambiguous:
+            bindings.pop(key, None)
+        return bindings
 
     def format_result(
         self,
@@ -5408,8 +6243,27 @@ class AgentOrchestrator:
     def _account_latest_model_usage(self) -> None:
         """Charge every completed model call, including repair-only calls."""
 
-        self._total_tokens += max(0, int(self._latest_tokens or 0))
-        self._budget_state = self._result_processor.budget_state(self._total_tokens)
+        actual_tokens = max(0, int(self._latest_tokens or 0))
+        engine_budget_tokens = max(0, int(self._latest_budget_tokens or 0))
+        self._total_tokens += actual_tokens
+        # Actual provider usage remains the cost/telemetry ledger.  The
+        # conservative budget ledger charges the larger of that usage and the
+        # engine's per-call estimate/attempt ceiling, including hidden schema
+        # repair and unknown-usage attempts.
+        self._conservative_budget_tokens_used += max(
+            actual_tokens,
+            engine_budget_tokens,
+        )
+        self._refresh_budget_state()
+
+    def _refresh_budget_state(self) -> None:
+        """Refresh stop state from actual and conservative budget ledgers."""
+
+        charged_tokens = max(
+            self._total_tokens,
+            self._conservative_budget_tokens_used,
+        )
+        self._budget_state = self._result_processor.budget_state(charged_tokens)
         self._budget_exhausted = self._budget_state != "none"
 
     def _sync_draft_states(self, state: ContextState) -> None:
@@ -5600,8 +6454,21 @@ class AgentOrchestrator:
             response.completion_status = "incomplete"
             response.incomplete_reasons = list(dict.fromkeys(reasons))
         elif (
-            self._finalization_status == "submitted"
-            and self._submit_review_seen_any
+            (
+                (
+                    self._finalization_status == "submitted"
+                    and self._submit_review_seen_any
+                )
+                or (
+                    self._settings.finding_contract_version == "3.0"
+                    and self._runtime_closeout_done
+                )
+            )
+            and (
+                self._submit_review_seen_any
+                if self._settings.finding_contract_version != "3.0"
+                else self._runtime_closeout_done
+            )
             and not self._blocking_error
             and (not self._provider_error_seen or self._model_timeout_recovered)
             and not response.workflow_invalid
@@ -5633,10 +6500,18 @@ class AgentOrchestrator:
                 and not self._model_incomplete_seen
             )
         )
-        response.submission_received = bool(self._submit_review_seen_any)
+        response.submission_received = bool(
+            self._runtime_closeout_done
+            if self._settings.finding_contract_version == "3.0"
+            else self._submit_review_seen_any
+        )
         response.review_complete = bool(
             self._review_finalized
-            and self._submit_review_seen_any
+            and (
+                self._runtime_closeout_done
+                if self._settings.finding_contract_version == "3.0"
+                else self._submit_review_seen_any
+            )
             and not self._blocking_error
             and (
                 not self._provider_error_seen or self._model_timeout_recovered
@@ -5652,6 +6527,8 @@ class AgentOrchestrator:
         response.report_ready = bool(
             response.completion_status == "complete"
             and response.review_complete
+            and not response.workflow_invalid
+            and not self._completion_incomplete_reasons
             and (
                 not self._semantic_verifier_required
                 or self._semantic_verifier_completed
@@ -5659,6 +6536,8 @@ class AgentOrchestrator:
         )
         if response.report_ready and response.external_publish_status == "not_requested":
             response.external_publish_status = "ready"
+        elif not response.report_ready and response.external_publish_status == "ready":
+            response.external_publish_status = "not_requested"
         response.delivery_complete = bool(
             response.review_complete
             and response.completion_status == "complete"
@@ -5682,6 +6561,9 @@ class AgentOrchestrator:
         """Decide whether another loop iteration should run."""
         plan = self._last_plan
         is_review = self._is_review_mode(state)
+        v3_mode = bool(
+            is_review and self._settings.finding_contract_version == "3.0"
+        )
         has_pending_tools = (
             False
             if self._permission_mode == "plan"
@@ -5697,14 +6579,14 @@ class AgentOrchestrator:
         )
         has_pending_drafts = is_review and self._draft_finding_store.has_pending()
         has_pending_v3_findings = bool(
-            is_review
-            and self._settings.finding_contract_version == "3.0"
+            v3_mode
             and self._candidate_registry.records
             and not self._v3_finish_seen
         )
         defer_review_submit = (
             is_review
             and self._iteration < self._review_min_tool_iterations
+            and self._iteration + 1 < self._max_iterations
             and not self._blocking_error
             and self._permission_mode != "plan"
         )
@@ -5726,11 +6608,21 @@ class AgentOrchestrator:
         terminal_reason = ""
         if not has_effective_action and not defer_review_submit:
             terminal_reason = "no_effective_action"
-            if has_pending_drafts or self._permission_mode == "plan":
+            if v3_mode and not self._v3_finish_seen and not self._candidate_registry.records:
+                terminal_reason = "no_candidates_without_finish"
+            if (
+                has_pending_drafts
+                or self._permission_mode == "plan"
+                or (
+                    v3_mode
+                    and not self._v3_finish_seen
+                    and not self._candidate_registry.records
+                )
+            ):
                 self._add_incomplete_reason(
                     state,
                     terminal_reason,
-                    close_pending_drafts=not has_pending_drafts,
+                    close_pending_drafts=not has_pending_drafts and not v3_mode,
                 )
         elif (
             has_pending_drafts
@@ -5745,6 +6637,17 @@ class AgentOrchestrator:
                 close_pending_drafts=False,
             )
 
+        if self._analysis_time_reserve_hit:
+            reserve_reason = (
+                self._analysis_time_reserve_reason or "runtime_time_reserve"
+            )
+            terminal_reason = terminal_reason or reserve_reason
+            self._add_incomplete_reason(
+                state,
+                reserve_reason,
+                close_pending_drafts=False,
+            )
+
         self._model_completed = (
             not has_pending_tools
             and not self._blocking_error
@@ -5756,7 +6659,7 @@ class AgentOrchestrator:
         )
         submit_ready = self._review_stage == "submit_ready"
         reached_limit = (self._iteration + 1) >= self._max_iterations
-        run_timed_out = self._run_timeout_exceeded()
+        run_timed_out = self._run_timeout_hit or self._run_timeout_exceeded()
         self._run_timeout_hit = self._run_timeout_hit or run_timed_out
         submit_recovery_allowed = (
             self._submit_only_retry_pending and not reached_limit
@@ -5764,8 +6667,12 @@ class AgentOrchestrator:
 
         if self._budget_exhausted:
             terminal_reason = terminal_reason or "token_budget_exhausted"
-            if has_pending_drafts:
-                self._add_incomplete_reason(state, terminal_reason)
+            if has_pending_drafts or (v3_mode and not self._v3_finish_seen):
+                self._add_incomplete_reason(
+                    state,
+                    terminal_reason,
+                    close_pending_drafts=not v3_mode,
+                )
         elif run_timed_out:
             terminal_reason = terminal_reason or "run_timeout"
             self._add_incomplete_reason(state, terminal_reason)
@@ -5779,6 +6686,18 @@ class AgentOrchestrator:
             terminal_reason = terminal_reason or "unresolved_draft_findings"
             self._add_incomplete_reason(state, terminal_reason)
         elif reached_limit and has_pending_drafts:
+            terminal_reason = terminal_reason or "max_iterations"
+            self._add_incomplete_reason(
+                state,
+                terminal_reason,
+                close_pending_drafts=False,
+            )
+        elif (
+            reached_limit
+            and v3_mode
+            and self._candidate_registry.records
+            and not self._v3_finish_seen
+        ):
             terminal_reason = terminal_reason or "max_iterations"
             self._add_incomplete_reason(
                 state,
@@ -5933,8 +6852,10 @@ class AgentOrchestrator:
         self._submit_iteration = None
         self._submit_debug_seen_any = False
         self._latest_tokens = 0
+        self._latest_budget_tokens = 0
         self._model_conversation = ModelConversation()
         self._total_tokens = 0
+        self._conservative_budget_tokens_used = 0
         self._successful_prompt_tokens = 0
         self._successful_completion_tokens = 0
         self._successful_reasoning_tokens = 0
@@ -5955,10 +6876,15 @@ class AgentOrchestrator:
         self._last_decision_reason = ""
         self._iteration_guard_hit = False
         self._run_timeout_hit = False
+        self._analysis_time_reserve_hit = False
+        self._analysis_time_reserve_reason = ""
         self._provider_error_seen = False
         self._tool_bearing_iterations = set()
         self._run_started_at = perf_counter()
         self._run_timeout_seconds = self._agent_run_timeout_seconds
+        self._active_state = None
+        self._cancellation_persisted = False
+        self._cancelled = False
         self._model_timeout_seen = False
         self._model_timeout_errors = []
         self._model_timeout_recovered = False
@@ -6045,6 +6971,23 @@ class AgentOrchestrator:
         self._semantic_model_call_count = 0
         self._semantic_investigation_call_count = 0
         self._semantic_investigation_tool_call_count = 0
+        self._semantic_telemetry_totals = {
+            "successful_model_call_count": 0,
+            "failed_model_call_count": 0,
+            "provider_attempt_count": 0,
+            "failed_provider_attempt_count": 0,
+            "failed_unknown_usage_count": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "reasoning_tokens": 0,
+            "total_tokens": 0,
+            "budget_tokens_used": 0,
+            "cached_prompt_tokens": 0,
+            "cache_observation_count": 0,
+            "cache_hit_count": 0,
+        }
+        self._runtime_closeout_done = False
+        self._runtime_closeout_reason = ""
         self._semantic_receipts = []
         self._semantic_handles = {}
         self._v3_handle_to_candidate = {}
@@ -6109,6 +7052,94 @@ class AgentOrchestrator:
     def _run_timeout_exceeded(self) -> bool:
         return self._run_elapsed_seconds() >= self._run_timeout_seconds
 
+    def _persist_cancelled_run(self, state: ContextState | None) -> None:
+        """Persist the best available run snapshot before cancellation escapes."""
+
+        if self._cancellation_persisted:
+            return
+        self._cancellation_persisted = True
+        self._cancelled = True
+        snapshot = self._candidate_registry.snapshot()
+        if state is not None:
+            self._add_incomplete_reason(state, "cancelled")
+            state.candidate_registrations = snapshot
+            self._sync_draft_states(state)
+
+        def persist(action: Any) -> None:
+            try:
+                action()
+            except Exception as exc:  # noqa: BLE001
+                # Cancellation must remain a cancellation even if a best-effort
+                # journal/evidence flush itself fails.
+                try:
+                    self._record_event(
+                        EventType.ERROR,
+                        "runtime",
+                        {
+                            "reason": "cancellation_persistence_failed",
+                            "error_type": exc.__class__.__name__,
+                            "message": str(exc),
+                        },
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+
+        if state is not None:
+            persist(lambda: self._publish_evidence_catalog(state))
+        if self._run_journal is not None:
+            duplicate_sources = {
+                record.candidate_id: list(
+                    self._candidate_registry.duplicate_sources(record.candidate_id)
+                )
+                for record in self._candidate_registry.records
+                if self._candidate_registry.duplicate_sources(record.candidate_id)
+            }
+            persist(
+                lambda: self._run_journal.append(
+                    PendingRunJournalEntry(
+                        type="candidate_registration",
+                        payload=CandidateRegistrationJournalPayload(
+                            iteration=self._iteration,
+                            registrations=snapshot,
+                            duplicate_sources=duplicate_sources,
+                        ).model_dump(mode="json"),
+                    )
+                )
+            )
+            statuses: dict[str, str] = {
+                record.candidate_id: record.status
+                for record in self._candidate_registry.records
+            }
+            persist(
+                lambda: self._run_journal.append(
+                    PendingRunJournalEntry(
+                        type="finding_finalization",
+                        payload=FindingFinalizationJournalPayload(
+                            candidate_statuses=statuses,
+                            final_published_count=self._final_published_count,
+                            finding_run_status="incomplete",
+                            review_outcome=self._review_outcome,
+                        ).model_dump(mode="json"),
+                    )
+                )
+            )
+        persist(
+            lambda: self._record_event(
+                EventType.ERROR,
+                "runtime",
+                {
+                    "reason": "cancelled",
+                    "iteration": self._iteration,
+                    "candidate_count": len(snapshot),
+                    "finish_seen": self._v3_finish_seen,
+                    "runtime_closeout_done": self._runtime_closeout_done,
+                    "budget_state": self._budget_state,
+                    "elapsed_ms": int(self._run_elapsed_seconds() * 1000),
+                },
+            )
+        )
+        persist(self._close_event_log)
+
     def _has_useful_tool_feedback(self) -> bool:
         """Return True when at least one tool call returned usable data."""
         if not self._tool_feedback:
@@ -6120,6 +7151,11 @@ class AgentOrchestrator:
 
     def _should_pre_budget_submit(self, state: ContextState) -> bool:
         """Decide whether to trigger a bounded submit-only call before the next analysis turn."""
+        if self._settings.finding_contract_version == "3.0":
+            # v3 closes the current Registry set at the loop boundary.  A
+            # pre-budget submit would be a second model turn after normal
+            # exploration and could append candidates outside that snapshot.
+            return False
         if self._permission_mode == "plan":
             return False
         if self._pre_budget_submit_attempted:
@@ -6140,7 +7176,11 @@ class AgentOrchestrator:
         ):
             return False
         analysis_ceiling = self._analysis_token_ceiling()
-        if self._total_tokens >= analysis_ceiling:
+        charged_tokens = max(
+            self._total_tokens,
+            self._conservative_budget_tokens_used,
+        )
+        if charged_tokens >= analysis_ceiling:
             return True
         if not self._has_useful_tool_feedback():
             return False
@@ -6149,7 +7189,7 @@ class AgentOrchestrator:
             int(self._settings.token_budget * ratio),
             analysis_ceiling,
         )
-        return self._total_tokens >= threshold
+        return charged_tokens >= threshold
 
     def _analysis_token_ceiling(self) -> int:
         """Return the cumulative-token ceiling available to non-final model calls."""
@@ -6159,7 +7199,91 @@ class AgentOrchestrator:
             self._settings.token_hard_budget
             - self._settings.final_submit_reserve_tokens,
         )
-        return min(self._settings.token_budget, reserve_ceiling)
+        return min(
+            self._settings.token_budget,
+            reserve_ceiling,
+        )
+
+    def _remaining_call_token_budget(
+        self,
+        request: ReviewRequest | DebugRequest,
+        *,
+        repair_mode: bool,
+    ) -> int | None:
+        """Return the one-call hard budget handed to the inference engine.
+
+        The engine owns request assembly and output fitting.  The orchestrator
+        only supplies the run-wide remaining envelope: ordinary v3 exploration
+        cannot consume the protected semantic/finalization reserve, while a
+        repair call may use the full hard remainder.  Legacy v2/direct calls
+        keep ``None`` for compatibility unless they are an explicit repair.
+        """
+
+        if not isinstance(request, ReviewRequest):
+            return None
+        if not repair_mode and self._settings.finding_contract_version != "3.0":
+            return None
+        charged_tokens = max(
+            self._total_tokens,
+            getattr(self, "_conservative_budget_tokens_used", 0),
+        )
+        ceiling = (
+            self._settings.token_hard_budget
+            if repair_mode
+            else self._analysis_token_ceiling()
+        )
+        return max(0, int(ceiling) - charged_tokens)
+
+    def _postprocessing_time_reserve_seconds(
+        self,
+        request: ReviewRequest | DebugRequest,
+        *,
+        repair_mode: bool,
+    ) -> float:
+        """Reserve a bounded wall-clock slice for v3 verification/rechecks."""
+
+        if (
+            repair_mode
+            or not isinstance(request, ReviewRequest)
+            or self._settings.finding_contract_version != "3.0"
+        ):
+            return 0.0
+        semantic_calls = max(
+            1,
+            min(2, int(self._settings.semantic_verifier_max_model_calls)),
+        )
+        repair_calls = min(1, int(self._settings.review_repair_max_attempts))
+        required_windows = semantic_calls + repair_calls
+        # Keep at most half of the run for closeout/gates, bounded by the
+        # existing per-request timeout.  This is a runtime reserve, not a new
+        # provider retry budget.
+        return min(
+            self._run_timeout_seconds * 0.5,
+            self._settings.model_request_timeout_seconds * required_windows,
+        )
+
+    def _current_v3_finding_handles(self) -> list[dict[str, str]]:
+        """Expose a compact current-handle directory to ordinary v3 calls."""
+
+        handles: list[dict[str, str]] = []
+        for record in self._candidate_registry.records:
+            issue = self._candidate_registry.authoritative_issue(record.candidate_id)
+            if issue is None:
+                continue
+            anchor = issue.primary_anchor
+            anchor_text = (
+                f"{anchor.file}:{anchor.line}" if anchor is not None else ""
+            )
+            handles.append(
+                {
+                    "opaque_handle": self._candidate_registry.opaque_handle(
+                        record.candidate_id
+                    ),
+                    "anchor": anchor_text,
+                    "description_short": str(issue.description or "")[:160],
+                }
+            )
+        return handles
 
     def _repair_sequence_capacity(
         self,
@@ -6182,7 +7306,14 @@ class AgentOrchestrator:
             self._settings.review_repair_max_attempts
             - self._review_repair_attempt_count,
         )
-        remaining_tokens = max(0, self._settings.token_hard_budget - self._total_tokens)
+        remaining_tokens = max(
+            0,
+            self._settings.token_hard_budget
+            - max(
+                self._total_tokens,
+                getattr(self, "_conservative_budget_tokens_used", 0),
+            ),
+        )
         # Reserve bounded completion capacity for every step.  The exact
         # serialized request cap is enforced by InferenceEngine; this preflight
         # only prevents a source->submit sequence from starting when the shared
@@ -6289,7 +7420,7 @@ class AgentOrchestrator:
             return "pre_budget_submit_attempted"
         if self._budget_state == "hard_capped":
             return "budget_hard_capped"
-        if self._run_timeout_exceeded():
+        if self._run_timeout_hit or self._run_timeout_exceeded():
             return "run_timeout"
         for reason in self._completion_incomplete_reasons:
             if reason in {
@@ -6657,25 +7788,62 @@ class AgentOrchestrator:
                 )
                 return ToolResult(ok=True, data=hint), None, 0
         with tool_workspace_root(self._workspace_root):
+            remaining_run_seconds = (
+                self._run_timeout_seconds - self._run_elapsed_seconds()
+            )
+            if remaining_run_seconds <= 0:
+                self._run_timeout_hit = True
+                err = f"Tool execution skipped for {tool_name}: run wall-clock deadline reached"
+                return (
+                    ToolResult(
+                        ok=False,
+                        error=err,
+                        data={
+                            "ok": False,
+                            "error_type": "RunTimeoutError",
+                            "tool_name": tool_name,
+                            "skip_reason": "run_timeout",
+                            "message": err,
+                        },
+                        error_type="run_timeout",
+                        failure_class="timeout",
+                        recoverable=False,
+                    ),
+                    ErrorDetail(file="", message=err, category="runtime"),
+                    max(1, int((perf_counter() - started) * 1000)),
+                )
+            timeout = min(
+                self._settings.agent_tool_timeout_seconds,
+                remaining_run_seconds,
+            )
             try:
                 data = await asyncio.wait_for(
                     tool.execute(**args),
-                    timeout=self._settings.agent_tool_timeout_seconds,
+                    timeout=timeout,
                 )
                 result = ToolResult(ok=True, data=data)
                 if dedup_key is not None:
                     self._tool_dedup_cache[dedup_key] = result
                 return result, None, int((perf_counter() - started) * 1000)
             except TimeoutError:
-                timeout = self._settings.agent_tool_timeout_seconds
+                run_timeout = (
+                    timeout < self._settings.agent_tool_timeout_seconds
+                    or self._run_timeout_exceeded()
+                )
+                self._run_timeout_hit = self._run_timeout_hit or run_timeout
                 elapsed_ms = max(1, int((perf_counter() - started) * 1000))
-                err = f"Tool execution timed out for {tool_name} after {timeout:g}s"
+                timeout_kind = "run_timeout" if run_timeout else "tool_timeout"
+                err = (
+                    f"Tool execution stopped for {tool_name} at the run wall-clock deadline"
+                    if run_timeout
+                    else f"Tool execution timed out for {tool_name} after {timeout:g}s"
+                )
                 data = {
                     "ok": False,
                     "error_type": "ToolTimeoutError",
                     "tool_name": tool_name,
                     "timeout_seconds": timeout,
-                    "skip_reason": "tool_timeout",
+                    "skip_reason": timeout_kind,
                     "message": err,
                 }
                 return (
@@ -6684,9 +7852,9 @@ class AgentOrchestrator:
                             ok=False,
                             error=err,
                             data=data,
-                            error_type="tool_timeout",
+                            error_type=timeout_kind,
                             failure_class="timeout",
-                            recoverable=True,
+                            recoverable=not run_timeout,
                             recommended_next_step=(
                                 "Retry with a narrower, bounded request; repeated timeouts stop the run."
                             ),
@@ -7439,6 +8607,8 @@ class AgentOrchestrator:
     def _termination_reason(self) -> str:
         """Normalize the final loop outcome into one stable primary reason."""
 
+        if self._cancelled:
+            return "cancelled"
         if self._model_timeout_seen and not self._model_timeout_recovered:
             return "provider_timeout"
         if self._run_timeout_hit:
@@ -7467,6 +8637,7 @@ class AgentOrchestrator:
             "draft_stagnation",
             "unresolved_draft_findings",
             "no_effective_action",
+            "no_candidates_without_finish",
             "unrecoverable_error",
             "model_incomplete",
             "untrusted_finding_candidates",
@@ -7579,6 +8750,7 @@ class AgentOrchestrator:
             "failed_attempt_count": self._failed_attempt_count,
             "failed_unknown_usage_count": self._failed_unknown_usage_count,
             "total_tokens": self._total_tokens,
+            "conservative_budget_tokens_used": self._conservative_budget_tokens_used,
             "candidate_finding_count": self._verifier_candidate_count,
             "accepted_finding_count": self._verifier_accepted_count,
             "verifier_rejection_count": self._verifier_rejected_count,
@@ -8375,6 +9547,7 @@ class AgentOrchestrator:
             parsed_arguments = {"value": parsed_arguments}
         redacted_arguments = redact_sensitive_values(parsed_arguments)
         redacted_result = redact_sensitive_values(result.model_dump(mode="json"))
+        synthetic_runtime_action = bool(raw_call.get("synthetic_runtime_action"))
         call_id = str(raw_call.get("id", "")).strip()
         if not call_id:
             signature = _json.dumps(
@@ -8387,10 +9560,22 @@ class AgentOrchestrator:
                 f"runtime_{plan.source_response_id}_"
                 f"{hashlib.sha256(signature.encode('utf-8')).hexdigest()[:12]}"
             )
-        if str(raw_call.get("id", "")).strip():
+        if str(raw_call.get("id", "")).strip() and not synthetic_runtime_action:
+            # Provider ids are the only valid transcript join key.  Never
+            # fall back to tool name when a provider id was supplied: mixed
+            # save/revise responses would otherwise pair the wrong result.
             self._model_conversation.add_tool_result(call_id, result)
-        else:
+        elif not str(raw_call.get("id", "")).strip():
             self._model_conversation.add_tool_result_for_name(tool_name, result)
+        redacted_result["runtime_action_binding"] = {
+            "mode": (
+                "synthetic_runtime_action"
+                if synthetic_runtime_action
+                else "provider_action_id"
+            ),
+            "provider_call_id": "" if synthetic_runtime_action else call_id,
+            "ordinal": raw_call.get("provider_action_ordinal"),
+        }
         if self._run_journal is None or not plan.source_response_id:
             return
         payload = ToolResultJournalPayload(

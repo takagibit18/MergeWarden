@@ -71,7 +71,7 @@ def test_malformed_decision_keeps_safe_request_response_diagnostics() -> None:
 
     receipt = result.receipts[0]
     assert receipt.verdict == "unresolved"
-    assert receipt.error_code == "semantic_verifier_malformed_decision:h-malformed"
+    assert receipt.error_code == "semantic_verifier_malformed_decision:h-malformed:reason=missing"
     assert receipt.input_digest
     assert receipt.request_hash
     assert receipt.response_digest

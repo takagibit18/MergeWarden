@@ -17,6 +17,7 @@ from src.analyzer.schemas import ReviewRequest
 from src.analyzer.run_summary import summarize_event_log
 from src.models.compat import ModelCallPolicy
 from src.models.conversation import ModelConversation
+from src.models.request_assembler import RequestAssembler
 from src.models.schemas import (
     DraftFinding,
     ModelConfig,
@@ -483,8 +484,24 @@ def test_submit_only_payload_has_minimal_evidence_and_records_attempt_telemetry(
         for event_type, phase, payload in events
         if event_type == EventType.MODEL_CALL and phase == "provider_attempt"
     ]
-    assert attempt_events == [
-        {
+    assert len(attempt_events) == 1
+    assert client.configs[0] is not None
+    assert client.policies[0] is not None
+    assembled_input_tokens = RequestAssembler.estimate(
+        client.calls[0],
+        client.tools[0],
+        client.configs[0],
+        client.policies[0],
+    )
+    assert attempt_events[0]["budget_tokens_used"] == (
+        assembled_input_tokens + response.usage.completion_tokens
+    )
+    assert attempt_events[0]["budget_tokens_used"] == (
+        engine.last_call_budget_tokens_used
+    )
+    attempt_without_budget = dict(attempt_events[0])
+    attempt_without_budget.pop("budget_tokens_used")
+    assert attempt_without_budget == {
             "iteration": 0,
             "provider_attempt": 1,
             "stage": "submit_only",
@@ -507,8 +524,7 @@ def test_submit_only_payload_has_minimal_evidence_and_records_attempt_telemetry(
             "success": True,
             "provider_request_id": "req-1",
             "usage_unknown": False,
-        }
-    ]
+    }
     context_events = [
         payload
         for event_type, phase, payload in events

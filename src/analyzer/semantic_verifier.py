@@ -9,6 +9,7 @@ reviewer history, confidence, candidate ids, or prior verification outcomes.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import inspect
 import json
@@ -229,6 +230,9 @@ class _CallOutcome:
     input_digest: str = ""
     request_hash: str = ""
     request_estimated_tokens: int = 0
+    output_token_budget: int = 0
+    attempt_budget_tokens: tuple[int, ...] = ()
+    budget_tokens_used: int = 0
     response_digest: str = ""
     provider_request_id: str = ""
     provider_attempt_count: int = 0
@@ -250,7 +254,12 @@ class SemanticVerifier:
         "one verify_findings tool call with one decision per opaque_handle. "
         "accept means the described causal conclusion is supported; reject means "
         "the conclusion is wrong or unsupported; needs_revision means a concrete "
-        "missing fact could change the conclusion. Give a short reason."
+        "missing fact could change the conclusion or a concrete correction is needed. "
+        "For needs_revision provide the specific request; omit request and investigation "
+        "for other verdicts. Use unresolved when no reliable decision can be made. "
+        "Include an investigation action only when a specific missing fact requires "
+        "a targeted read. A content or severity correction alone does not require investigation. "
+        "Give a short reason."
     )
     INVESTIGATION_POLICY = (
         "先判断现有材料是否足够。只有存在一个可能改变结论、现有材料无法回答的具体问题时，"
@@ -270,6 +279,17 @@ class SemanticVerifier:
         self._budget = budget or SemanticVerifierBudget()
         self._model_config = model_config
         self._clock = clock
+        # A verifier instance may be reused by an offline caller.  Keep this
+        # private ledger scoped to one ``verify`` invocation so an orchestrator
+        # can recover conservative charges if cancellation interrupts a later
+        # call before a SemanticVerifierResult can be returned.
+        self._last_budget_tokens_used = 0
+
+    @property
+    def last_budget_tokens_used(self) -> int:
+        """Conservative charge accumulated by the most recent verify pass."""
+
+        return self._last_budget_tokens_used
 
     @classmethod
     def tool_schema(cls) -> dict[str, Any]:
@@ -339,7 +359,7 @@ class SemanticVerifier:
                 "opaque_handle": {"type": "string", "minLength": 1},
                 "verdict": {
                     "type": "string",
-                    "enum": ["accept", "reject", "needs_revision"],
+                    "enum": ["accept", "reject", "needs_revision", "unresolved"],
                 },
                 "reason": {"type": "string", "minLength": 1},
                 "request": {"type": "string"},
@@ -408,6 +428,7 @@ class SemanticVerifier:
         """Verify all candidates, producing an explicit receipt for each."""
 
         candidate_list = list(candidates)
+        self._last_budget_tokens_used = 0
         if not candidate_list:
             return SemanticVerifierResult()
         result = SemanticVerifierResult()
@@ -469,6 +490,7 @@ class SemanticVerifier:
                 batch_payload,
                 started_at=started_at,
                 used_tokens=result.budget_tokens_used,
+                usage_observer=usage_observer,
             )
             self._record_call_outcome(result, outcome, usage_observer)
 
@@ -538,16 +560,22 @@ class SemanticVerifier:
                     continue
                 if (
                     candidate_decision.verdict == "needs_revision"
-                    and (
-                        candidate_decision.investigation is not None
-                        or bool(candidate_decision.request.strip())
-                    )
-                    and investigator is not None
-                    and result.investigation_call_count
-                    < self._budget.max_investigation_calls
-                    and result.model_call_count < self._budget.max_model_calls
-                    and self._can_start_call(started_at, result)
+                    and candidate_decision.investigation is not None
                 ):
+                    if investigator is None:
+                        forced_unresolved[candidate.opaque_handle] = (
+                            "semantic_verifier_investigation_unavailable"
+                        )
+                        continue
+                    if (
+                        result.investigation_call_count >= self._budget.max_investigation_calls
+                        or result.model_call_count >= self._budget.max_model_calls
+                        or not self._can_start_call(started_at, result)
+                    ):
+                        forced_unresolved[candidate.opaque_handle] = (
+                            "semantic_verifier_investigation_budget_exhausted"
+                        )
+                        continue
                     investigation_query = candidate_decision.request.strip()
                     investigation_action: dict[str, Any] = {}
                     if candidate_decision.investigation is not None:
@@ -599,6 +627,7 @@ class SemanticVerifier:
                         recheck_payload,
                         started_at=started_at,
                         used_tokens=result.budget_tokens_used,
+                        usage_observer=usage_observer,
                     )
                     self._record_call_outcome(result, recheck, usage_observer)
                     bind_outcome_metadata(
@@ -623,6 +652,10 @@ class SemanticVerifier:
                             )
                         else:
                             first_decisions[candidate.opaque_handle] = rechecked[0]
+                            if rechecked[0].investigation is not None:
+                                forced_unresolved[candidate.opaque_handle] = (
+                                    "semantic_verifier_investigation_budget_exhausted"
+                                )
                             input_digests_by_handle[candidate.opaque_handle] = (
                                 recheck.input_digest
                             )
@@ -641,6 +674,14 @@ class SemanticVerifier:
                     # A concrete investigation is one bounded round.  Do not
                     # turn a second needs_revision into an exploration loop.
                     break
+
+        for handle, decision in first_decisions.items():
+            if decision.investigation is not None:
+                # A batch may contain more requests than the shared one-round
+                # budget can serve. Unserved actions are not ordinary repairs.
+                forced_unresolved.setdefault(
+                    handle, "semantic_verifier_investigation_not_completed"
+                )
 
         for candidate in candidate_list:
             if candidate.opaque_handle in forced_unresolved:
@@ -819,13 +860,25 @@ class SemanticVerifier:
         if outcome.sent:
             result.model_call_count += 1
             self._record_usage(result, outcome.response)
-            reported_tokens = 0
-            if outcome.response is not None and outcome.response.usage_present:
-                reported_tokens = max(0, int(outcome.response.usage.total_tokens))
-            result.budget_tokens_used += max(
-                outcome.request_estimated_tokens,
-                reported_tokens,
-            )
+            budget_tokens_used = max(0, int(outcome.budget_tokens_used or 0))
+            if not budget_tokens_used:
+                # Keep direct/offline clients that do not expose attempt
+                # telemetry fail-closed.  A sent call with unknown usage must
+                # reserve the complete request input plus its output ceiling;
+                # known usage uses the same conservative formula as the
+                # provider boundary.
+                budget_tokens_used = sum(outcome.attempt_budget_tokens)
+                if not budget_tokens_used:
+                    budget_tokens_used = sum(
+                        self._attempt_budget_charges(
+                            (),
+                            request_estimated_tokens=outcome.request_estimated_tokens,
+                            output_token_budget=outcome.output_token_budget,
+                            response=outcome.response,
+                        )
+                    )
+            result.budget_tokens_used += budget_tokens_used
+            self._last_budget_tokens_used += budget_tokens_used
             result.provider_attempt_count += outcome.provider_attempt_count
             result.failed_provider_attempt_count += outcome.failed_provider_attempt_count
             result.failed_unknown_usage_count += outcome.failed_unknown_usage_count
@@ -859,6 +912,7 @@ class SemanticVerifier:
         *,
         started_at: float,
         used_tokens: int,
+        usage_observer: UsageObserver | None = None,
     ) -> _CallOutcome:
         """Call one fresh verifier conversation and parse only the tool output."""
 
@@ -911,6 +965,13 @@ class SemanticVerifier:
                 "timeout": min(config.timeout, remaining_seconds),
             }
         )
+        # C's runtime-only ModelConfig field lets the provider boundary apply
+        # the same input+output preflight.  Keep direct/offline clients that
+        # predate the field compatible by omitting it when unavailable.
+        if "call_token_budget" in getattr(config.__class__, "model_fields", {}):
+            config = config.model_copy(
+                update={"call_token_budget": remaining_total}
+            )
         policy = ModelCallPolicy(thinking="off", forced_tool=self.TOOL_NAME)
         tools = [self.tool_schema()]
         wire_config = config
@@ -997,10 +1058,60 @@ class SemanticVerifier:
                 policy=wire_policy,
                 conversation=ModelConversation(),
             )
+        except asyncio.CancelledError:
+            # C's client records a cancelled in-flight attempt before
+            # re-raising.  Consume that ledger here so a global cancellation
+            # cannot make an already-issued unknown-output request free, while
+            # still propagating the original CancelledError to the run owner.
+            attempts = self._consume_attempts(model_client)
+            attempt_count, failed_count, unknown_count = self._attempt_counts(
+                attempts, response=None
+            )
+            output_token_budget = max(0, int(wire_config.max_tokens))
+            attempt_budget_tokens = self._attempt_budget_charges(
+                attempts,
+                request_estimated_tokens=assembled.estimated_tokens,
+                output_token_budget=output_token_budget,
+                response=None,
+            )
+            budget_tokens_used = sum(attempt_budget_tokens)
+            self._last_budget_tokens_used += budget_tokens_used
+            if usage_observer is not None:
+                usage_observer(
+                    None,
+                    attempt_count,
+                    failed_count,
+                    unknown_count,
+                )
+            raise
         except Exception as exc:  # noqa: BLE001
             attempts = self._consume_attempts(model_client)
             attempt_count, failed_count, unknown_count = self._attempt_counts(
                 attempts, response=None
+            )
+            if (
+                str(getattr(exc, "code", "") or "")
+                == "call_token_budget_exhausted"
+                and not attempts
+            ):
+                # C rejects this attempt before entering the provider.  Do not
+                # manufacture a logical/provider attempt from the fallback
+                # accounting used by direct fake clients.
+                return _CallOutcome(
+                    decisions=[],
+                    response=None,
+                    error=_error_code(exc),
+                    input_digest=input_digest,
+                    request_hash=assembled.request_hash,
+                    request_estimated_tokens=assembled.estimated_tokens,
+                    sent=False,
+                )
+            output_token_budget = max(0, int(wire_config.max_tokens))
+            attempt_budget_tokens = self._attempt_budget_charges(
+                attempts,
+                request_estimated_tokens=assembled.estimated_tokens,
+                output_token_budget=output_token_budget,
+                response=None,
             )
             return _CallOutcome(
                 decisions=[],
@@ -1009,6 +1120,9 @@ class SemanticVerifier:
                 input_digest=input_digest,
                 request_hash=assembled.request_hash,
                 request_estimated_tokens=assembled.estimated_tokens,
+                output_token_budget=output_token_budget,
+                attempt_budget_tokens=attempt_budget_tokens,
+                budget_tokens_used=sum(attempt_budget_tokens),
                 provider_attempt_count=attempt_count,
                 failed_provider_attempt_count=failed_count,
                 failed_unknown_usage_count=unknown_count,
@@ -1018,6 +1132,14 @@ class SemanticVerifier:
         attempt_count, failed_count, unknown_count = self._attempt_counts(
             attempts, response=response
         )
+        output_token_budget = max(0, int(wire_config.max_tokens))
+        attempt_budget_tokens = self._attempt_budget_charges(
+            attempts,
+            request_estimated_tokens=assembled.estimated_tokens,
+            output_token_budget=output_token_budget,
+            response=response,
+        )
+        budget_tokens_used = sum(attempt_budget_tokens)
         response_digest = _digest(
             {
                 "content": response.content,
@@ -1044,6 +1166,9 @@ class SemanticVerifier:
                 input_digest=input_digest,
                 request_hash=assembled.request_hash,
                 request_estimated_tokens=assembled.estimated_tokens,
+                output_token_budget=output_token_budget,
+                attempt_budget_tokens=attempt_budget_tokens,
+                budget_tokens_used=budget_tokens_used,
                 response_digest=response_digest,
                 provider_request_id=str(getattr(response, "provider_request_id", "") or ""),
                 provider_attempt_count=attempt_count,
@@ -1064,6 +1189,9 @@ class SemanticVerifier:
                     input_digest=input_digest,
                     request_hash=assembled.request_hash,
                     request_estimated_tokens=assembled.estimated_tokens,
+                    output_token_budget=output_token_budget,
+                    attempt_budget_tokens=attempt_budget_tokens,
+                    budget_tokens_used=budget_tokens_used,
                     response_digest=response_digest,
                     provider_request_id=str(getattr(response, "provider_request_id", "") or ""),
                     provider_attempt_count=attempt_count,
@@ -1083,6 +1211,9 @@ class SemanticVerifier:
                 input_digest=input_digest,
                 request_hash=assembled.request_hash,
                 request_estimated_tokens=assembled.estimated_tokens,
+                output_token_budget=output_token_budget,
+                attempt_budget_tokens=attempt_budget_tokens,
+                budget_tokens_used=budget_tokens_used,
                 response_digest=response_digest,
                 provider_request_id=str(getattr(response, "provider_request_id", "") or ""),
                 provider_attempt_count=attempt_count,
@@ -1103,12 +1234,17 @@ class SemanticVerifier:
             raw_handle = str(raw.get("opaque_handle", "")).strip() if isinstance(raw, dict) else ""
             try:
                 decision = SemanticVerifierDecision.model_validate(raw)
-            except ValidationError:
+            except ValidationError as exc:
                 if raw_handle in expected_handles:
                     invalid_handles.add(raw_handle)
                 parse_errors.append(
                     "semantic_verifier_malformed_decision"
                     + (f":{raw_handle}" if raw_handle else "")
+                    + ":"
+                    + ";".join(
+                        f"{'.'.join(str(part) for part in error['loc']) or '$'}={error['type']}"
+                        for error in exc.errors(include_input=False, include_context=False)
+                    )
                 )
                 continue
             if decision.opaque_handle not in expected_handles:
@@ -1132,6 +1268,9 @@ class SemanticVerifier:
             input_digest=input_digest,
             request_hash=assembled.request_hash,
             request_estimated_tokens=assembled.estimated_tokens,
+            output_token_budget=output_token_budget,
+            attempt_budget_tokens=attempt_budget_tokens,
+            budget_tokens_used=budget_tokens_used,
             response_digest=response_digest,
             provider_request_id=str(getattr(response, "provider_request_id", "") or ""),
             provider_attempt_count=attempt_count,
@@ -1196,6 +1335,55 @@ class SemanticVerifier:
             for item in attempts
         )
         return len(attempts), failed, unknown
+
+    @staticmethod
+    def _attempt_budget_charges(
+        attempts: Sequence[Mapping[str, Any]],
+        *,
+        request_estimated_tokens: int,
+        output_token_budget: int,
+        response: ModelResponse | None,
+    ) -> tuple[int, ...]:
+        """Return one conservative budget charge for every sent attempt.
+
+        Provider usage is a cost observation, not the run-budget authority.
+        Missing usage therefore reserves the full configured output ceiling;
+        known usage keeps the request estimate and reported total as separate
+        conservative lower bounds.  When a direct/offline client has no
+        attempt ledger, the logical call still represents one sent attempt.
+        """
+
+        input_tokens = max(0, int(request_estimated_tokens or 0))
+        output_tokens = max(0, int(output_token_budget or 0))
+
+        def nonnegative(value: Any) -> int:
+            try:
+                return max(0, int(value or 0))
+            except (TypeError, ValueError):
+                return 0
+
+        def known_charge(item: Mapping[str, Any]) -> int:
+            completion_tokens = nonnegative(item.get("completion_tokens"))
+            reported_total = nonnegative(item.get("total_tokens"))
+            return max(input_tokens + completion_tokens, reported_total)
+
+        def charge(item: Mapping[str, Any]) -> int:
+            if bool(item.get("usage_present", False)):
+                return known_charge(item)
+            return input_tokens + output_tokens
+
+        if attempts:
+            return tuple(
+                charge(item) for item in attempts if isinstance(item, Mapping)
+            )
+        if response is not None and response.usage_present:
+            return (
+                max(
+                    input_tokens + nonnegative(response.usage.completion_tokens),
+                    nonnegative(response.usage.total_tokens),
+                ),
+            )
+        return (input_tokens + output_tokens,)
 
     async def _investigate(
         self,

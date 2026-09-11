@@ -268,10 +268,27 @@ USER_PREFIX_REVIEW_V3 = (
     "with save_finding using only anchor, description, evidence_refs, severity, "
     "and optional suggestion/related_locations. Select evidence_refs exactly from "
     "the delivered catalog; never invent ids or locations. Use revise_finding only "
-    "with the opaque handle and base version returned by the runtime. When the saved "
-    "set is ready, call finish_review with a concise summary and no finding body. "
-    "Do not emit confidence, role evidence, reviewer ids, versions, or other runtime "
-    "metadata. If there is no supported finding, finish_review with an honest summary.\n"
+    "with the opaque handle returned by the runtime. finish_review is optional: use it "
+    "only when you actively request an immediate stop, with a concise summary and no "
+    "finding body. Runtime closeout can hand off the current Registry contents without "
+    "a finish_review action, so do not repeat saved finding bodies. Do not emit "
+    "confidence, role evidence, reviewer ids, versions, or other runtime metadata. "
+    "Group by independent defect mechanism, not changed-hunk count: one mechanism is one "
+    "finding. If the same causal mechanism and repair class span locations, keep one "
+    "primary anchor with brief related_locations. Keep causes separate: same file/function "
+    "or similar wording alone is not enough to merge, and uncertain cases stay separate. "
+    "For extra evidence/location in an existing finding, revise its current opaque handle "
+    "and explicitly retain prior evidence_refs/related_locations because arrays replace, "
+    "not append. Save only independent defects; do not investigate or finish solely to "
+    "organize findings. "
+    "If there is no supported finding, use an honest empty-result summary when stopping.\n"
+)
+
+USER_PREFIX_REPAIR_REVIEW_V3 = (
+    "Use the supplied evidence and active repair targets to make only the requested "
+    "finding corrections. Submit minimal patches through repair_review; preserve "
+    "unmentioned fields. If a target cannot be repaired from this material, return "
+    "an honest incomplete, unchanged, or deferred disposition.\n"
 )
 
 SYSTEM_PROMPT_REVIEW_V3 = (
@@ -279,15 +296,19 @@ SYSTEM_PROMPT_REVIEW_V3 = (
     "Inspect the change and the delivered evidence for concrete behavioral or "
     "contract problems. A finding has one changed-code anchor, one concise "
     "description, exact evidence references, a severity, and optional remediation "
-    "details. Separate independent causes. The runtime will perform structural "
-    "binding and an independent semantic verification pass after submission."
+    "details. Separate independent causes. The runtime will bind and semantically "
+    "verify saved candidates at closeout, and separately audit whether the model "
+    "actively requested finish; Registry handoff is not proof of model finish."
 )
 FINALIZE_REVIEW_NOTICE_V3 = (
-    "FINAL CALL — call finish_review as your FIRST and ONLY action. Do not output "
-    "reasoning or prose before the tool call and do not request more tools. The "
-    "runtime will submit the findings already saved in the registry; do not repeat "
-    "any finding body. Use a concise honest summary, including that no supported "
-    "finding remains when the saved set is empty."
+    "FINAL CALL / RUNTIME CLOSEOUT HANDOFF — use only save_finding, revise_finding, "
+    "and finish_review. Save a newly supported finding or revise an existing one when "
+    "a final saved action is needed. finish_review is optional and only records the "
+    "model's explicit request to stop; it is not required for Registry handoff or "
+    "success. The runtime will close out the current Registry contents after this "
+    "call. Do not repeat saved finding bodies, call submit_review, or request further "
+    "investigation. If none are supported, use an honest empty-result summary when "
+    "stopping."
 )
 REPAIR_REVIEW_NOTICE = (
     "RUNTIME REPAIR CALL — this is a bounded patch transaction, not a new review. "
@@ -320,6 +341,7 @@ def build_review_messages(
     skill_selection: SkillSelection | None = None,
     skill_loader: ReviewSkillLoader | None = None,
     contract_version: str = "2.0",
+    repair_mode: bool = False,
 ) -> list[Message]:
     """Build review-mode messages with optional priority truncation of payload parts."""
     cb = context_builder or ContextBuilder()
@@ -353,7 +375,8 @@ def build_review_messages(
         Message(
             role="user",
             content=(
-                (USER_PREFIX_REVIEW_V3 if contract_version == "3.0" else USER_PREFIX_REVIEW)
+                (USER_PREFIX_REPAIR_REVIEW_V3 if repair_mode and contract_version == "3.0"
+                 else USER_PREFIX_REVIEW_V3 if contract_version == "3.0" else USER_PREFIX_REVIEW)
                 + serialize_json(payload)
             ),
         ),
@@ -447,6 +470,7 @@ async def build_review_messages_async(
     skill_selection: SkillSelection | None = None,
     skill_loader: ReviewSkillLoader | None = None,
     contract_version: str = "2.0",
+    repair_mode: bool = False,
 ) -> list[Message]:
     """Build review-mode messages with optional second-layer summary compaction."""
     cb = context_builder or ContextBuilder()
@@ -496,7 +520,8 @@ async def build_review_messages_async(
         Message(
             role="user",
             content=(
-                (USER_PREFIX_REVIEW_V3 if contract_version == "3.0" else USER_PREFIX_REVIEW)
+                (USER_PREFIX_REPAIR_REVIEW_V3 if repair_mode and contract_version == "3.0"
+                 else USER_PREFIX_REVIEW_V3 if contract_version == "3.0" else USER_PREFIX_REVIEW)
                 + serialize_json(payload)
             ),
         ),

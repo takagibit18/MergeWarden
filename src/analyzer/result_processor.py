@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from uuid import uuid4
 
 from src.analyzer.context_state import ContextState, DecisionStep
@@ -137,6 +138,32 @@ class ResultProcessor:
             summary=merged_summary,
             issues=merged_issues,
             schema_version=report_version,
+        )
+
+    @staticmethod
+    def build_runtime_closeout_report(
+        current_report: ReviewReport,
+        issues: Sequence[ReviewIssue],
+        *,
+        summary: str,
+        contract_version: str,
+    ) -> ReviewReport:
+        """Build a report from runtime-owned candidates at closeout.
+
+        The candidate registry is the v3 handoff authority.  Do not run the
+        presentation policy filter or infer completion here: the integrity and
+        semantic gates remain responsible for deciding what can be published.
+        """
+
+        if current_report.schema_version != contract_version:
+            raise ValueError(
+                "runtime closeout contract/version mismatch: "
+                f"report={current_report.schema_version!r}, context={contract_version!r}"
+            )
+        return ReviewReport(
+            summary=str(summary or "").strip(),
+            issues=[item.model_copy(deep=True) for item in issues],
+            schema_version=contract_version,
         )
 
     @staticmethod

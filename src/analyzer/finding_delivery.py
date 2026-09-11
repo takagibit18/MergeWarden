@@ -514,6 +514,17 @@ class CandidateRegistry:
                 findings.append(issue)
         return tuple(findings)
 
+    def closeout_issues(self) -> tuple[ReviewIssue, ...]:
+        """Return the current registry content for a runtime closeout.
+
+        v3 closeout is a runtime handoff, not a model ``finish_review`` fact.
+        Keep the explicit alias so callers cannot accidentally make the
+        authoritative closeout depend on whether a model finish action was
+        observed.
+        """
+
+        return self.finish_review()
+
     def expected_version(self, candidate_id: str) -> str:
         """Return the current repair version or an empty string for unknown ids."""
 
