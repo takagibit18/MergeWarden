@@ -4,6 +4,17 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.analyzer.finding_contract import (
+    ModelFinishReviewActionV3,
+    ModelFindingInput,
+    ModelFindingInputV3,
+    ModelReviseFindingActionV3,
+    ModelRepairIssueInput,
+    ModelRepairResponse,
+    ModelRepairResponseV3,
+    ModelSaveFindingActionV3,
+)
+from src.models.schemas import DraftFindingInput, DraftFindingUpdateInput
 from src.tools.base import ToolSpec
 
 
@@ -46,6 +57,9 @@ def _llm_facing_schema(value: Any) -> Any:
 def build_draft_finding_tool_schema() -> dict[str, Any]:
     """Return the review-only pseudo-tool for a minimal durable hypothesis."""
 
+    parameters = _llm_facing_schema(
+        _inline_json_schema_refs(DraftFindingInput.model_json_schema())
+    )
     return {
         "type": "function",
         "function": {
@@ -55,37 +69,330 @@ def build_draft_finding_tool_schema() -> dict[str, Any]:
                 "concrete. This is working state, not a final finding; continue "
                 "gathering evidence and eventually call submit_review."
             ),
-            "parameters": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "file": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "Repository-relative suspect file.",
-                    },
-                    "claim": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "Minimal suspected behavior, without severity or attribution.",
-                    },
-                    "line": {
-                        "type": ["integer", "null"],
-                        "minimum": 1,
-                    },
-                    "symbol": {
-                        "type": ["string", "null"],
-                        "minLength": 1,
-                    },
-                },
-                "required": ["file", "claim"],
-            },
+            "parameters": parameters,
         },
     }
 
 
-def build_submit_tool_schemas() -> list[dict[str, Any]]:
-    """Pseudo-tools used for structured final output submission."""
+def build_draft_finding_update_tool_schema() -> dict[str, Any]:
+    """Return the review-only pseudo-tool for a draft state transition."""
+
+    parameters = _llm_facing_schema(
+        _inline_json_schema_refs(DraftFindingUpdateInput.model_json_schema())
+    )
+    return {
+        "type": "function",
+        "function": {
+            "name": "update_draft_finding",
+            "description": (
+                "Update the investigation state of an existing draft hypothesis. "
+                "Use pending while checks remain, evidence_sufficient when it can "
+                "support a final finding, disproved when evidence rules it out, or "
+                "incomplete when the run cannot finish the checks."
+            ),
+            "parameters": parameters,
+        },
+    }
+
+
+def build_v3_finding_action_tool_schemas(
+    *, include_save: bool = True, include_revise: bool = True, include_finish: bool = True
+) -> list[dict[str, Any]]:
+    """Return the v3 save/revise/finish actions with no full report action."""
+
+    actions: list[dict[str, Any]] = []
+    definitions: list[tuple[str, str, Any]] = []
+    if include_save:
+        definitions.append(
+            (
+                "save_finding",
+                "Save one supported finding in the runtime Registry during exploration; "
+                "this is not a model finish or external submission. Save only a new "
+                "independent defect; use revise_finding for an existing cause.",
+                ModelSaveFindingActionV3,
+            )
+        )
+    if include_revise:
+        definitions.append(
+            (
+                "revise_finding",
+                "Apply an atomic patch to one saved finding using its opaque runtime handle; "
+                "this does not finish the review. Use it for same-cause extra evidence or "
+                "locations; retain existing array items because arrays replace rather than "
+                "append.",
+                ModelReviseFindingActionV3,
+            )
+        )
+    if include_finish:
+        definitions.append(
+            (
+                "finish_review",
+                "Optionally request an active model stop with a concise summary and no "
+                "finding body; runtime closeout may hand off the current Registry "
+                "contents without this action.",
+                ModelFinishReviewActionV3,
+            )
+        )
+    for name, description, model_type in definitions:
+        actions.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": description,
+                    "parameters": _llm_facing_schema(
+                        _inline_json_schema_refs(model_type.model_json_schema())
+                    ),
+                },
+            }
+        )
+    return actions
+
+
+def build_submit_tool_schemas(
+    *,
+    model_input: bool = False,
+    repair: bool = False,
+    contract_version: str | None = None,
+) -> list[dict[str, Any]]:
+    """Pseudo-tools used for structured final output submission.
+
+    ``model_input=True`` is the current semantic contract.  The default keeps
+    the historical full envelope available to old callers and replay fixtures.
+    """
+
+    if model_input:
+        return _build_model_submit_tool_schemas(
+            repair=repair,
+            contract_version=contract_version or "2.0",
+        )
+    return _build_legacy_submit_tool_schemas()
+
+
+def build_model_submit_tool_schemas(
+    *, repair: bool = False, contract_version: str = "2.0"
+) -> list[dict[str, Any]]:
+    """Return the current semantic model-input submit contract."""
+
+    if repair and contract_version == "3.0":
+        # 3.0 repair is a distinct opaque-handle transaction.  Do not route it
+        # through the historical submit_review envelope, which would expose
+        # candidate ids and content versions to the model again.
+        return build_repair_tool_schemas(contract_version="3.0")
+
+    return build_submit_tool_schemas(
+        model_input=True,
+        repair=repair,
+        contract_version=contract_version,
+    )
+
+
+def build_repair_tool_schemas(*, contract_version: str = "2.0") -> list[dict[str, Any]]:
+    """Return the dedicated patch-only repair interface.
+
+    This is intentionally a different tool from ``submit_review``.  Keeping
+    the wire envelopes separate prevents a repair call from being interpreted
+    as a fresh finding report or being format-recovered into one.
+    """
+
+    response_type = (
+        ModelRepairResponseV3 if contract_version == "3.0" else ModelRepairResponse
+    )
+    response_schema = _llm_facing_schema(
+        _inline_json_schema_refs(response_type.model_json_schema())
+    )
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "repair_review",
+                "description": (
+                    "Repair only the exact opaque targets listed in the active "
+                    "runtime transaction. Return one item per target you address. "
+                    "This is not a new finding submission: do not include summary, "
+                    "issues, finding ids, candidate ids, content versions, "
+                    "snapshots, hashes, or full finding objects. For repaired, put "
+                    "only changed semantic fields in repair_patch, including supported "
+                    "anchor or related-location corrections using delivered source paths; omitted fields "
+                    "are preserved. Use delete_fields for explicit deletion and "
+                    "never use null to mean omission."
+                ),
+                "parameters": response_schema,
+            },
+        }
+    ]
+
+
+def _build_model_submit_tool_schemas(
+    *, repair: bool = False, contract_version: str = "2.0"
+) -> list[dict[str, Any]]:
+    if contract_version not in {"2.0", "3.0"}:
+        raise ValueError(f"Unsupported model finding contract version: {contract_version}")
+    model_input_type = (
+        ModelRepairIssueInput
+        if repair
+        else ModelFindingInputV3
+        if contract_version == "3.0"
+        else ModelFindingInput
+    )
+    model_issue_schema = _llm_facing_schema(
+        _inline_json_schema_refs(model_input_type.model_json_schema())
+    )
+    model_issue_properties = model_issue_schema.get("properties")
+    if isinstance(model_issue_properties, dict) and not repair:
+        # Candidate identity belongs to the runtime on the initial submit path.
+        # Keeping these fields out of the wire schema prevents the model from
+        # accidentally turning a first submission into an implicit repair.
+        model_issue_properties.pop("target_candidate_id", None)
+        model_issue_properties.pop("repair_status", None)
+        model_issue_properties.pop("candidate_content_version", None)
+        model_issue_properties.pop("repair_reason", None)
+        model_issue_properties.pop("repair_patch", None)
+        model_issue_properties.pop("finding_id", None)
+    if repair:
+        required = model_issue_schema.setdefault("required", [])
+        for field in (
+            "target_candidate_id",
+            "repair_status",
+            "candidate_content_version",
+        ):
+            if field not in required:
+                required.append(field)
+    # Initial findings retain the conditional structured-risk requirements.
+    # Repair findings are intentionally patch-only: adding full finding fields
+    # here would make omission/inheritance ambiguous and would let the model
+    # replace runtime-owned content accidentally.
+    if not repair and contract_version == "2.0":
+        risk_condition: dict[str, Any] = {
+            "properties": {
+                "severity": {"enum": ["critical", "warning"]}
+            }
+        }
+        model_issue_schema.setdefault("allOf", []).append(
+            {
+                "if": risk_condition,
+                "then": {
+                    "required": [
+                        "primary_anchor",
+                        "evidence",
+                        "suggestion",
+                        "confidence",
+                        "observed_behavior",
+                        "causal_mechanism",
+                        "violated_invariant",
+                        "repair_intent",
+                        "trigger",
+                        "impact",
+                        "supports",
+                    ]
+                },
+            }
+        )
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "submit_review",
+                "description": (
+                    "Submit semantic review findings. "
+                    + (
+                        "Provide one anchor, a concise description, and choose exact "
+                        "evidence_refs from the delivered evidence catalog. "
+                        if contract_version == "3.0"
+                        else "Provide one primary_anchor and choose exact evidence_refs "
+                        "from the delivered evidence catalog. "
+                    )
+                    + (
+                        "This is an atomic repair transaction: every issue must set "
+                        "target_candidate_id to one exact runtime candidate_id, "
+                        "candidate_content_version copied exactly from the feedback, "
+                        "and repair_status to repaired, unchanged, incomplete, or "
+                        "deferred. For repaired, prefer repair_patch with only the "
+                        "semantic fields that changed. Unchanged, incomplete, and "
+                        "deferred may return only identity, status, and repair_reason. "
+                        if repair
+                        else "Do not provide runtime candidate identity or repair status. "
+                    )
+                    + "Runtime identity, location, snapshot, revision, and hash "
+                    "fields are generated and validated by the program."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "summary": {
+                            "type": "string",
+                            "description": (
+                                "High-level result. Do not mention an actionable "
+                                "concern in the summary unless it is in issues."
+                            ),
+                        },
+                        "issues": {
+                            "type": "array",
+                            "description": (
+                                "Semantic findings. Use [] only when no supported "
+                                "issue remains, including after disproving drafts."
+                            ),
+                            "items": model_issue_schema,
+                        },
+                    },
+                    "required": ["summary", "issues"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "submit_debug",
+                "description": "Submit structured debug output.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "summary": {"type": "string"},
+                        "hypotheses": {"type": "array", "items": {"type": "string"}},
+                        "steps": {"type": "array", "items": {"type": "object"}},
+                        "suggested_commands": {"type": "array"},
+                        "suggested_patch": {"type": ["string", "null"]},
+                    },
+                    "required": ["summary"],
+                },
+            },
+        },
+    ]
+
+
+def _inline_json_schema_refs(schema: dict[str, Any]) -> dict[str, Any]:
+    """Inline Pydantic local refs so providers receive one self-contained schema."""
+
+    definitions = schema.get("$defs", {})
+
+    def resolve(value: Any) -> Any:
+        if isinstance(value, list):
+            return [resolve(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        reference = value.get("$ref")
+        if isinstance(reference, str) and reference.startswith("#/$defs/"):
+            name = reference.rsplit("/", 1)[-1]
+            base = resolve(definitions.get(name, {}))
+            overlays = {
+                key: resolve(item) for key, item in value.items() if key != "$ref"
+            }
+            if isinstance(base, dict):
+                return {**base, **overlays}
+            return base
+        return {
+            key: resolve(item) for key, item in value.items() if key != "$defs"
+        }
+
+    resolved = resolve(schema)
+    if not isinstance(resolved, dict):
+        raise TypeError("Inline JSON schema must resolve to an object")
+    return resolved
+
+
+def _build_legacy_submit_tool_schemas() -> list[dict[str, Any]]:
+    """Historical full submit schemas retained for compatibility tests/replay."""
     anchor_schema: dict[str, Any] = {
         "type": "object",
         "properties": {
@@ -249,6 +556,44 @@ def build_submit_tool_schemas() -> list[dict[str, Any]]:
                                     },
                                     "trigger": {"type": "string"},
                                     "impact": {"type": "string"},
+                                    "supports": {
+                                        "type": "array",
+                                        "description": (
+                                            "Canonical role envelopes. Each support must "
+                                            "reference evidence declared in the matching "
+                                            "role-specific evidence array."
+                                        ),
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "role": {
+                                                    "type": "string",
+                                                    "enum": [
+                                                        "cause",
+                                                        "contract",
+                                                        "trigger",
+                                                        "impact",
+                                                        "related",
+                                                    ],
+                                                },
+                                                "statement": {
+                                                    "type": "string",
+                                                    "minLength": 1,
+                                                },
+                                                "evidence_refs": {
+                                                    "type": "array",
+                                                    "items": {"type": "string", "minLength": 1},
+                                                    "minItems": 1,
+                                                },
+                                            },
+                                            "required": [
+                                                "role",
+                                                "statement",
+                                                "evidence_refs",
+                                            ],
+                                            "additionalProperties": False,
+                                        },
+                                    },
                                     "cause_evidence": {
                                         "type": "array",
                                         "items": evidence_schema,
@@ -292,6 +637,7 @@ def build_submit_tool_schemas() -> list[dict[str, Any]]:
                                     "contract_evidence",
                                     "trigger_evidence",
                                     "impact_evidence",
+                                    "supports",
                                 ],
                             },
                         },

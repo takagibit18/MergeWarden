@@ -84,6 +84,112 @@ def test_validate_review_draft_uses_current_filter_thresholds(
     assert result["effective_issue_count"] == 1
 
 
+def test_validator_reads_the_same_live_evidence_catalog_as_submit_preflight(
+    tmp_path: Path,
+) -> None:
+    catalog = [
+        {
+            "evidence_id": "ev-live-catalog",
+            "artifact_id": "artifact-live-catalog",
+            "snapshot_id": "snapshot-a",
+            "revision": "revision-a",
+            "path": "src/app.py",
+            "start_line": 2,
+            "end_line": 2,
+            "source_type": "git_diff",
+            "lifecycle": "delivered",
+            "truncated": False,
+        }
+    ]
+    context = ReviewToolContext.from_diff(
+        tmp_path,
+        (
+            "diff --git a/src/app.py b/src/app.py\n"
+            "--- a/src/app.py\n"
+            "+++ b/src/app.py\n"
+            "@@ -1,2 +1,2 @@\n"
+            " def run():\n"
+            "-    return 'old'\n"
+            "+    return 'new'\n"
+        ),
+        evidence_catalog_provider=lambda: catalog,
+    )
+
+    result = asyncio.run(
+        ValidateReviewDraftTool(context).execute(
+            summary="A structured finding.",
+            issues=[
+                {
+                    "severity": "warning",
+                    "primary_anchor": {"file": "src/app.py", "line": 2},
+                    "evidence": "The changed return reaches callers.",
+                    "suggestion": "Preserve the caller contract.",
+                    "confidence": 0.95,
+                    "supports": [
+                        {
+                            "role": "cause",
+                            "statement": "The changed return produces the new value.",
+                            "evidence_refs": ["ev-live-catalog"],
+                        }
+                    ],
+                }
+            ],
+        )
+    )
+
+    item = result["issue_results"][0]
+    assert item["evidence_catalog_count"] == 1
+    assert item["evidence_catalog_snapshot_id"] == "snapshot-a"
+    assert item["evidence_refs"] == ["ev-live-catalog"]
+
+
+def test_validator_accepts_identity_bound_patch_only_disposition(
+    tmp_path: Path,
+) -> None:
+    result = asyncio.run(
+        ValidateReviewDraftTool(_context(tmp_path)).execute(
+            issues=[
+                {
+                    "target_candidate_id": "cand-runtime",
+                    "candidate_content_version": "version-a",
+                    "repair_status": "incomplete",
+                    "repair_reason": "Source contract was not delivered.",
+                }
+            ]
+        )
+    )
+
+    item = result["issue_results"][0]
+    assert item["repair_status"] == "incomplete"
+    assert item["passes_submit_preflight"] is True
+    assert result["submit_allowed"] is True
+
+
+def test_validator_does_not_claim_unchecked_drafts_or_candidates() -> None:
+    tool = ValidateReviewDraftTool(_context(Path(".")))
+    result = asyncio.run(
+        tool.execute(
+            summary="A regression needs repair.",
+            draft_ids=["draft-bad", "draft-not-present"],
+            issues=[
+                {
+                    "severity": "warning",
+                    "location": "not-a-repo-path:0",
+                    "evidence": "looks risky",
+                    "suggestion": "Investigate the changed behavior.",
+                    "confidence": 0.8,
+                }
+            ],
+        )
+    )
+
+    assert result["validated_draft_ids"] == []
+    assert result["not_checked_draft_ids"] == ["draft-bad", "draft-not-present"]
+    assert result["validated_finding_ids"] == []
+    assert result["candidate_identity_checked"] is False
+    assert result["validation_scope"] == "policy_and_canonical_contract_preflight"
+
+
 def test_validate_review_draft_separates_display_location_from_causal_anchor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

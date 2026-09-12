@@ -10,6 +10,7 @@ from src.analyzer.output_formatter import (
 )
 from src.analyzer.result_processor import ResultProcessor
 from src.analyzer.review_policy import evaluate_issue_filter
+from src.tools.base import ToolResult
 
 
 def test_issue_filter_decision_explains_every_warning_rejection_reason() -> None:
@@ -450,3 +451,45 @@ def test_format_review_keeps_review_response_contract_shape() -> None:
         "workflow_invalid",
         "workflow_missing_steps",
     }
+
+
+def test_recoverable_tool_failure_does_not_block_partial_review() -> None:
+    processor = ResultProcessor()
+    response, blocking_error = processor.format_review(
+        AnalysisPlan(
+            draft_review=ReviewReport(summary="The investigation continues.")
+        ),
+        [
+            ToolResult(
+                ok=False,
+                error="Path is not a directory.",
+                error_type="invalid_path",
+                failure_class="parameter_error",
+                recoverable=True,
+                recommended_next_step="Use read_file with the exact file path.",
+            )
+        ],
+        ContextState(),
+    )
+
+    assert blocking_error is False
+    assert response.report.summary == "The investigation continues."
+
+
+def test_nonrecoverable_tool_failure_still_blocks_review() -> None:
+    processor = ResultProcessor()
+    _, blocking_error = processor.format_review(
+        AnalysisPlan(draft_review=ReviewReport(summary="Partial review.")),
+        [
+            ToolResult(
+                ok=False,
+                error="Permission denied.",
+                error_type="permission_denied",
+                failure_class="permission",
+                recoverable=False,
+            )
+        ],
+        ContextState(),
+    )
+
+    assert blocking_error is True

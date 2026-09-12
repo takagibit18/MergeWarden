@@ -1,5 +1,7 @@
 # Graph A/B 第一阶段耦合审计
 
+> 历史审计：下文“当前 / 未解决”均指正文列出的审计基线，不代表现有工作树；现行版本边界见 [兼容矩阵](../finding-contract-compatibility-matrix-20260910.md)。保留此文用于解释公平 A/B 的解耦理由。
+
 ## 审计范围与结论
 
 审计基线为 `main` 的 `eac439c2f3ddf88b8874b9dcbfcdc156bb4d7da0`。审计确认：原实现具备完整的关系图、Change-Centered Context Planning、Finding Verifier 和 Root-Cause Consolidator，但 Graph 同时侵入 Orchestrator、Reviewer Prompt、结构化证据校验和 Eval 运行入口，直接关闭 `RELATION_GRAPH_ENABLED` 并不能形成公平、可冻结的 Agent 基线。

@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path, PurePath
+from types import SimpleNamespace
 
 import pytest
 
+from src.analyzer.context_state import ContextState
 from src.analyzer.event_log import EventType
+from src.analyzer.inference_engine import InferenceEngine
 from src.analyzer.output_formatter import ReviewIssue, ReviewReport, Severity
 from src.analyzer.schemas import (
     AnalysisPlan,
@@ -44,6 +47,167 @@ class DummyEchoTool(BaseTool):
 
     async def execute(self, **kwargs):
         return {"echo": kwargs.get("value", "")}
+
+
+def test_repair_merge_retains_omitted_candidates_and_requires_target_candidate_id() -> None:
+    def issue(finding_id: str, suggestion: str) -> ReviewIssue:
+        return ReviewIssue(
+            severity=Severity.WARNING,
+            location=f"src/{finding_id.lower()}.py:1",
+            evidence=f"Evidence for {finding_id}.",
+            suggestion=suggestion,
+            confidence=0.95,
+            schema_version="1.0",
+            finding_id=finding_id,
+        )
+
+    original = ReviewReport(
+        summary="original",
+        issues=[
+            issue("F-A", "Repair A"),
+            issue("F-B", "Repair B"),
+            issue("F-C", "Keep C"),
+        ],
+    )
+    repaired_b = issue("F-B", "Repaired B with delivered evidence")
+    repaired_b.target_candidate_id = "candidate-b"
+    preview = SimpleNamespace(
+        bound_candidates=[
+            SimpleNamespace(source_issue_index=0, candidate_id="candidate-a"),
+            SimpleNamespace(source_issue_index=1, candidate_id="candidate-b"),
+            SimpleNamespace(source_issue_index=2, candidate_id="candidate-c"),
+        ],
+        results=[
+            SimpleNamespace(status="needs_repair"),
+            SimpleNamespace(status="needs_repair"),
+            SimpleNamespace(status="verified"),
+        ],
+    )
+
+    merged = AgentOrchestrator._merge_repaired_report(
+        original,
+        ReviewReport(summary="repair", issues=[repaired_b]),
+        preview,
+    )
+
+    assert [item.finding_id for item in merged.issues] == ["F-A", "F-B", "F-C"]
+    assert merged.issues[0].suggestion == "Repair A"
+    assert merged.issues[1].suggestion == "Repaired B with delivered evidence"
+    assert merged.issues[2].suggestion == "Keep C"
+
+
+def test_repair_merge_rejects_unknown_and_duplicate_targets_without_guessing() -> None:
+    def issue(finding_id: str, suggestion: str) -> ReviewIssue:
+        return ReviewIssue(
+            severity=Severity.WARNING,
+            location="src/app.py:1",
+            evidence="+ changed = True",
+            suggestion=suggestion,
+            confidence=0.95,
+            finding_id=finding_id,
+        )
+
+    original = ReviewReport(
+        summary="original",
+        issues=[issue("F-A", "Original A"), issue("F-B", "Original B")],
+    )
+    first = issue("", "First repair")
+    first.target_candidate_id = "candidate-a"
+    duplicate = issue("", "Duplicate repair")
+    duplicate.target_candidate_id = "candidate-a"
+    unknown = issue("", "Cross-candidate repair")
+    unknown.target_candidate_id = "candidate-passed"
+    preview = SimpleNamespace(
+        bound_candidates=[
+            SimpleNamespace(source_issue_index=0, candidate_id="candidate-a"),
+            SimpleNamespace(source_issue_index=1, candidate_id="candidate-b"),
+            SimpleNamespace(source_issue_index=2, candidate_id="candidate-passed"),
+        ],
+        results=[
+            SimpleNamespace(status="needs_repair"),
+            SimpleNamespace(status="needs_repair"),
+            SimpleNamespace(status="verified"),
+        ],
+    )
+    diagnostics: list[dict[str, object]] = []
+
+    merged = AgentOrchestrator._merge_repaired_report(
+        original,
+        ReviewReport(summary="repair", issues=[first, duplicate, unknown]),
+        preview,
+        diagnostics=diagnostics,
+    )
+
+    assert [item.suggestion for item in merged.issues] == [
+        "First repair",
+        "Original B",
+    ]
+    assert [item["code"] for item in diagnostics] == [
+        "repair_target_duplicate",
+        "repair_target_unknown",
+        "repair_target_not_returned",
+    ]
+
+
+def test_repair_target_can_replace_issue_without_finding_id() -> None:
+    original = ReviewReport(
+        summary="original",
+        issues=[
+            ReviewIssue(
+                severity=Severity.WARNING,
+                location="src/app.py:1",
+                evidence="+ changed = True",
+                suggestion="Original suggestion",
+                confidence=0.95,
+                finding_id="F-original",
+            )
+        ],
+    )
+    repaired = ReviewIssue(
+        severity=Severity.WARNING,
+        location="src/app.py:1",
+        evidence="+ changed = True",
+        suggestion="Repaired without a reviewer finding label",
+        confidence=0.95,
+        target_candidate_id="candidate-a",
+    )
+    preview = SimpleNamespace(
+        bound_candidates=[
+            SimpleNamespace(source_issue_index=0, candidate_id="candidate-a")
+        ],
+        results=[SimpleNamespace(status="needs_repair")],
+    )
+
+    merged = AgentOrchestrator._merge_repaired_report(
+        original,
+        ReviewReport(summary="repair", issues=[repaired]),
+        preview,
+    )
+
+    assert merged.issues[0].finding_id == ""
+    assert merged.issues[0].candidate_id == "candidate-a"
+    assert merged.issues[0].suggestion == "Repaired without a reviewer finding label"
+
+
+def test_repair_sequence_preflight_requires_source_then_submit_budget() -> None:
+    orchestrator = AgentOrchestrator.__new__(AgentOrchestrator)
+    orchestrator._settings = SimpleNamespace(
+        review_repair_max_attempts=1,
+        token_hard_budget=36_000,
+        final_submit_request_token_budget=8_000,
+        submit_max_output_tokens=4_096,
+        model_request_timeout_seconds=90.0,
+    )
+    orchestrator._review_repair_attempt_count = 0
+    orchestrator._total_tokens = 0
+    orchestrator._budget_state = "none"
+    orchestrator._run_timeout_seconds = 170.0
+    orchestrator._run_started_at = 0.0
+
+    capacity = orchestrator._repair_sequence_capacity(2)  # noqa: SLF001
+
+    assert capacity["allowed"] is False
+    assert capacity["reason"] == "repair_sequence_attempt_budget_insufficient"
 
 
 class DummyWriteTool(BaseTool):
@@ -662,6 +826,10 @@ def test_execute_tools_wraps_readonly_tool_errors() -> None:
 
     assert len(results) == 1
     assert results[0].ok is False
+    assert results[0].recoverable is True
+    assert results[0].error_type == "invalid_path"
+    assert results[0].failure_class == "parameter_error"
+    assert "list_dir" in results[0].recommended_next_step
     assert "Tool execution failed for read_file" in (results[0].error or "")
     assert any(error.category == "runtime" for error in state.errors)
 
@@ -1587,6 +1755,154 @@ def test_empty_review_draft_allows_force_submit_finalize(
 
     assert [item["force_submit"] for item in analyze_calls] == [False, True]
     assert response.report.summary == "No issues found."
+
+
+def test_pending_draft_is_kept_open_until_submit_only_finalization(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    orchestrator = AgentOrchestrator(review_max_iterations=1)
+    analyze_calls: list[bool] = []
+
+    async def _draft_then_submit(state, request, tool_specs, **kwargs):  # type: ignore[no-untyped-def]
+        force_submit = bool(kwargs.get("force_submit"))
+        analyze_calls.append(force_submit)
+        if force_submit:
+            orchestrator._submit_review_seen_any = True  # noqa: SLF001
+            return AnalysisPlan(
+                source_response_id="final-response",
+                draft_review=ReviewReport(summary="No supported issues.", issues=[]),
+            )
+        plan = AnalysisPlan(
+            source_response_id="draft-response",
+            draft_finding_source_response_id="draft-response",
+            draft_finding_calls=[
+                DraftFindingInput(
+                    file="src/app.py",
+                    claim="The changed branch may drop a required value.",
+                    line=10,
+                )
+            ],
+        )
+        orchestrator._persist_draft_finding_calls(plan, state=state)  # noqa: SLF001
+        orchestrator._sync_draft_states(state)  # noqa: SLF001
+        return plan
+
+    monkeypatch.setattr(orchestrator, "analyze", _draft_then_submit)
+
+    response = asyncio.run(orchestrator.run_review(ReviewRequest(repo_path=".")))
+
+    assert analyze_calls == [False, True]
+    assert not orchestrator._draft_finding_store.has_pending()  # noqa: SLF001
+    assert orchestrator._finalization_status == "submitted"  # noqa: SLF001
+    assert response.completion_status == "complete"
+    assert response.delivery_complete is True
+    assert "max_iterations" not in response.incomplete_reasons
+    log_path = tmp_path / ".mergewarden" / "logs" / f"{response.run_id}.jsonl"
+    events = [
+        json.loads(line)
+        for line in log_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    finalize_event = next(
+        item
+        for item in events
+        if item["event_type"] == EventType.DECISION.value
+        and item["phase"] == "finalize"
+        and item["payload"].get("finalize_attempt") is True
+    )
+    assert finalize_event["payload"]["ordinary_exploration_tools_exposed"] is False
+    assert finalize_event["payload"]["pending_drafts_before"] is True
+
+
+def test_format_recovery_rejects_changed_evidence_and_preserves_candidate_input(
+    tmp_path,
+) -> None:
+    orchestrator = AgentOrchestrator()
+    orchestrator._reset_run(max_iterations=1, repo_path=str(tmp_path))  # noqa: SLF001
+    state = ContextState()
+    state.evidence_ledger = [
+        {
+            "evidence_id": "ev-good",
+            "artifact_id": "artifact-good",
+            "path": "src/app.py",
+            "start_line": 10,
+            "end_line": 10,
+            "source_type": "git_diff",
+            "snapshot_id": "snapshot-a",
+            "revision": "revision-a",
+            "lifecycle": "delivered",
+            "truncated": False,
+        }
+    ]
+    raw_payload = {
+        "summary": "one candidate",
+        "issues": [
+            {
+                "severity": "warning",
+                "primary_anchor": {"file": "src/app.py", "line": 10},
+                "evidence": "the changed branch drops the value",
+                "confidence": 0.9,
+                "supports": [
+                    {
+                        "role": "cause",
+                        "statement": "The changed branch drops the value.",
+                        "evidence_refs": ["ev-good"],
+                    }
+                ],
+            }
+        ],
+    }
+    recovered_payload = {
+        "summary": "one candidate",
+        "issues": [
+            {
+                "severity": "warning",
+                "primary_anchor": {"file": "src/app.py", "line": 10},
+                "evidence": "the changed branch drops the value",
+                "suggestion": "preserve the value",
+                "confidence": 0.9,
+                "supports": [
+                    {
+                        "role": "cause",
+                        "statement": "The changed branch drops the value.",
+                        "evidence_refs": ["ev-bad"],
+                    }
+                ],
+            }
+        ],
+    }
+    normalized, _ = InferenceEngine._normalize_review_payload(  # noqa: SLF001
+        recovered_payload,
+        evidence_catalog=state.evidence_ledger,
+    )
+    plan = AnalysisPlan(
+        source_response_id="recovered-response",
+        draft_review=ReviewReport.model_validate(normalized),
+        format_recovery_id="fr_test_preserve",
+        format_recovery_required=True,
+        format_recovery_raw_payload=raw_payload,
+        format_recovery_validation_error="issues.0.suggestion Field required",
+        format_recovery_input_response_id="input-response",
+        format_recovery_response_id="recovered-response",
+    )
+
+    orchestrator._prepare_format_recovery(plan, state)  # noqa: SLF001
+    orchestrator._observe_review_submission(plan)  # noqa: SLF001
+
+    assert plan.format_recovery_rejected is True
+    assert plan.format_recovery_status == "rejected_preserved_input"
+    assert plan.draft_review is not None
+    assert plan.draft_review.issues[0].cause_evidence[0].evidence_id == "ev-good"
+    assert plan.draft_review.issues[0].candidate_id.startswith("cand_")
+    entries = orchestrator._run_journal.replay()  # noqa: SLF001
+    recovery_entries = [item for item in entries if item.type == "format_recovery"]
+    assert recovery_entries
+    assert recovery_entries[0].payload["input_response_id"] == "input-response"
+    assert recovery_entries[0].payload["raw_payload"]["issues"][0]["supports"][0][
+        "evidence_refs"
+    ] == ["ev-good"]
 
 
 def test_hard_cap_still_skips_extra_finalize(tmp_path, monkeypatch) -> None:

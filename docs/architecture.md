@@ -1,5 +1,7 @@
 # Architecture
 
+设计选择与被替代方案见[长期设计记录](design_decisions.md)，尚需补证据或决策的事项见[维护待办](maintenance_backlog.md)。历史版本段落须结合下方 v3 边界阅读，不作为当前默认配置的唯一来源。
+
 ## Layered Architecture
 
 ```
@@ -170,3 +172,64 @@ The platform queue uses an atomic SQLite claim with `lease_owner`, `lease_expire
 Warning/Critical review hypotheses now pass through two distinct gates: a per-finding evidence verifier before consolidation and a cluster-level consolidation verifier after conservative blocking and complete-link grouping. A change-centered relation graph and exact Candidate Context Manifest constrain what the Reviewer and verifier may cite. The graph answers which code to inspect; it never defines root-cause clusters.
 
 The local static graph uses qualified symbol identities, evidence-aware edges, field read/write relations and an optional resolver interface. A versioned SQLite index supports hash-based incremental rebuilds and safe corruption/schema fallback. See [v023_v025_root_cause_relation_graph.md](./v023_v025_root_cause_relation_graph.md) for schemas, provenance rules, migrations and diagrams.
+
+### Finding generation repair (2026-09-07)
+
+风险 finding 的生成链路现在把“模型提出了什么”“实际提交了什么”“验证后发布了什么”分开记录：
+
+```text
+model output
+  -> producer/schema normalization
+  -> canonical v2 contract gaps
+  -> policy routing (risk / non-risk)
+  -> exact request assembly
+  -> delivered evidence ledger (only complete wire bodies)
+  -> integrity binding (artifact + range + side + snapshot + revision)
+  -> bounded shared repair budget
+  -> final published findings
+```
+
+`FindingContract` 负责结构化 finding 的字段与角色完整性；`EvidenceLedger` 负责
+请求可见的 source identity。图索引、候选 manifest、模型自填的 evidence identity
+都不能单独成为 verifier 证据。`RequestAssembler` 对消息、历史、工具 schema 和
+provider 控制做一次统一序列化并执行完整 request cap；被 shorten 的 file/diff/tool
+body 不登记为完整 evidence。
+
+运行结束时 `finding_funnel_completed` 独立输出 logical candidate、submitted
+attempt、provider attempt、policy、risk、integrity、repair、evidence completeness
+和 final publish 计数。schema validation repair 与 integrity guard repair 共享
+报告级 `REVIEW_REPAIR_MAX_ATTEMPTS`，本地 canonical 转换不消耗额度。
+
+评测默认继续使用冻结的 `semantic-v3` 结果口径；`semantic-v4` 是显式 opt-in 的
+分层 matcher，分别报告 display location 与 root-cause roles，并只统计最终
+integrity-verified 风险 finding。Graph 失败时保留审计状态并回退到
+`agent_search`，不扩大上下文预算或改变 gold/threshold。
+
+### Harness slimming v3 delivery (2026-09-10)
+
+上面的 v0.2/v2 段落描述历史兼容链路；当前 v3 链路另有明确版本边界，不能把
+integrity `verified` 重新解释成 semantic `accepted`：
+
+```text
+Reviewer FindingContentV3
+  -> CandidateRegistry (唯一可变 finding 内容与内容版本)
+  -> integrity guard (来源、快照、范围、权限、版本)
+  -> independent SemanticVerifier (fresh conversation, batch decisions)
+  -> report_ready
+  -> external publish status
+```
+
+v3 的模型输入只有 `anchor`、`description`、`evidence_refs`、`severity` 及两个可选
+字段；runtime 通过显式适配器把它绑定到历史 `ReviewIssue` 外壳，但不会把
+description 伪造为旧五段 narrative 或 confidence。`CandidateRegistry` 提供
+`save_finding`、`revise_finding`、`finish_review` 和原子 patch/receipt 绑定能力，
+旧 v2 repair 只在兼容模式使用。
+
+`SemanticVerifier` 使用独立系统提示和新会话，批量返回
+`accept/reject/needs_revision`；缺失 verdict、格式错误、超时或 provider 失败均为
+`unresolved`。只有 `integrity` 与 `semantic` 两个门都完成，内部报告才会标记
+`report_ready`；GitHub 实际发布还要单独转为 `external_publish_status=published`。
+`needs_revision` 至多触发一轮、至多两次只读定向取证；无具体疑问时不调查。
+
+迁移开关只有 `FINDING_CONTRACT_VERSION`：默认 `2.0` 保证历史调用者可回滚，设为
+`3.0` 才启用新模型契约和语义门禁；不提供绕过 verifier 的组合开关。

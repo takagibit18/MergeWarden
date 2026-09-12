@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import json as _json
 import os
+import re
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Literal
@@ -14,13 +15,43 @@ from uuid import uuid4
 
 from src.analyzer.context_builder import ContextBuilder
 from src.analyzer.context_mode import ReviewContextMode
+from src.analyzer.evidence_ledger import ledger_from_sources
 from src.analyzer.context_state import ContextState, DecisionStep, ErrorDetail
 from src.analyzer.context_strategy import ContextStrategy, build_context_strategy
 from src.analyzer.diff_lines import changed_new_lines_by_file
 from src.analyzer.event_log import EventEntry, EventLog, EventType
-from src.analyzer.finding_integrity import FindingIntegrityGuard, build_candidates
+from src.analyzer.finding_integrity import (
+    FindingIntegrityGuard,
+    FindingIntegrityResult,
+    IntegrityFailure,
+    build_candidates,
+    classify_integrity_failure,
+)
+from src.analyzer.finding_delivery import (
+    CandidateRegistry,
+    RepairTransaction,
+    candidate_content_version,
+    evidence_context_digest,
+    relevant_evidence_context_digest,
+)
+from src.analyzer.finding_contract import (
+    canonical_contract_gaps,
+    issue_supports,
+    normalize_model_finding_payload,
+    normalize_model_finding_v3_payload,
+    normalize_model_repair_payload,
+)
+from src.analyzer.finding_schema import FindingContentV3, SourceAnchor
+from src.analyzer.semantic_verifier import (
+    InvestigationResult,
+    SemanticInvestigationRequest,
+    SemanticVerifier,
+    SemanticVerifierBudget,
+    SemanticVerifierCandidate,
+)
 from src.analyzer.inference_engine import InferenceEngine
-from src.analyzer.output_formatter import ReviewReport
+from src.analyzer.output_formatter import ReviewIssue, ReviewReport, Severity
+from src.analyzer.persistent_index import repository_identity, revision_identity
 from src.analyzer.review_policy import evaluate_issue_filter
 from src.analyzer.review_skills import (
     RETRIEVAL_VERSION,
@@ -36,6 +67,7 @@ from src.analyzer.schemas import (
     ReviewRequest,
     ReviewOutcome,
     ReviewResponse,
+    EXPLORATION_TOOL_NAMES,
 )
 from src.analyzer.trace import TraceRecorder
 from src.analyzer.verifier_context import capture_verifier_tool_evidence
@@ -43,29 +75,43 @@ from src.config import get_settings
 from src.models.client import ModelClient
 from src.models.conversation import ModelConversation
 from src.models.exceptions import ModelClientError, ModelTimeoutError
-from src.models.schemas import DraftFinding, DraftFindingInput, ModelResponse
+from src.models.schemas import (
+    DraftFinding,
+    DraftFindingInput,
+    DraftFindingUpdateInput,
+    ModelResponse,
+)
 from src.orchestrator.draft_findings import (
     DraftFindingStore,
     extract_visible_draft_finding,
 )
 from src.orchestrator.run_journal import (
+    CandidateRegistrationJournalPayload,
+    DraftFindingStateJournalPayload,
+    FindingFinalizationJournalPayload,
+    FormatRecoveryJournalPayload,
     LengthRecoveryJournalPayload,
     ModelResponseJournalPayload,
     PendingRunJournalEntry,
+    PreflightJournalPayload,
     RunJournal,
     RunJournalError,
+    SemanticVerifierJournalPayload,
     ToolResultJournalPayload,
     redact_sensitive_values,
 )
 from src.orchestrator.review_workflow import ReviewWorkflowTracker
 from src.orchestrator.tool_schemas import (
     build_draft_finding_tool_schema,
+    build_draft_finding_update_tool_schema,
+    build_v3_finding_action_tool_schemas,
+    build_repair_tool_schemas,
     build_submit_tool_schemas,
     build_tool_schemas,
 )
 from src.tools import create_default_registry
 from src.tools.base import BaseTool, ToolRegistry, ToolResult, ToolSafety, ToolSpec
-from src.tools.exceptions import ToolError
+from src.tools.exceptions import ToolError, classify_tool_failure
 from src.tools.path_utils import tool_workspace_root
 from src.tools.review_context import ReviewToolContext
 
@@ -83,6 +129,8 @@ def _review_outcome_for_counts(checked: int, accepted: int) -> ReviewOutcome:
 
 
 def _non_negative_int(value: object) -> int:
+    if not isinstance(value, (int, float, str, bytes, bytearray)):
+        return 0
     try:
         return max(0, int(value or 0))
     except (TypeError, ValueError):
@@ -132,12 +180,15 @@ class AgentOrchestrator:
         self._tool_feedback: list[dict[str, Any]] = []
         self._feedback_digest_index: dict[str, dict[str, Any]] = {}
         self._tool_dedup_cache: dict[str, ToolResult] = {}
+        self._recoverable_tool_error_counts: dict[str, int] = {}
         self._submit_review_seen_any = False
         self._submit_iteration: int | None = None
         self._submit_debug_seen_any = False
         self._latest_tokens = 0
+        self._latest_budget_tokens = 0
         self._model_conversation = ModelConversation()
         self._total_tokens = 0
+        self._conservative_budget_tokens_used = 0
         self._successful_prompt_tokens = 0
         self._successful_completion_tokens = 0
         self._successful_reasoning_tokens = 0
@@ -158,7 +209,12 @@ class AgentOrchestrator:
         self._last_decision_reason: str = ""
         self._iteration_guard_hit = False
         self._run_timeout_hit = False
+        self._analysis_time_reserve_hit = False
+        self._analysis_time_reserve_reason = ""
         self._provider_error_seen = False
+        self._active_state: ContextState | None = None
+        self._cancellation_persisted = False
+        self._cancelled = False
         self._tool_bearing_iterations: set[int] = set()
         self._workspace_root: Path | None = None
         self._run_started_at = 0.0
@@ -184,6 +240,8 @@ class AgentOrchestrator:
         self._final_submit_evidence_included_count = 0
         self._final_submit_evidence_token_count = 0
         self._final_submit_evidence_truncated_count = 0
+        self._investigation_ready = False
+        self._review_finalized = False
         self._pre_budget_submit_attempted = False
         self._temperature = temperature
         self._review_max_iterations_override = review_max_iterations
@@ -222,6 +280,7 @@ class AgentOrchestrator:
         self._workflow_reprompt_count = 0
         self._model_raw_issue_count = 0
         self._submitted_issue_count = 0
+        self._submitted_attempt_count = 0
         self._policy_passed_issue_count = 0
         self._policy_rejected_issue_count = 0
         self._non_risk_issue_count = 0
@@ -230,6 +289,39 @@ class AgentOrchestrator:
         self._deterministic_rejected_count = 0
         self._verifier_accepted_count = 0
         self._verifier_rejected_count = 0
+        self._semantic_verifier_required = False
+        self._semantic_verifier_completed = False
+        self._semantic_accepted_count = 0
+        self._semantic_rejected_count = 0
+        self._semantic_needs_revision_count = 0
+        self._semantic_unresolved_count = 0
+        self._semantic_model_call_count = 0
+        self._semantic_investigation_call_count = 0
+        self._semantic_investigation_tool_call_count = 0
+        self._semantic_telemetry_totals: dict[str, int] = {
+            "successful_model_call_count": 0,
+            "failed_model_call_count": 0,
+            "provider_attempt_count": 0,
+            "failed_provider_attempt_count": 0,
+            "failed_unknown_usage_count": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "reasoning_tokens": 0,
+            "total_tokens": 0,
+            "budget_tokens_used": 0,
+            "cached_prompt_tokens": 0,
+            "cache_observation_count": 0,
+            "cache_hit_count": 0,
+        }
+        self._runtime_closeout_done = False
+        self._runtime_closeout_reason = ""
+        self._semantic_receipts: list[dict[str, Any]] = []
+        self._semantic_handles: dict[str, str] = {}
+        self._v3_handle_to_candidate: dict[str, str] = {}
+        self._v3_candidate_to_handle: dict[str, str] = {}
+        self._v3_finish_seen = False
+        self._v3_finish_summary = ""
+        self._last_integrity_guard_result: Any | None = None
         self._review_outcome: ReviewOutcome = "no_candidates"
         self._integrity_failure_codes: dict[str, list[str]] = {}
         self._integrity_failure_details: dict[str, list[dict[str, Any]]] = {}
@@ -249,6 +341,33 @@ class AgentOrchestrator:
         self._tool_result_journal_writes = 0
         self._draft_findings_created = 0
         self._draft_findings_from_visible_content = 0
+        self._draft_state_transition_count = 0
+        self._draft_stagnation_streak = 0
+        self._last_draft_action_fingerprint = ""
+        self._iteration_state_action_applied = False
+        self._iteration_progress = False
+        self._completion_incomplete_reasons: list[str] = []
+        self._candidate_registry = CandidateRegistry()
+        self._repair_transactions: list[RepairTransaction] = []
+        self._active_repair_transaction: RepairTransaction | None = None
+        self._repair_model_call_count = 0
+        self._review_repair_attempt_count = 0
+        self._repair_format_attempt_count = 0
+        self._repair_contract_attempt_count = 0
+        self._repair_evidence_attempt_count = 0
+        self._final_submit_attempt_count = 0
+        self._finalization_attempted = False
+        self._finalization_status = "not_attempted"
+        self._finalization_skip_reason = ""
+        self._finalization_response_id = ""
+        self._review_repair_succeeded_count = 0
+        self._integrity_needs_repair_count = 0
+        self._integrity_invalid_count = 0
+        self._final_published_count = 0
+        self._evidence_snapshot_id = ""
+        self._evidence_revision = ""
+        self._live_evidence_catalog: list[dict[str, Any]] = []
+        self._evidence_catalog_digest = ""
         self._trace_recorder = TraceRecorder(
             detail_mode=self._settings.agent_trace_detail,
             max_chars=self._settings.agent_trace_max_chars,
@@ -256,6 +375,15 @@ class AgentOrchestrator:
         )
 
     async def run_review(self, request: ReviewRequest) -> ReviewResponse:
+        """Run review mode and persist a cancellation snapshot before propagating it."""
+
+        try:
+            return await self._run_review(request)
+        except asyncio.CancelledError:
+            self._persist_cancelled_run(self._active_state)
+            raise
+
+    async def _run_review(self, request: ReviewRequest) -> ReviewResponse:
         """Run review mode through the orchestrator loop."""
         self._reset_run(
             max_iterations=(
@@ -271,6 +399,7 @@ class AgentOrchestrator:
                 review_context=review_context,
             )
         state = self.prepare_context(request)
+        self._active_state = state
         await self._prepare_review_context(state, request)
         reviewer_started = perf_counter()
         await self._maybe_prefetch_review_changed_files(state, request)
@@ -282,6 +411,7 @@ class AgentOrchestrator:
                 self._skip_workflow_step("inspect_changed_context", "full_repo_review")
         response: ReviewResponse | DebugResponse | None = None
         while True:
+            self._iteration_progress = False
             tool_specs = (
                 [] if self._permission_mode == "plan" else self._registry.list_specs()
             )
@@ -309,6 +439,11 @@ class AgentOrchestrator:
                 )
                 self._submit_only_retry_pending = submit_only_failed
             tool_results = await self.execute_tools(plan, self._registry, state)
+            if self._settings.finding_contract_version == "3.0":
+                self._observe_review_submission(plan)
+                if plan.v3_finish_review is not None and plan.draft_review is not None:
+                    self._review_stage = "complete"
+                    self._submit_only_retry_pending = False
             self._observe_workflow_tools(plan, tool_results)
             response = self.format_result(state, tool_results)
             if not self.should_continue(state, response):
@@ -321,15 +456,21 @@ class AgentOrchestrator:
                     state, request, tool_specs=[], force_submit=True
                 )
                 self._last_plan = submit_plan
+                if self._settings.finding_contract_version == "3.0":
+                    await self.execute_tools(submit_plan, self._registry, state)
                 self._observe_review_submission(submit_plan)
                 self._observe_incomplete_plan(submit_plan, state)
                 response = self.format_result(state, tool_results=[])
                 self._record_pre_budget_submit("completed", state, submit_plan)
                 break
             self._iteration += 1
-        response = await self._maybe_force_submit_review(state, request, response)
+        if self._settings.finding_contract_version == "3.0":
+            response = self._closeout_v3_response(state, response)
+        else:
+            response = await self._maybe_force_submit_review(state, request, response)
         assert isinstance(response, ReviewResponse)
         response = await self._maybe_recover_review_workflow(response, request, state)
+        response = await self._maybe_repair_review_findings(response, request, state)
         self._recover_model_timeout_after_valid_review(state)
         self._reviewer_latency_seconds = perf_counter() - reviewer_started
         verifier_started = perf_counter()
@@ -339,9 +480,71 @@ class AgentOrchestrator:
             0.0, verifier_total - self._consolidation_latency_seconds
         )
         response = self._finalize_review_workflow(response, state)
+        self._review_finalized = True
+        self._apply_completion_state(response, state)
         self._record_finding_funnel(response)
-        self._record_review_telemetry(state)
+        self._record_review_telemetry(state, response=response)
         self._close_event_log()
+        return response
+
+    def _closeout_v3_response(
+        self,
+        state: ContextState,
+        response: ReviewResponse | DebugResponse | None,
+    ) -> ReviewResponse | DebugResponse:
+        """Hand the current registry candidate set to the v3 verification path."""
+
+        assert response is not None
+        if not isinstance(response, ReviewResponse):
+            return response
+        if self._runtime_closeout_done:
+            # Idempotence means returning the caller's current response, not
+            # restoring the first closeout snapshot over later verification or
+            # mechanical repair changes.
+            return response
+
+        issues = self._candidate_registry.closeout_issues()
+        if self._v3_finish_seen:
+            summary = (
+                self._v3_finish_summary.strip()
+                or response.report.summary.strip()
+                or "Review completed with no findings."
+            )
+        elif issues:
+            summary = "Review results from runtime-collected finding candidates."
+        else:
+            # A natural stop without a finish action is not evidence that the
+            # repository is clean.  Keep the report neutral and incomplete.
+            summary = "Review stopped before an explicit finish; no finding was confirmed."
+        closeout_report = self._result_processor.build_runtime_closeout_report(
+            response.report,
+            issues,
+            summary=summary,
+            contract_version="3.0",
+        )
+        self._runtime_closeout_done = True
+        self._runtime_closeout_reason = self._last_decision_reason or "runtime_closeout"
+        self._submit_review_seen_any = True
+        self._submit_iteration = self._iteration
+        self._finalization_status = "runtime_closeout"
+        self._review_stage = "complete"
+        state.candidate_registrations = self._candidate_registry.snapshot()
+        response.report = closeout_report
+        response.context = state
+        response.submission_received = True
+        self._record_event(
+            EventType.DECISION,
+            "runtime_closeout",
+            {
+                "iteration": self._iteration,
+                "candidate_count": len(issues),
+                "finish_seen": self._v3_finish_seen,
+                "submission_received": True,
+                "reason": self._runtime_closeout_reason,
+                "budget_state": self._budget_state,
+                "incomplete_reasons": list(self._completion_incomplete_reasons),
+            },
+        )
         return response
 
     async def _prepare_review_context(
@@ -377,17 +580,41 @@ class AgentOrchestrator:
         request: ReviewRequest,
         state: ContextState,
     ) -> ReviewResponse:
-        submitted_report = (
-            self._last_plan.draft_review
-            if self._last_plan is not None and self._last_plan.draft_review is not None
-            else response.report
-        )
-        return self._verify_with_integrity_guard(
+        if (
+            self._settings.finding_contract_version == "3.0"
+            and self._runtime_closeout_done
+        ):
+            # Mechanical repair is allowed to advance Registry content before
+            # semantic verification.  Rebuild from the live registry so the
+            # initial closeout snapshot can never roll a valid revision back.
+            submitted_report = self._result_processor.build_runtime_closeout_report(
+                response.report,
+                self._candidate_registry.closeout_issues(),
+                summary=response.report.summary,
+                contract_version="3.0",
+            )
+        else:
+            submitted_report = (
+                self._last_plan.draft_review
+                if self._last_plan is not None
+                and self._last_plan.draft_review is not None
+                else response.report
+            )
+        guarded = self._verify_with_integrity_guard(
             response,
             submitted_report,
             request,
             state,
         )
+        if submitted_report.schema_version == "3.0":
+            return await self._run_semantic_verifier(
+                guarded,
+                submitted_report,
+                request,
+                state,
+            )
+        return guarded
+
     def _verify_with_integrity_guard(
         self,
         response: ReviewResponse,
@@ -397,6 +624,9 @@ class AgentOrchestrator:
     ) -> ReviewResponse:
         """Run the default thin integrity stage without another model call."""
 
+        v3_mode = submitted_report.schema_version == "3.0"
+        semantic_mode = v3_mode
+        self._semantic_verifier_required = semantic_mode
         filter_decisions = [
             evaluate_issue_filter(issue) for issue in submitted_report.issues
         ]
@@ -420,9 +650,13 @@ class AgentOrchestrator:
             )
 
         candidates = build_candidates(
-            response.report,
+            submitted_report,
             iteration=self._iteration,
+            registry=self._candidate_registry,
+            include_non_risk=v3_mode,
         )
+        self._last_integrity_guard_result = None
+        state.candidate_registrations = self._candidate_registry.snapshot()
         self._verifier_candidate_count = len(candidates)
         self._risk_candidate_count = len(candidates)
         self._record_event(
@@ -464,21 +698,46 @@ class AgentOrchestrator:
                     "semantic_verify_findings", "no_risk_candidates"
                 )
 
+        observed_tool_evidence = self._observed_tool_evidence(state)
         guard_result = FindingIntegrityGuard(self._workspace_root).validate(
             candidates,
             request,
-            tool_evidence=list(self._verifier_tool_evidence),
+            tool_evidence=observed_tool_evidence,
             context_manifests=[
                 dict(item) for item in state.candidate_context_manifests
             ],
             context_mode=state.context_mode,
+            evidence_ledger=ledger_from_sources(
+                existing_payload=state.evidence_ledger,
+                snapshot_id=self._evidence_snapshot_id,
+                revision=self._evidence_revision,
+            ),
+            snapshot_id=self._evidence_snapshot_id,
+            revision=self._evidence_revision,
         )
+        state.evidence_ledger = ledger_from_sources(
+            existing_payload=state.evidence_ledger,
+            tool_evidence=self._verifier_tool_evidence,
+            snapshot_id=self._evidence_snapshot_id,
+            revision=self._evidence_revision,
+        ).to_payload()
+        self._publish_evidence_catalog(state)
+        self._sync_draft_states(state)
         self._deterministic_rejected_count = guard_result.rejected_count
         self._verifier_accepted_count = guard_result.passed_count
         self._verifier_rejected_count = guard_result.rejected_count
-        self._review_outcome = _review_outcome_for_counts(
-            guard_result.checked_count,
-            guard_result.passed_count,
+        self._integrity_needs_repair_count = len(
+            guard_result.needs_repair_candidate_ids
+        )
+        self._integrity_invalid_count = len(guard_result.invalid_candidate_ids)
+        self._review_outcome = (
+            "incomplete"
+            if guard_result.needs_repair_candidate_ids
+            or guard_result.invalid_candidate_ids
+            else _review_outcome_for_counts(
+                guard_result.checked_count,
+                guard_result.passed_count,
+            )
         )
         response.review_outcome = self._review_outcome
         self._integrity_failure_codes = {
@@ -486,6 +745,9 @@ class AgentOrchestrator:
             for candidate_id, failures in guard_result.failures.items()
         }
         self._integrity_failure_details = guard_result.failure_details
+        candidate_statuses: dict[str, str] = {
+            result.candidate_id: result.status for result in guard_result.results
+        }
         self._record_event(
             EventType.FINDING_VERIFICATION_COMPLETED,
             "verify_findings",
@@ -499,17 +761,23 @@ class AgentOrchestrator:
                 "deterministic_evidence_checked_count": guard_result.checked_count,
                 "deterministic_evidence_passed_count": guard_result.passed_count,
                 "deterministic_evidence_rejected_count": guard_result.rejected_count,
+                "verified_count": len(guard_result.verified_candidate_ids),
+                "needs_repair_count": len(guard_result.needs_repair_candidate_ids),
+                "invalid_count": len(guard_result.invalid_candidate_ids),
                 "integrity_failures": {
                     candidate_id: codes
                     for candidate_id, codes in self._integrity_failure_codes.items()
                 },
                 "integrity_failure_details": self._integrity_failure_details,
+                "candidate_statuses": candidate_statuses,
                 "review_outcome": self._review_outcome,
                 "verifier_kind": "integrity_guard",
             },
         )
-        if self._workflow_enforcement != "off" and candidates:
+        if self._workflow_enforcement != "off" and candidates and not semantic_mode:
             self._complete_workflow_step("semantic_verify_findings")
+
+        self._last_integrity_guard_result = guard_result
 
         bound_by_source_index = {
             candidate.source_issue_index: candidate.issue
@@ -519,18 +787,3152 @@ class AgentOrchestrator:
         candidate_by_source_index = {
             candidate.source_issue_index: candidate for candidate in candidates
         }
+        # The response object can still be the previous placeholder/iteration
+        # result while ``submitted_report`` is the authoritative report from
+        # the final submit plan.  Build the publication view from the latter;
+        # otherwise a verified candidate is silently dropped from the user
+        # payload even though the registry and integrity guard accepted it.
         output_issues = []
-        for index, issue in enumerate(response.report.issues):
+        for index, issue in enumerate(submitted_report.issues):
             candidate = candidate_by_source_index.get(index)
             if candidate is not None and candidate.candidate_id in rejected_ids:
                 continue
-            output_issues.append(bound_by_source_index.get(index, issue))
+            # Repair and integrity intentionally inspect the raw submitted
+            # report so a policy-filtered response cannot discard a candidate
+            # before its bounded repair opportunity. Publication still obeys
+            # the independent policy gate after the repaired issue is bound.
+            published_issue = bound_by_source_index.get(index, issue)
+            if not evaluate_issue_filter(published_issue).passed:
+                continue
+            output_issues.append(published_issue)
         response.report = ReviewReport(
-            summary=response.report.summary,
+            summary=submitted_report.summary,
             issues=output_issues,
-            schema_version=response.report.schema_version,
+            schema_version=submitted_report.schema_version,
+        )
+        validation_context = str(
+            getattr(guard_result, "evidence_context_digest", "")
+        ).strip() or evidence_context_digest(
+            state.evidence_ledger,
+            snapshot_id=self._evidence_snapshot_id,
+            revision=self._evidence_revision,
+        )
+        incomplete_code_set = {
+            failure.code
+            for failures in guard_result.failures.values()
+            for failure in failures
+            if failure.code
+            in {
+                "evidence_not_observed",
+                "verifier_context_budget_exhausted",
+                "evidence_incomplete",
+                "evidence_binding_missing",
+                "finding_contract_incomplete",
+                "finding_contract_invalid",
+                "support_role_missing",
+                "support_reference_missing",
+                "evidence_identity_mismatch",
+                "location_invalid",
+                "location_line_missing",
+                "location_line_out_of_range",
+                "repository_path_invalid",
+                "repository_path_missing",
+            }
+        }
+        if guard_result.invalid_candidate_ids:
+            # A candidate rejected for untrusted identity is not a clean
+            # no-issue review; retain that fact in the run-level result even
+            # though the candidate is correctly omitted from publication.
+            incomplete_code_set.add("untrusted_finding_candidates")
+        if (
+            guard_result.needs_repair_candidate_ids
+            or guard_result.invalid_candidate_ids
+        ):
+            incomplete_code_set.add("finding_delivery_incomplete")
+        incomplete_codes = sorted(incomplete_code_set)
+        if incomplete_codes:
+            response.completion_status = "incomplete"
+            response.finding_run_status = "incomplete"
+            response.incomplete_reasons = incomplete_codes
+        for result in guard_result.results:
+            if result.status == "verified":
+                candidate = next(
+                    (
+                        item
+                        for item in guard_result.bound_candidates
+                        if item.candidate_id == result.candidate_id
+                    ),
+                    None,
+                )
+                if candidate is not None:
+                    self._candidate_registry.commit_verified_version(
+                        result.candidate_id,
+                        candidate.issue,
+                        evidence_context_digest=validation_context,
+                    )
+            self._candidate_registry.mark_status(result.candidate_id, result.status)  # type: ignore[arg-type]
+        state.candidate_registrations = self._candidate_registry.snapshot()
+        self._persist_final_candidate_states(
+            response=response,
+            guard_result=guard_result,
+            state=state,
         )
         return response
+
+    async def _run_semantic_verifier(
+        self,
+        response: ReviewResponse,
+        submitted_report: ReviewReport,
+        request: ReviewRequest,
+        state: ContextState,
+        *,
+        target_candidate_ids: set[str] | None = None,
+        preserve_issues: list[ReviewIssue] | None = None,
+        allow_semantic_repair: bool = True,
+    ) -> ReviewResponse:
+        """Run the independent semantic gate after integrity binding."""
+
+        self._semantic_verifier_required = True
+        guard_result = self._last_integrity_guard_result
+        if guard_result is None:
+            response.completion_status = "incomplete"
+            response.incomplete_reasons = list(
+                dict.fromkeys([*response.incomplete_reasons, "integrity_result_missing"])
+            )
+            self._semantic_unresolved_count = len(submitted_report.issues)
+            return response
+
+        target_ids = {
+            str(candidate_id).strip()
+            for candidate_id in (target_candidate_ids or set())
+            if str(candidate_id).strip()
+        }
+        prior_semantic_receipts = list(self._semantic_receipts)
+        verified_ids = {
+            item.candidate_id
+            for item in guard_result.results
+            if item.status == "verified"
+        }
+        submitted_structured_ids = {
+            candidate.candidate_id
+            for candidate in guard_result.bound_candidates
+            if candidate.issue.is_structured_hypothesis
+        }
+        if target_ids:
+            verified_ids &= target_ids
+            submitted_structured_ids &= target_ids
+        # Integrity and semantics are separate gates.  A candidate that failed
+        # integrity is not allowed to disappear before the semantic stage and
+        # accidentally make the run look complete merely because no model input
+        # could be built for it.
+        integrity_blocked_v3_count = len(submitted_structured_ids - verified_ids)
+        candidate_items: list[SemanticVerifierCandidate] = []
+        candidate_by_handle: dict[str, Any] = {}
+        versions: dict[str, str] = {}
+        evidence_digests: dict[str, str] = {}
+        investigation_evidence_refs: dict[str, list[str]] = {}
+        for candidate in guard_result.bound_candidates:
+            issue = candidate.issue
+            if (
+                not issue.is_structured_hypothesis
+                or candidate.candidate_id not in verified_ids
+            ):
+                continue
+            record = self._candidate_registry.registration(candidate.candidate_id)
+            if record is None:
+                continue
+            try:
+                evidence_refs = list(issue.evidence_refs)
+                if not evidence_refs:
+                    evidence_refs = [
+                        str(item.evidence_id or item.reference_id).strip()
+                        for item in issue.all_evidence()
+                        if str(item.evidence_id or item.reference_id).strip()
+                    ]
+                description = issue.description.strip()
+                if not description:
+                    description = " ".join(
+                        item.strip()
+                        for item in (
+                            issue.observed_behavior,
+                            issue.causal_mechanism,
+                            issue.violated_invariant,
+                            issue.trigger,
+                            issue.impact,
+                        )
+                        if item.strip()
+                    ) or issue.evidence.strip()
+                content = FindingContentV3.model_validate(
+                    {
+                        "anchor": issue.primary_anchor.model_dump(mode="json")
+                        if issue.primary_anchor is not None
+                        else {},
+                        "description": description,
+                        "evidence_refs": evidence_refs,
+                        "severity": issue.severity.value,
+                        "suggestion": issue.suggestion or None,
+                        "related_locations": [
+                            SourceAnchor.model_validate(item.model_dump(mode="json"))
+                            for item in issue.related_locations
+                        ],
+                    }
+                )
+            except Exception:  # noqa: BLE001
+                continue
+            # The registry rotates the opaque handle whenever the runtime
+            # content version changes.  A semantic receipt must therefore
+            # never be re-used for a revised candidate.
+            handle = self._candidate_registry.opaque_handle(candidate.candidate_id)
+            self._semantic_handles[candidate.candidate_id] = handle
+            semantic_candidate = SemanticVerifierCandidate(
+                opaque_handle=handle,
+                content=content,
+            )
+            candidate_items.append(semantic_candidate)
+            candidate_by_handle[handle] = candidate
+            versions[handle] = record.candidate_content_version
+            evidence_digests[handle] = relevant_evidence_context_digest(
+                state.evidence_ledger,
+                content.evidence_refs,
+                snapshot_id=self._evidence_snapshot_id,
+                revision=self._evidence_revision,
+            )
+
+        response.semantic_verifier_required = True
+        if not candidate_items:
+            self._semantic_verifier_completed = (
+                not verified_ids and integrity_blocked_v3_count == 0
+            )
+            self._semantic_unresolved_count = integrity_blocked_v3_count + len(
+                verified_ids
+            )
+            response.semantic_verifier_completed = self._semantic_verifier_completed
+            response.semantic_unresolved_count = self._semantic_unresolved_count
+            if verified_ids or integrity_blocked_v3_count:
+                self._add_incomplete_reason(state, "semantic_verifier_no_candidates")
+            return response
+
+        evidence = self._semantic_evidence_projection(
+            state.evidence_ledger,
+            {ref for item in candidate_items for ref in item.content.evidence_refs},
+        )
+        semantic_context = {
+            "context_mode": state.context_mode,
+            "candidate_manifests": self._semantic_manifest_projection(
+                state.candidate_context_manifests
+            ),
+        }
+
+        async def investigate(
+            question: str,
+            candidate: SemanticVerifierCandidate,
+            max_calls: int,
+        ) -> InvestigationResult:
+            before_evidence_ids = {
+                str(item.get("evidence_id", "")).strip()
+                for item in state.evidence_ledger
+                if isinstance(item, dict)
+                and str(item.get("evidence_id", "")).strip()
+            }
+            investigation = await self._investigate_semantic_candidate(
+                question,
+                candidate,
+                max_calls=max_calls,
+                state=state,
+            )
+            investigation_evidence_refs[candidate.opaque_handle] = [
+                str(item.get("evidence_id", "")).strip()
+                for item in state.evidence_ledger
+                if isinstance(item, dict)
+                and str(item.get("evidence_id", "")).strip()
+                not in before_evidence_ids
+            ]
+            evidence_refs = set(candidate.content.evidence_refs)
+            evidence_refs.update(investigation_evidence_refs[candidate.opaque_handle])
+            evidence_digests[candidate.opaque_handle] = relevant_evidence_context_digest(
+                state.evidence_ledger,
+                evidence_refs,
+                snapshot_id=self._evidence_snapshot_id,
+                revision=self._evidence_revision,
+            )
+            return investigation
+
+        diff_text = request.diff_text or ""
+        remaining_model_calls = max(
+            0,
+            self._settings.semantic_verifier_max_model_calls
+            - self._semantic_model_call_count,
+        )
+        remaining_investigation_calls = max(
+            0,
+            self._settings.semantic_verifier_max_investigation_calls
+            - self._semantic_investigation_call_count,
+        )
+        remaining_investigation_tool_calls = max(
+            0,
+            self._settings.semantic_verifier_max_investigation_tool_calls
+            - self._semantic_investigation_tool_call_count,
+        )
+        budget = SemanticVerifierBudget(
+            batch_size=self._settings.semantic_verifier_batch_size,
+            max_model_calls=remaining_model_calls,
+            max_investigation_calls=remaining_investigation_calls,
+            max_investigation_tool_calls=remaining_investigation_tool_calls,
+            timeout_seconds=max(
+                0.001,
+                min(
+                    self._settings.model_request_timeout_seconds,
+                    self._run_timeout_seconds - self._run_elapsed_seconds(),
+                ),
+            ),
+            token_budget=self._settings.token_budget,
+            hard_token_budget=self._settings.token_hard_budget,
+            # This is the conservative run-wide budget ledger, not the actual
+            # provider-cost ledger.  It preserves estimated input charges when
+            # usage is missing or under-reported across a recursive recheck.
+            initial_tokens_used=self._conservative_budget_tokens_used,
+            request_token_budget=self._settings.assembled_request_token_budget,
+        )
+        if (
+            self._conservative_budget_tokens_used
+            >= self._settings.token_hard_budget
+            or self._budget_state == "hard_capped"
+            or self._run_timeout_exceeded()
+        ):
+            # The semantic gate may use the protected soft-budget reserve, but
+            # a hard cap or expired run deadline forbids another model call.
+            budget.max_model_calls = 0
+        verifier = SemanticVerifier(self._model_client, budget=budget)
+        def observe_semantic_usage(
+            model_response: ModelResponse | None,
+            provider_attempt_count: int,
+            failed_provider_attempt_count: int,
+            failed_unknown_usage_count: int,
+        ) -> None:
+            """Commit verifier usage to the shared run ledger immediately."""
+
+            self._provider_attempt_count += provider_attempt_count
+            self._failed_attempt_count += failed_provider_attempt_count
+            self._failed_unknown_usage_count += failed_unknown_usage_count
+            if model_response is not None and model_response.usage_present:
+                self._successful_prompt_tokens += max(
+                    0, int(model_response.usage.prompt_tokens)
+                )
+                self._successful_completion_tokens += max(
+                    0, int(model_response.usage.completion_tokens)
+                )
+                self._successful_reasoning_tokens += max(
+                    0, int(model_response.usage.reasoning_tokens)
+                )
+                self._successful_total_tokens += max(
+                    0, int(model_response.usage.total_tokens)
+                )
+                self._total_tokens += max(0, int(model_response.usage.total_tokens))
+                cached = model_response.usage.cached_prompt_tokens
+                if cached is not None:
+                    self._cache_observation_count += 1
+                    self._successful_cached_prompt_tokens += max(0, int(cached))
+                    self._provider_cache_hit_count += int(cached > 0)
+            self._refresh_budget_state()
+
+        try:
+            semantic_result = await verifier.verify(
+                candidate_items,
+                changed_diff=diff_text,
+                evidence=evidence,
+                context=semantic_context,
+                content_versions=versions,
+                evidence_context_digests=evidence_digests,
+                investigator=investigate,
+                investigation_evidence_refs=investigation_evidence_refs,
+                usage_observer=observe_semantic_usage,
+            )
+        except asyncio.CancelledError:
+            # The verifier consumes the provider attempt ledger before
+            # propagating cancellation.  Its private aggregate includes both
+            # completed calls and the in-flight unknown-output attempt; commit
+            # that conservative charge once while leaving actual usage in the
+            # observer's separate cost ledger.
+            self._conservative_budget_tokens_used += max(
+                0,
+                int(getattr(verifier, "last_budget_tokens_used", 0) or 0),
+            )
+            self._refresh_budget_state()
+            raise
+        # Semantic repair recursively invokes this method.  These counters are
+        # run-wide ledgers, so a recheck consumes only the remaining quota and
+        # never replaces the first pass's telemetry.
+        self._semantic_model_call_count += semantic_result.model_call_count
+        self._semantic_investigation_call_count += (
+            semantic_result.investigation_call_count
+        )
+        self._semantic_investigation_tool_call_count += (
+            semantic_result.investigation_tool_call_count
+        )
+        for field in self._semantic_telemetry_totals:
+            self._semantic_telemetry_totals[field] += max(
+                0,
+                int(getattr(semantic_result, field, 0) or 0),
+            )
+        self._conservative_budget_tokens_used += max(
+            0,
+            int(semantic_result.budget_tokens_used or 0),
+        )
+        self._refresh_budget_state()
+        self._semantic_accepted_count = semantic_result.accepted_count
+        self._semantic_rejected_count = semantic_result.rejected_count
+        self._semantic_needs_revision_count = semantic_result.needs_revision_count
+        self._semantic_unresolved_count = (
+            semantic_result.unresolved_count + integrity_blocked_v3_count
+        )
+        self._semantic_receipts = [
+            item
+            for item in prior_semantic_receipts
+            if target_ids
+            and str(item.get("candidate_id", "")).strip() not in target_ids
+        ]
+        accepted_handles: set[str] = set()
+        for receipt in semantic_result.receipts:
+            candidate = candidate_by_handle.get(receipt.opaque_handle)
+            candidate_id = candidate.candidate_id if candidate is not None else ""
+            payload = receipt.model_dump(mode="json")
+            payload["candidate_id"] = candidate_id
+            self._semantic_receipts.append(payload)
+            self._journal_semantic_receipt(payload, phase="request")
+            if candidate_id:
+                receipt_saved = self._candidate_registry.record_semantic_receipt(
+                    candidate_id,
+                    payload,
+                    content_version=receipt.content_version,
+                    evidence_context_digest=receipt.evidence_context_digest,
+                )
+                if not receipt_saved:
+                    self._add_incomplete_reason(
+                        state, "semantic_receipt_binding_failed"
+                    )
+                    accepted_handles.discard(receipt.opaque_handle)
+                    self._journal_semantic_receipt(payload, phase="receipt")
+                    continue
+            self._journal_semantic_receipt(payload, phase="receipt")
+            if receipt.verdict == "accept" and not receipt.severity_correction:
+                accepted_handles.add(receipt.opaque_handle)
+
+        (
+            projected_total,
+            projected_accepted,
+            projected_rejected,
+            projected_needs_revision,
+            projected_unresolved,
+            projected_accepted_issues,
+        ) = self._project_current_semantic_closeout(
+            fallback_candidates={
+                candidate.candidate_id: candidate.issue
+                for candidate in candidate_by_handle.values()
+            },
+            fallback_integrity_blocked_count=integrity_blocked_v3_count,
+        )
+        accepted_issues = [
+            candidate_by_handle[handle].issue
+            for handle in accepted_handles
+            if handle in candidate_by_handle
+        ]
+        preserved_issues = list(preserve_issues or [])
+        accepted_issues = [
+            *preserved_issues,
+            *[
+                issue
+                for issue in accepted_issues
+                if issue.candidate_id
+                not in {item.candidate_id for item in preserved_issues}
+            ],
+        ]
+        if allow_semantic_repair:
+            repaired_report = await self._repair_semantic_revisions(
+                response=response,
+                submitted_report=submitted_report,
+                request=request,
+                state=state,
+                candidate_by_handle=candidate_by_handle,
+                receipts=semantic_result.receipts,
+                investigation_evidence_refs=investigation_evidence_refs,
+            )
+            if repaired_report is not None:
+                revised_ids = {
+                    issue.candidate_id.strip()
+                    for issue in repaired_report.issues
+                    if issue.candidate_id.strip()
+                }
+                preserved_for_recheck = [
+                    issue
+                    for issue in accepted_issues
+                    if issue.candidate_id.strip() not in revised_ids
+                ]
+                response.incomplete_reasons = [
+                    reason
+                    for reason in response.incomplete_reasons
+                    if reason
+                    not in {
+                        "semantic_verifier_needs_revision",
+                        "semantic_verifier_unresolved",
+                    }
+                ]
+                return await self._run_semantic_verifier(
+                    response,
+                    repaired_report,
+                    request,
+                    state,
+                    target_candidate_ids=revised_ids,
+                    preserve_issues=preserved_for_recheck,
+                    allow_semantic_repair=False,
+                )
+        # The recursive recheck may have covered only repaired targets.  The
+        # Registry remains the closeout authority, so project every current
+        # version's latest valid receipt before exposing report-level counts.
+        total = projected_total
+        self._semantic_accepted_count = projected_accepted
+        self._semantic_rejected_count = projected_rejected
+        self._semantic_needs_revision_count = projected_needs_revision
+        self._semantic_unresolved_count = projected_unresolved
+        if total:
+            accepted_issues = projected_accepted_issues
+        response.report = ReviewReport(
+            summary=submitted_report.summary,
+            issues=accepted_issues,
+            schema_version=submitted_report.schema_version,
+        )
+        self._semantic_verifier_completed = (
+            total > 0
+            and self._semantic_unresolved_count == 0
+            and self._semantic_needs_revision_count == 0
+        )
+        response.semantic_verifier_completed = self._semantic_verifier_completed
+        response.semantic_accepted_count = self._semantic_accepted_count
+        response.semantic_rejected_count = self._semantic_rejected_count
+        response.semantic_needs_revision_count = self._semantic_needs_revision_count
+        response.semantic_unresolved_count = self._semantic_unresolved_count
+        response.review_outcome = _review_outcome_for_counts(
+            total, self._semantic_accepted_count
+        )
+        response.report_ready = bool(
+            self._semantic_verifier_completed
+            and not self._integrity_needs_repair_count
+            and not self._integrity_invalid_count
+            and not self._completion_incomplete_reasons
+        )
+        response.external_publish_status = (
+            "ready" if response.report_ready else "not_requested"
+        )
+        semantic_reasons = list(semantic_result.errors)
+        if self._semantic_unresolved_count:
+            semantic_reasons.append("semantic_verifier_unresolved")
+        if self._semantic_needs_revision_count:
+            semantic_reasons.append("semantic_verifier_needs_revision")
+        if semantic_reasons:
+            response.completion_status = "incomplete"
+            response.finding_run_status = "incomplete"
+            response.incomplete_reasons = list(
+                dict.fromkeys([*response.incomplete_reasons, *semantic_reasons])
+            )
+        if self._workflow_enforcement != "off":
+            if self._semantic_verifier_completed:
+                self._complete_workflow_step("semantic_verify_findings")
+            else:
+                self._fail_workflow_step(
+                    "semantic_verify_findings", "semantic_verifier_unresolved"
+                )
+        self._record_event(
+            EventType.FINDING_VERIFICATION_COMPLETED,
+            "semantic_verify_findings",
+            {
+                "verifier_kind": "semantic_model",
+                "candidate_count": total,
+                "accepted_count": self._semantic_accepted_count,
+                "rejected_count": self._semantic_rejected_count,
+                "needs_revision_count": self._semantic_needs_revision_count,
+                "unresolved_count": self._semantic_unresolved_count,
+                "model_call_count": self._semantic_model_call_count,
+                "successful_model_call_count": self._semantic_telemetry_totals[
+                    "successful_model_call_count"
+                ],
+                "failed_model_call_count": self._semantic_telemetry_totals[
+                    "failed_model_call_count"
+                ],
+                "prompt_tokens": self._semantic_telemetry_totals["prompt_tokens"],
+                "completion_tokens": self._semantic_telemetry_totals[
+                    "completion_tokens"
+                ],
+                "reasoning_tokens": self._semantic_telemetry_totals[
+                    "reasoning_tokens"
+                ],
+                "total_tokens": self._semantic_telemetry_totals["total_tokens"],
+                "provider_attempt_count": self._semantic_telemetry_totals[
+                    "provider_attempt_count"
+                ],
+                "failed_provider_attempt_count": self._semantic_telemetry_totals[
+                    "failed_provider_attempt_count"
+                ],
+                "failed_unknown_usage_count": self._semantic_telemetry_totals[
+                    "failed_unknown_usage_count"
+                ],
+                "budget_tokens_used": self._semantic_telemetry_totals[
+                    "budget_tokens_used"
+                ],
+                "cached_prompt_tokens": self._semantic_telemetry_totals[
+                    "cached_prompt_tokens"
+                ],
+                "cache_observation_count": self._semantic_telemetry_totals[
+                    "cache_observation_count"
+                ],
+                "cache_hit_count": self._semantic_telemetry_totals[
+                    "cache_hit_count"
+                ],
+                "investigation_call_count": self._semantic_investigation_call_count,
+                "investigation_tool_call_count": self._semantic_investigation_tool_call_count,
+                "receipts": [
+                    {
+                        "opaque_handle": item["opaque_handle"],
+                        "verdict": item["verdict"],
+                        "status": item["status"],
+                        "error_code": item.get("error_code", ""),
+                    }
+                    for item in self._semantic_receipts
+                ],
+            },
+        )
+        state.candidate_registrations = self._candidate_registry.snapshot()
+        self._persist_final_candidate_states(
+            response=response,
+            guard_result=guard_result,
+            state=state,
+        )
+        return response
+
+    def _project_current_semantic_closeout(
+        self,
+        *,
+        fallback_candidates: dict[str, ReviewIssue],
+        fallback_integrity_blocked_count: int,
+    ) -> tuple[int, int, int, int, int, list[ReviewIssue]]:
+        """Project one report-level semantic view from current Registry state.
+
+        A recursive semantic recheck intentionally receives only repaired
+        candidates.  Counting that target-only result would erase prior
+        unresolved/rejected/accepted candidates.  Registry records are the
+        current closeout set; a receipt is valid only when its content version
+        still matches the record, so old-version receipts cannot participate in
+        the final report.
+        """
+
+        records = list(self._candidate_registry.records)
+        total = 0
+        accepted = 0
+        rejected = 0
+        needs_revision = 0
+        unresolved = 0
+        accepted_issues: list[ReviewIssue] = []
+        seen_candidate_ids: set[str] = set()
+        valid_statuses = {"verified", "published"}
+
+        for record in records:
+            issue = self._candidate_registry.authoritative_issue(record.candidate_id)
+            if issue is None or issue.schema_version != "3.0":
+                continue
+            candidate_id = record.candidate_id
+            seen_candidate_ids.add(candidate_id)
+            total += 1
+            current_version = str(record.candidate_content_version or "").strip()
+            current_receipts = [
+                item
+                for item in record.semantic_receipts
+                if str(item.get("content_version", "")).strip()
+                == current_version
+            ]
+            receipt = current_receipts[-1] if current_receipts else None
+            if receipt is None:
+                unresolved += 1
+                continue
+            receipt_version = str(receipt.get("content_version", "")).strip()
+            receipt_digest = str(receipt.get("evidence_context_digest", "")).strip()
+            registered_digest = str(
+                record.semantic_validated_evidence_context_digest or ""
+            ).strip()
+            receipt_candidate_id = str(receipt.get("candidate_id", "")).strip()
+            binding_valid = bool(
+                record.status in valid_statuses
+                and current_version
+                and record.semantic_validated_content_version == current_version
+                and receipt_version == current_version
+                and receipt.get("status") == "completed"
+                and receipt_digest
+                and receipt_digest == registered_digest
+                and (not receipt_candidate_id or receipt_candidate_id == candidate_id)
+                and candidate_content_version(issue) == current_version
+            )
+            if not binding_valid:
+                unresolved += 1
+                continue
+            verdict = str(receipt.get("verdict", "")).strip()
+            if verdict == "accept":
+                correction = str(
+                    getattr(
+                        receipt.get("severity_correction"),
+                        "value",
+                        receipt.get("severity_correction", ""),
+                    )
+                    or ""
+                ).strip()
+                if correction:
+                    needs_revision += 1
+                else:
+                    accepted += 1
+                    accepted_issues.append(issue)
+            elif verdict == "reject":
+                rejected += 1
+            elif verdict == "needs_revision":
+                needs_revision += 1
+            else:
+                unresolved += 1
+
+        # Keep direct/offline callers fail-closed when they provide semantic
+        # candidates without populating the runtime Registry.  Normal v3 runs
+        # take the Registry branch above.
+        for candidate_id, issue in fallback_candidates.items():
+            if candidate_id in seen_candidate_ids:
+                continue
+            total += 1
+            unresolved += 1
+        if not records:
+            unresolved += max(0, int(fallback_integrity_blocked_count))
+            total += max(0, int(fallback_integrity_blocked_count))
+        return (
+            total,
+            accepted,
+            rejected,
+            needs_revision,
+            unresolved,
+            accepted_issues,
+        )
+
+    def _journal_semantic_receipt(
+        self,
+        payload: dict[str, Any],
+        *,
+        phase: Literal["request", "receipt"],
+    ) -> None:
+        """Persist safe request/response binding facts without model reasoning."""
+
+        if self._run_journal is None:
+            return
+        journal_payload = SemanticVerifierJournalPayload(
+            phase=phase,
+            opaque_handle=str(payload.get("opaque_handle", "")),
+            candidate_id=str(payload.get("candidate_id", "")),
+            content_version=str(payload.get("content_version", "")),
+            evidence_context_digest=str(payload.get("evidence_context_digest", "")),
+            input_digest=str(payload.get("input_digest", "")),
+            request_hash=str(payload.get("request_hash", "")),
+            request_estimated_tokens=int(payload.get("request_estimated_tokens", 0) or 0),
+            response_digest=(
+                str(payload.get("response_digest", "")) if phase == "receipt" else ""
+            ),
+            provider_request_id=(
+                str(payload.get("provider_request_id", ""))
+                if phase == "receipt"
+                else ""
+            ),
+            provider_attempt_count=(
+                int(payload.get("provider_attempt_count", 0) or 0)
+                if phase == "receipt"
+                else 0
+            ),
+            budget_tokens_used=(
+                int(payload.get("budget_tokens_used", 0) or 0)
+                if phase == "receipt"
+                else 0
+            ),
+            budget_remaining_tokens=(
+                int(payload["budget_remaining_tokens"])
+                if phase == "receipt"
+                and payload.get("budget_remaining_tokens") is not None
+                else None
+            ),
+            verdict=(str(payload.get("verdict", "")) if phase == "receipt" else ""),
+            status=(str(payload.get("status", "")) if phase == "receipt" else ""),
+            error_code=(
+                str(payload.get("error_code", "")) if phase == "receipt" else ""
+            ),
+            investigation_calls=(
+                int(payload.get("investigation_calls", 0) or 0)
+                if phase == "receipt"
+                else 0
+            ),
+            investigation_tool_calls=(
+                int(payload.get("investigation_tool_calls", 0) or 0)
+                if phase == "receipt"
+                else 0
+            ),
+            investigation_evidence_refs=(
+                [
+                    str(item).strip()
+                    for item in payload.get("investigation_evidence_refs", [])
+                    if str(item).strip()
+                ]
+                if phase == "receipt"
+                and isinstance(payload.get("investigation_evidence_refs", []), list)
+                else []
+            ),
+        ).model_dump(mode="json")
+        self._run_journal.append(
+            PendingRunJournalEntry(
+                type="semantic_verifier_call",
+                payload=journal_payload,
+            )
+        )
+
+    async def _repair_semantic_revisions(
+        self,
+        *,
+        response: ReviewResponse,
+        submitted_report: ReviewReport,
+        request: ReviewRequest,
+        state: ContextState,
+        candidate_by_handle: dict[str, Any],
+        receipts: list[Any],
+        investigation_evidence_refs: dict[str, list[str]],
+    ) -> ReviewReport | None:
+        """Run one explicit Reviewer repair transaction for semantic gaps."""
+
+        revision_receipts = [
+            receipt
+            for receipt in receipts
+            if receipt.verdict == "needs_revision"
+            and receipt.opaque_handle in candidate_by_handle
+        ]
+        if not revision_receipts:
+            return None
+        target_ids = {
+            candidate_by_handle[receipt.opaque_handle].candidate_id
+            for receipt in revision_receipts
+        }
+        if self._active_repair_transaction is not None:
+            self._add_incomplete_reason(state, "semantic_repair_transaction_busy")
+            return None
+        capacity = self._repair_sequence_capacity(
+            1,
+            transaction_scoped=True,
+        )
+        if not capacity["allowed"]:
+            reason = str(capacity.get("reason", "repair_budget_exhausted"))
+            self._add_incomplete_reason(state, reason)
+            self._record_event(
+                EventType.DECISION,
+                "semantic_repair",
+                {
+                    "stage": "preflight",
+                    "succeeded": False,
+                    "reason": reason,
+                    "target_candidate_count": len(target_ids),
+                    **capacity,
+                },
+            )
+            return None
+
+        repair_report = ReviewReport(
+            summary=submitted_report.summary,
+            issues=[
+                candidate_by_handle[receipt.opaque_handle].issue
+                for receipt in revision_receipts
+            ],
+            schema_version=submitted_report.schema_version,
+        )
+        repair_candidates = build_candidates(
+            repair_report,
+            iteration=self._iteration,
+            registry=self._candidate_registry,
+            register=False,
+            include_non_risk=True,
+        )
+        preview = FindingIntegrityGuard(self._workspace_root).validate(
+            repair_candidates,
+            request,
+            tool_evidence=self._observed_tool_evidence(state),
+            context_manifests=[dict(item) for item in state.candidate_context_manifests],
+            context_mode=state.context_mode,
+            evidence_ledger=ledger_from_sources(
+                existing_payload=state.evidence_ledger,
+                snapshot_id=self._evidence_snapshot_id,
+                revision=self._evidence_revision,
+            ),
+            snapshot_id=self._evidence_snapshot_id,
+            revision=self._evidence_revision,
+        )
+        if any(
+            result.status != "verified"
+            for result in preview.results
+            if result.candidate_id in target_ids
+        ):
+            self._add_incomplete_reason(state, "semantic_repair_integrity_recheck_failed")
+            return None
+
+        gaps: list[dict[str, Any]] = []
+        synthetic_results: list[FindingIntegrityResult] = []
+        for receipt in revision_receipts:
+            candidate = candidate_by_handle[receipt.opaque_handle]
+            candidate_id = candidate.candidate_id
+            gap_items = [
+                {
+                    "code": "semantic_verifier_needs_revision",
+                    "message": receipt.reason,
+                    "verifier_request": receipt.request,
+                    "field": "semantic_verifier",
+                    "failure_class": "contract_gap",
+                    "required_action": (
+                        "apply only the requested semantic patch, then let the "
+                        "runtime re-run integrity and semantic verification"
+                    ),
+                }
+            ]
+            if receipt.severity_correction is not None:
+                target_severity = str(
+                    getattr(
+                        receipt.severity_correction,
+                        "value",
+                        receipt.severity_correction,
+                    )
+                )
+                gap_items.append(
+                    {
+                        "code": "semantic_severity_correction",
+                        "message": (
+                            "The verifier requested an explicit severity correction "
+                            f"to {target_severity}."
+                        ),
+                        "field": "severity",
+                        "target_severity": target_severity,
+                        "failure_class": "contract_gap",
+                        "required_action": (
+                            "set severity to "
+                            f"{target_severity} in repair_patch explicitly"
+                        ),
+                    }
+                )
+            available_evidence = [
+                {
+                    key: item.get(key, "")
+                    for key in (
+                        "evidence_id",
+                        "path",
+                        "start_line",
+                        "end_line",
+                        "source_type",
+                        "truncated",
+                    )
+                }
+                for item in state.evidence_ledger
+                if isinstance(item, dict)
+                and str(item.get("evidence_id", "")).strip()
+                in set(investigation_evidence_refs.get(receipt.opaque_handle, []))
+            ]
+            gaps.append(
+                {
+                    "candidate_id": candidate_id,
+                    "target_candidate_id": candidate_id,
+                    "original_contents": candidate.issue.model_dump(mode="json"),
+                    "status": "needs_repair",
+                    "candidate_content_version": self._candidate_registry.expected_version(
+                        candidate_id
+                    ),
+                    "content_hash": self._candidate_registry.expected_version(
+                        candidate_id
+                    ),
+                    "gaps": gap_items,
+                    "available_evidence": available_evidence,
+                }
+            )
+            synthetic_results.append(
+                FindingIntegrityResult(
+                    candidate_id=candidate_id,
+                    passed=False,
+                    failures=(
+                        IntegrityFailure(
+                            code="semantic_verifier_needs_revision",
+                            message=receipt.reason,
+                            field="semantic_verifier",
+                        ),
+                    ),
+                    content_version=self._candidate_registry.expected_version(candidate_id),
+                    evidence_context_digest=(
+                        receipt.evidence_context_digest
+                        or evidence_context_digest(
+                            state.evidence_ledger,
+                            snapshot_id=self._evidence_snapshot_id,
+                            revision=self._evidence_revision,
+                        )
+                    ),
+                )
+            )
+        transaction = self._build_repair_transaction(
+            synthetic_results,
+            gaps,
+            evidence_catalog=state.evidence_ledger,
+        )
+        self._last_validator_result = {
+            "validator_passed": False,
+            "submit_allowed": False,
+            "unresolved_evidence_gaps": [
+                self._model_safe_repair_gap(
+                    gap,
+                    target_handle=next(
+                        handle
+                        for handle, candidate_id in transaction.target_handles.items()
+                        if candidate_id == gap["candidate_id"]
+                    ),
+                )
+                for gap in gaps
+            ],
+            "repair_instruction": (
+                "Repair only these semantic verifier targets. Preserve every other "
+                "finding. Use the opaque target_handle and a minimal repair_patch; "
+                "do not emit candidate ids, content versions, or a full finding. "
+                "A verifier rejection is not a repair request."
+            ),
+            "repair_transaction": self._model_safe_transaction(transaction),
+        }
+        self._open_repair_transaction(transaction, state=state)
+        self._record_repair_transaction_step("preflight")
+        self._record_event(
+            EventType.DECISION,
+            "semantic_repair",
+            {
+                "stage": "opened",
+                "target_candidate_ids": sorted(target_ids),
+                "reason_codes": sorted(
+                    {
+                        code
+                        for gap in gaps
+                        for item in gap["gaps"]
+                        for code in [str(item.get("code", "")).strip()]
+                        if code
+                    }
+                ),
+            },
+        )
+
+        repair_plan = await self.analyze(
+            state,
+            request,
+            tool_specs=[],
+            force_submit=True,
+            repair_mode=True,
+        )
+        self._record_repair_model_call("semantic_repair")
+        self._account_latest_model_usage()
+        self._observe_review_submission(repair_plan)
+        self._observe_incomplete_plan(repair_plan, state)
+        if repair_plan.repair_response is None:
+            self._add_incomplete_reason(state, "semantic_repair_response_missing")
+            self._finish_repair_transaction(
+                status="incomplete",
+                target_results={candidate_id: "incomplete" for candidate_id in target_ids},
+                reasons=["semantic_repair_response_missing"],
+                state=state,
+            )
+            return None
+
+        diagnostics: list[dict[str, Any]] = []
+        applied_before_merge = list(transaction.applied_response_fingerprints)
+        merged = self._merge_repair_response(
+            repair_report,
+            repair_plan.repair_response,
+            preview,
+            transaction=transaction,
+            registry=self._candidate_registry,
+            evidence_catalog=state.evidence_ledger,
+            snapshot_id=self._evidence_snapshot_id,
+            revision=self._evidence_revision,
+            allowed_target_candidate_ids=target_ids,
+            diagnostics=diagnostics,
+        )
+        if diagnostics:
+            codes = [
+                str(item.get("code", "")).strip()
+                for item in diagnostics
+                if str(item.get("code", "")).strip()
+            ]
+            for code in dict.fromkeys(codes):
+                self._add_incomplete_reason(state, code)
+
+        if diagnostics or any(
+            transaction.target_results.get(candidate_id) != "repaired"
+            for candidate_id in target_ids
+        ):
+            # Merge is only staging. A structurally valid unchanged original
+            # must not turn a rejected or deferred patch into a committed repair.
+            transaction.applied_response_fingerprints = applied_before_merge
+            reason_codes = list(dict.fromkeys(
+                str(item["code"]) for item in diagnostics if item.get("code")
+            )) or ["semantic_repair_not_applied"]
+            for code in reason_codes:
+                self._add_incomplete_reason(state, code)
+            self._finish_repair_transaction(
+                status="incomplete",
+                target_results={
+                    candidate_id: (
+                        transaction.target_results.get(candidate_id, "incomplete")
+                        if transaction.target_results.get(candidate_id) != "repaired"
+                        else "incomplete"
+                    )
+                    for candidate_id in target_ids
+                },
+                reasons=reason_codes,
+                state=state,
+            )
+            return None
+
+        merged_candidates = build_candidates(
+            merged,
+            iteration=self._iteration,
+            registry=self._candidate_registry,
+            register=False,
+            include_non_risk=True,
+        )
+        repaired_result = FindingIntegrityGuard(self._workspace_root).validate(
+            merged_candidates,
+            request,
+            tool_evidence=self._observed_tool_evidence(state),
+            context_manifests=[dict(item) for item in state.candidate_context_manifests],
+            context_mode=state.context_mode,
+            evidence_ledger=ledger_from_sources(
+                existing_payload=state.evidence_ledger,
+                snapshot_id=self._evidence_snapshot_id,
+                revision=self._evidence_revision,
+            ),
+            snapshot_id=self._evidence_snapshot_id,
+            revision=self._evidence_revision,
+        )
+        repaired_by_id = {
+            candidate.candidate_id: (candidate, result)
+            for candidate, result in zip(
+                repaired_result.bound_candidates,
+                repaired_result.results,
+                strict=False,
+            )
+        }
+        if any(
+            repaired_by_id.get(candidate_id) is None
+            or repaired_by_id[candidate_id][1].status != "verified"
+            for candidate_id in target_ids
+        ):
+            self._add_incomplete_reason(state, "semantic_repair_integrity_failed")
+            self._finish_repair_transaction(
+                status="incomplete",
+                target_results={candidate_id: "incomplete" for candidate_id in target_ids},
+                reasons=["semantic_repair_integrity_failed"],
+                state=state,
+            )
+            return None
+
+        # Validate every current base version before applying any replacement;
+        # the subsequent writes are therefore one logical all-target commit.
+        if any(
+            self._candidate_registry.expected_version(candidate_id)
+            != transaction.base_versions.get(candidate_id, "")
+            for candidate_id in target_ids
+        ):
+            self._add_incomplete_reason(state, "semantic_repair_target_expired")
+            self._finish_repair_transaction(
+                status="incomplete",
+                target_results={candidate_id: "expired" for candidate_id in target_ids},
+                reasons=["semantic_repair_target_expired"],
+                state=state,
+            )
+            return None
+        replacements = {
+            candidate_id: repaired_by_id[candidate_id][0].issue
+            for candidate_id in target_ids
+        }
+        for candidate_id in target_ids:
+            if not self._candidate_registry.revise_finding(
+                candidate_id,
+                replacements[candidate_id],
+                base_version=transaction.base_versions[candidate_id],
+            ):
+                self._add_incomplete_reason(state, "semantic_repair_commit_failed")
+                self._finish_repair_transaction(
+                    status="incomplete",
+                    target_results={
+                        target_id: "incomplete" for target_id in target_ids
+                    },
+                    reasons=["semantic_repair_commit_failed"],
+                    state=state,
+                )
+                return None
+        # The patch has passed the complete integrity guard.  Persist that
+        # exact revised version as the current verified mechanical state before
+        # the independent semantic recheck; otherwise a valid repair would
+        # remain ``registered`` and the publisher would reject the rechecked
+        # receipt even though the candidate content and evidence are bound.
+        for candidate_id in target_ids:
+            candidate, integrity_result = repaired_by_id[candidate_id]
+            self._candidate_registry.commit_verified_version(
+                candidate_id,
+                candidate.issue,
+                evidence_context_digest=integrity_result.evidence_context_digest,
+            )
+        self._last_integrity_guard_result = repaired_result
+        self._integrity_needs_repair_count = 0
+        self._integrity_invalid_count = 0
+        self._finish_repair_transaction(
+            status="accepted",
+            target_results={candidate_id: "revised" for candidate_id in target_ids},
+            state=state,
+        )
+        self._record_event(
+            EventType.DECISION,
+            "semantic_repair",
+            {
+                "stage": "committed",
+                "target_candidate_ids": sorted(target_ids),
+                "independent_recheck_required": True,
+            },
+        )
+        revised_issues: list[ReviewIssue] = []
+        for candidate_id in target_ids:
+            issue = self._candidate_registry.authoritative_issue(candidate_id)
+            if issue is not None:
+                revised_issues.append(issue)
+        return ReviewReport(
+            summary=merged.summary,
+            issues=revised_issues,
+            schema_version=merged.schema_version,
+        )
+
+    async def _investigate_semantic_candidate(
+        self,
+        question: str,
+        candidate: SemanticVerifierCandidate,
+        *,
+        max_calls: int,
+        state: ContextState,
+    ) -> InvestigationResult:
+        """Answer one verifier question with a bounded existing read-only tool."""
+
+        if (
+            max_calls <= 0
+            or self._budget_exhausted
+            or self._run_timeout_exceeded()
+            or self._tool_call_count >= self._settings.agent_max_tool_calls
+        ):
+            return InvestigationResult(answer="investigation_budget_exhausted")
+        try:
+            request_payload = _json.loads(question)
+            investigation_request = SemanticInvestigationRequest.model_validate(
+                request_payload.get("action", {})
+                if isinstance(request_payload, dict)
+                else {}
+            )
+            investigation_question = str(
+                request_payload.get("question", "")
+                if isinstance(request_payload, dict)
+                else ""
+            ).strip()
+        except (TypeError, ValueError, _json.JSONDecodeError):
+            return InvestigationResult(
+                answer="investigation_action_missing",
+                tool_call_count=0,
+            )
+
+        tool_name = investigation_request.tool
+        tool = self._registry.get(tool_name)
+        if tool is None or tool.spec().safety != ToolSafety.READONLY:
+            return InvestigationResult(answer="read-only investigation tool unavailable")
+
+        start_line = investigation_request.start_line or 1
+        end_line = investigation_request.end_line or start_line
+        if tool_name == "read_file":
+            arguments = {
+                "file_path": investigation_request.file,
+                "offset": max(0, start_line - 1),
+                "limit": max(1, min(64, end_line - start_line + 1)),
+            }
+        elif tool_name == "get_changed_context":
+            arguments = {
+                "file_path": investigation_request.file,
+                "line": start_line,
+                "end_line": end_line,
+                "radius": 16,
+                "include_imports": True,
+                "include_enclosing_symbol": True,
+            }
+        elif tool_name == "find_symbol_context":
+            arguments = {
+                "symbol": investigation_request.symbol,
+                "path": investigation_request.file or ".",
+                "mode": "all",
+                "line": investigation_request.start_line,
+                "max_results": 30,
+                "context_radius": 8,
+            }
+        else:
+            arguments = {
+                "pattern": investigation_request.pattern,
+                "path": investigation_request.file,
+                "limit": 50,
+            }
+        call_id = "semantic-investigation-" + uuid4().hex[:12]
+        raw_call = {
+            "id": call_id,
+            "type": "function",
+            "function": {
+                "name": tool_name,
+                "arguments": _json.dumps(arguments, ensure_ascii=True),
+            },
+            "synthetic_context": True,
+        }
+        result, error_detail, elapsed_ms = await self._execute_one_tool(
+            tool_name=tool_name,
+            tool=tool,
+            args=arguments,
+        )
+        self._tool_call_count += 1
+        self._tool_name_counts[tool_name] = self._tool_name_counts.get(tool_name, 0) + 1
+        self._record_event(
+            EventType.TOOL_CALL,
+            "semantic_investigation",
+            {
+                "iteration": self._iteration,
+                "call_id": call_id,
+                "name": tool_name,
+                "question": investigation_question[:300],
+                "path": investigation_request.file,
+                "line": investigation_request.start_line,
+                "end_line": investigation_request.end_line,
+                "arguments": arguments,
+                "ok": result.ok,
+                "elapsed_ms": elapsed_ms,
+            },
+        )
+        self._append_tool_feedback([{"tool_call": raw_call, "result": result}])
+        if error_detail is not None:
+            state.errors.append(error_detail)
+        if not result.ok:
+            return InvestigationResult(
+                answer=str(result.error or "read-only investigation failed"),
+                tool_call_count=1,
+            )
+        self._refresh_evidence_ledger(state)
+        data = result.data if isinstance(result.data, dict) else {"value": result.data}
+        evidence = {
+            "tool": tool_name,
+            "arguments": arguments,
+            "result": data,
+            "truncated": bool(data.get("truncated", False)),
+        }
+        return InvestigationResult(
+            answer=str(data.get("content", "") or "read-only evidence delivered"),
+            evidence=[evidence],
+            tool_call_count=1,
+        )
+
+    @staticmethod
+    def _semantic_evidence_projection(
+        records: list[dict[str, Any]], refs: set[str]
+    ) -> list[dict[str, Any]]:
+        selected: list[dict[str, Any]] = []
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            identifiers = {
+                str(record.get("evidence_id", "")).strip(),
+                str(record.get("artifact_id", "")).strip(),
+            }
+            aliases = record.get("aliases", [])
+            if isinstance(aliases, list):
+                identifiers.update(str(item).strip() for item in aliases)
+            if identifiers.intersection(refs):
+                selected.append(dict(record))
+        return selected
+
+    @staticmethod
+    def _semantic_manifest_projection(
+        manifests: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        projected: list[dict[str, Any]] = []
+        for manifest in manifests:
+            if not isinstance(manifest, dict):
+                continue
+            spans: list[dict[str, Any]] = []
+            for raw_span in manifest.get("included_spans", []):
+                if not isinstance(raw_span, dict):
+                    continue
+                spans.append(
+                    {
+                        key: raw_span.get(key, "")
+                        for key in (
+                            "file",
+                            "start_line",
+                            "end_line",
+                            "symbol_id",
+                            "role",
+                            "content",
+                        )
+                    }
+                )
+            if spans:
+                projected.append({"changed_anchor": manifest.get("changed_anchor", {}), "included_spans": spans})
+        return projected
+
+    @staticmethod
+    def _repair_action_for_failure(failure: Any) -> str:
+        """Describe the smallest safe action for one candidate-level gap."""
+
+        failure_class = classify_integrity_failure(failure)
+        field = str(getattr(failure, "field", "") or "")
+        if failure_class == "source_gap":
+            location = str(getattr(failure, "location", "") or "").strip()
+            return (
+                "read the exact related source range"
+                + (f" ({location})" if location else "")
+                + " and cite it only after it is delivered"
+            )
+        if failure_class == "contract_gap":
+            return f"provide the missing semantic field {field or 'contract field'}"
+        if failure_class == "reference_error":
+            return f"replace the reference in {field or 'evidence_refs'} with an exact delivered evidence id"
+        if failure_class == "deterministic_normalization":
+            return "use the single primary_anchor; the runtime will derive location"
+        return "do not guess identity or bind an untrusted path; leave this candidate unresolved"
+
+    def _build_repair_transaction(
+        self,
+        results: list[Any],
+        gaps: list[dict[str, Any]],
+        *,
+        evidence_catalog: list[dict[str, Any]] | None = None,
+    ) -> RepairTransaction:
+        """Build a repair transaction without consuming budget yet."""
+
+        candidate_ids = [
+            str(getattr(result, "candidate_id", "")).strip()
+            for result in results
+            if str(getattr(result, "candidate_id", "")).strip()
+        ]
+        gaps_by_candidate = {
+            str(gap.get("candidate_id", "")).strip(): gap
+            for gap in gaps
+            if str(gap.get("candidate_id", "")).strip()
+        }
+        gap_codes = {
+            candidate_id: sorted(
+                {
+                    str(item.get("code", "")).strip()
+                    for item in gaps_by_candidate.get(candidate_id, {}).get("gaps", [])
+                    if isinstance(item, dict) and str(item.get("code", "")).strip()
+                }
+            )
+            for candidate_id in candidate_ids
+        }
+        base_versions = {
+            str(item.get("candidate_id", "")).strip(): (
+                self._candidate_registry.expected_version(
+                    str(item.get("candidate_id", "")).strip()
+                ).strip()
+                or str(
+                    item.get(
+                        "candidate_content_version", item.get("content_hash", "")
+                    )
+                ).strip()
+            )
+            for item in gaps
+            if str(item.get("candidate_id", "")).strip()
+        }
+        target_handles = {
+            candidate_id: "repair_target_" + uuid4().hex[:16]
+            for candidate_id in candidate_ids
+        }
+        # The model sees handle -> no runtime id mapping.  The runtime keeps
+        # the inverse in the transaction for exact routing.
+        model_handles = {
+            handle: candidate_id
+            for candidate_id, handle in target_handles.items()
+        }
+        source_gap = any(
+            failure_class == "source_gap"
+            for result in results
+            for failure_class in (
+                classify_integrity_failure(failure)
+                for failure in getattr(result, "failures", ())
+            )
+        )
+        required_steps = ["submit"]
+        if source_gap:
+            required_steps.insert(0, "source_exploration")
+        return RepairTransaction(
+            candidate_ids=candidate_ids,
+            target_handles=model_handles,
+            base_versions=base_versions,
+            base_snapshot_id=self._evidence_snapshot_id,
+            base_revision=self._evidence_revision,
+            base_evidence_context_digest=evidence_context_digest(
+                evidence_catalog
+                if evidence_catalog is not None
+                else self._live_evidence_catalog,
+                snapshot_id=self._evidence_snapshot_id,
+                revision=self._evidence_revision,
+            ),
+            gap_codes=gap_codes,
+            required_steps=required_steps,
+            token_budget=max(
+                0,
+                len(required_steps) * self._settings.submit_max_output_tokens,
+            ),
+            time_budget_seconds=(
+                len(required_steps)
+                * min(self._settings.model_request_timeout_seconds, 30.0)
+            ),
+        )
+
+    @staticmethod
+    def _model_safe_candidate_content(issue: Any) -> dict[str, Any]:
+        """Expose only semantic repair context, never runtime/provenance ids."""
+
+        if not isinstance(issue, ReviewIssue):
+            return {}
+        payload = issue.model_dump(mode="json")
+        for field in (
+            "candidate_id",
+            "target_candidate_id",
+            "repair_status",
+            "candidate_content_version",
+            "repair_reason",
+            "repair_patch",
+            "finding_id",
+            "root_cause_id",
+            "integrity_status",
+            "context_manifest_id",
+            "context_hash",
+        ):
+            payload.pop(field, None)
+        for field in (
+            "cause_evidence",
+            "contract_evidence",
+            "trigger_evidence",
+            "impact_evidence",
+        ):
+            items = payload.get(field)
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                for key in (
+                    "candidate_id",
+                    "artifact_id",
+                    "snapshot_id",
+                    "revision",
+                    "context_manifest_id",
+                    "retrieval_source",
+                    "context_hash",
+                ):
+                    item.pop(key, None)
+        return payload
+
+    @classmethod
+    def _model_safe_repair_gap(
+        cls,
+        gap: dict[str, Any],
+        *,
+        target_handle: str,
+    ) -> dict[str, Any]:
+        """Convert runtime gap evidence into the model-facing repair envelope."""
+
+        safe = {
+            "target_handle": target_handle,
+            "status": str(gap.get("status", "")),
+            "candidate_content": cls._model_safe_candidate_content(
+                ReviewIssue.model_validate(gap["original_contents"])
+                if isinstance(gap.get("original_contents"), dict)
+                else None
+            ),
+            "gaps": gap.get("gaps", []),
+        }
+        available_evidence = gap.get("available_evidence", [])
+        if isinstance(available_evidence, list):
+            safe["available_evidence"] = [
+                {
+                    key: item.get(key, "")
+                    for key in (
+                        "evidence_id",
+                        "path",
+                        "start_line",
+                        "end_line",
+                        "source_type",
+                        "truncated",
+                    )
+                }
+                for item in available_evidence
+                if isinstance(item, dict)
+            ]
+        # Failure details contain source locations needed to choose an existing
+        # delivered catalog entry, but never runtime target/version metadata.
+        return safe
+
+    @staticmethod
+    def _model_safe_transaction(transaction: RepairTransaction) -> dict[str, Any]:
+        """Return transaction facts safe to place in a model prompt."""
+
+        return {
+            "transaction_id": transaction.transaction_id,
+            "target_handles": sorted(transaction.target_handles),
+            "required_steps": list(transaction.required_steps),
+            "executed_steps": list(transaction.executed_steps),
+            "status": transaction.status,
+        }
+
+    def _open_repair_transaction(
+        self,
+        transaction: RepairTransaction,
+        *,
+        state: ContextState | None = None,
+    ) -> None:
+        """Consume one shared repair transaction budget and persist its opening."""
+
+        if self._active_repair_transaction is not None:
+            return
+        self._review_repair_attempt_count += 1
+        self._active_repair_transaction = transaction
+        self._repair_transactions.append(transaction)
+        if state is not None:
+            state.repair_transactions = [
+                item.model_dump(mode="json") for item in self._repair_transactions
+            ]
+        self._persist_repair_transaction(transaction, state=state)
+        self._record_event(
+            EventType.REPAIR_TRANSACTION,
+            "repair",
+            {
+                "stage": "opened",
+                **transaction.model_dump(mode="json"),
+                "repair_transaction_count": self._review_repair_attempt_count,
+                "repair_model_call_count": self._repair_model_call_count,
+            },
+        )
+
+    def _record_repair_transaction_step(self, step: str) -> None:
+        """Persist one executed repair step on the active transaction."""
+
+        transaction = self._active_repair_transaction
+        if transaction is None:
+            return
+        transaction.record_step(step)
+        self._persist_repair_transaction(transaction)
+
+    def _record_repair_model_call(self, step: str) -> None:
+        """Count a model call separately from the shared transaction count."""
+
+        self._repair_model_call_count += 1
+        transaction = self._active_repair_transaction
+        if transaction is None:
+            return
+        transaction.model_call_count += 1
+        transaction.record_step(step)
+        self._persist_repair_transaction(transaction)
+
+    def _finish_repair_transaction(
+        self,
+        *,
+        status: Literal[
+            "accepted",
+            "partially_accepted",
+            "rejected",
+            "incomplete",
+            "deferred",
+        ],
+        target_results: dict[str, str],
+        reasons: list[str] | None = None,
+        state: ContextState | None = None,
+    ) -> None:
+        """Close the active transaction after final target validation."""
+
+        transaction = self._active_repair_transaction
+        if transaction is None:
+            return
+        transaction.status = status
+        transaction.target_results = dict(target_results)
+        transaction.rejection_reasons = list(dict.fromkeys(reasons or []))
+        self._persist_repair_transaction(transaction, state=state)
+        self._record_event(
+            EventType.REPAIR_TRANSACTION,
+            "repair",
+            {
+                "stage": "closed",
+                **transaction.model_dump(mode="json"),
+                "repair_transaction_count": self._review_repair_attempt_count,
+                "repair_model_call_count": self._repair_model_call_count,
+            },
+        )
+        self._active_repair_transaction = None
+
+    def _persist_repair_transaction(
+        self,
+        transaction: RepairTransaction,
+        *,
+        state: ContextState | None = None,
+    ) -> None:
+        """Write repair facts to the event log, journal, and response state."""
+
+        if state is not None:
+            state.repair_transactions = [
+                item.model_dump(mode="json") for item in self._repair_transactions
+            ]
+        if self._run_journal is not None:
+            self._run_journal.append(
+                PendingRunJournalEntry(
+                    type="repair_transaction",
+                    payload={"transaction": transaction.model_dump(mode="json")},
+                )
+            )
+
+    def _persist_final_candidate_states(
+        self,
+        *,
+        response: ReviewResponse,
+        guard_result: Any,
+        state: ContextState,
+    ) -> None:
+        """Persist final candidate dispositions without leaking source secrets."""
+
+        statuses: dict[str, str] = {
+            result.candidate_id: result.status for result in guard_result.results
+        }
+        if self._active_repair_transaction is not None:
+            target_results = {
+                candidate_id: statuses.get(candidate_id, "not_returned")
+                for candidate_id in self._active_repair_transaction.candidate_ids
+            }
+            # Preserve explicit protocol dispositions when the final guard
+            # still reports the underlying candidate as unresolved.
+            for candidate_id in self._active_repair_transaction.candidate_ids:
+                registration = self._candidate_registry.registration(candidate_id)
+                if registration is None:
+                    continue
+                if registration.status in {"deferred", "unchanged", "incomplete"}:
+                    if target_results.get(candidate_id) in {
+                        "needs_repair",
+                        "not_returned",
+                    }:
+                        target_results[candidate_id] = registration.status
+            accepted = sum(value == "verified" for value in target_results.values())
+            has_deferred = any(
+                value == "deferred" for value in target_results.values()
+            )
+            has_incomplete = any(
+                value in {"incomplete", "needs_repair", "not_returned"}
+                for value in target_results.values()
+            )
+            final_status = (
+                "deferred"
+                if has_deferred and not accepted
+                else "incomplete"
+                if has_incomplete and not accepted
+                else "accepted"
+                if accepted == len(target_results) and target_results
+                else "partially_accepted"
+                if accepted
+                else "rejected"
+            )
+            self._finish_repair_transaction(
+                status=final_status,  # type: ignore[arg-type]
+                target_results=target_results,
+                reasons=[
+                    code
+                    for values in self._integrity_failure_codes.values()
+                    for code in values
+                ],
+                state=state,
+            )
+        state.candidate_registrations = self._candidate_registry.snapshot()
+        if self._run_journal is not None:
+            self._run_journal.append(
+                PendingRunJournalEntry(
+                    type="finding_finalization",
+                    payload={
+                        "candidate_statuses": statuses,
+                        "final_published_count": len(response.report.issues),
+                        "finding_run_status": response.completion_status,
+                        "review_outcome": self._review_outcome,
+                    },
+                )
+            )
+
+    @classmethod
+    def _integrity_result_gap_payload(
+        cls,
+        result: Any,
+        *,
+        candidate: Any | None = None,
+        registry: CandidateRegistry | None = None,
+    ) -> dict[str, Any]:
+        """Serialize candidate-level feedback with the original repair target."""
+
+        issue = getattr(candidate, "issue", None)
+        original_contents: dict[str, Any] = {}
+        if issue is not None:
+            # The audit/journal copy must be lossless.  The model-facing repair
+            # message may select fewer atomic targets under a budget, but the
+            # runtime always retains the complete original issue here.
+            original_contents = issue.model_dump(mode="json")
+        candidate_id = str(getattr(result, "candidate_id", "")).strip()
+        content_hash = str(
+            registry.expected_version(candidate_id)
+            if registry is not None and candidate_id
+            else ""
+        ).strip() or str(
+            getattr(candidate, "candidate_content_version", "")
+            or getattr(candidate, "content_hash", "")
+        )
+        return {
+            "candidate_id": candidate_id,
+            "target_candidate_id": candidate_id,
+            "current_finding_id": str(
+                getattr(issue, "finding_id", "") if issue is not None else ""
+            ),
+            "source_issue_index": getattr(candidate, "source_issue_index", None),
+            "logical_identity_hash": str(
+                getattr(candidate, "logical_identity_hash", "")
+            ),
+            "content_hash": content_hash,
+            "candidate_content_version": content_hash,
+            "original_contents": original_contents,
+            "status": str(getattr(result, "status", "")),
+            "gaps": [
+                {
+                    **failure.as_detail(),
+                    "failure_class": classify_integrity_failure(failure),
+                    "required_action": cls._repair_action_for_failure(failure),
+                }
+                for failure in getattr(result, "failures", ())
+            ],
+        }
+
+    async def _maybe_repair_review_findings(
+        self,
+        response: ReviewResponse,
+        request: ReviewRequest,
+        state: ContextState,
+    ) -> ReviewResponse:
+        """Give one bounded, exact integrity repair opportunity before publish."""
+
+        # ResultProcessor applies the output policy before this stage.  A
+        # policy-filtered response can therefore be empty even though the
+        # submitted model report still contains a candidate with a repairable
+        # integrity gap.  Repair must inspect that submitted report; otherwise
+        # the guard can only reject after the recovery opportunity is gone.
+        submitted_report = (
+            self._last_plan.draft_review
+            if self._last_plan is not None and self._last_plan.draft_review is not None
+            else response.report
+        )
+        if self._review_repair_attempt_count >= self._settings.review_repair_max_attempts:
+            if submitted_report.issues:
+                configured_zero_budget = (
+                    self._settings.review_repair_max_attempts <= 0
+                )
+                self._record_event(
+                    EventType.DECISION,
+                    "finding_repair",
+                    {
+                        "iteration": self._iteration,
+                        "stage": "pre_publish_repair_skipped",
+                        "succeeded": False,
+                        "reason": (
+                            "configured_zero_budget"
+                            if configured_zero_budget
+                            else "repair_budget_exhausted"
+                        ),
+                        "repair_disabled": configured_zero_budget,
+                        "configured_zero_budget": configured_zero_budget,
+                        "needs_repair_count": len(submitted_report.issues),
+                        "repair_attempted_count": self._review_repair_attempt_count,
+                        "repair_budget_total": self._settings.review_repair_max_attempts,
+                    },
+                )
+            return response
+        if not submitted_report.issues:
+            return response
+        candidates = build_candidates(
+            submitted_report,
+            iteration=self._iteration,
+            registry=self._candidate_registry,
+            include_non_risk=submitted_report.schema_version == "3.0",
+        )
+        if not candidates:
+            return response
+        observed_tool_evidence = self._observed_tool_evidence(state)
+        ledger = ledger_from_sources(
+            existing_payload=state.evidence_ledger,
+            snapshot_id=self._evidence_snapshot_id,
+            revision=self._evidence_revision,
+        )
+        preview = FindingIntegrityGuard(self._workspace_root).validate(
+            candidates,
+            request,
+            tool_evidence=observed_tool_evidence,
+            context_manifests=[dict(item) for item in state.candidate_context_manifests],
+            context_mode=state.context_mode,
+            evidence_ledger=ledger,
+            snapshot_id=self._evidence_snapshot_id,
+            revision=self._evidence_revision,
+        )
+        needs = [
+            result
+            for result in preview.results
+            if result.status == "needs_repair"
+        ]
+        if needs and self._budget_state == "hard_capped":
+            self._add_incomplete_reason(state, "repair_budget_exhausted")
+            self._record_event(
+                EventType.DECISION,
+                "finding_repair",
+                {
+                    "iteration": self._iteration,
+                    "stage": "pre_publish_repair_skipped",
+                    "succeeded": False,
+                    "reason": "repair_budget_exhausted",
+                    "remaining_tokens": 0,
+                    "needs_repair_count": len(needs),
+                },
+            )
+            return response
+        needs_source_indexes = {
+            candidate.source_issue_index
+            for candidate, result in zip(
+                preview.bound_candidates,
+                preview.results,
+                strict=False,
+            )
+            if result.status == "needs_repair"
+        }
+        self._integrity_needs_repair_count = len(needs)
+        self._integrity_invalid_count = sum(
+            result.status == "invalid" for result in preview.results
+        )
+        invalid_results = [
+            result for result in preview.results if result.status == "invalid"
+        ]
+        candidate_by_id = {
+            candidate.candidate_id: candidate for candidate in preview.bound_candidates
+        }
+        invalid_gaps = [
+            self._integrity_result_gap_payload(
+                result,
+                candidate=candidate_by_id.get(result.candidate_id),
+                registry=self._candidate_registry,
+            )
+            for result in invalid_results
+        ]
+        if not needs:
+            if invalid_gaps:
+                self._last_validator_result = {
+                    "validator_passed": False,
+                    "submit_allowed": False,
+                    "unresolved_evidence_gaps": [],
+                    "rejected_candidates": invalid_gaps,
+                    "repair_instruction": (
+                        "The rejected candidates contain untrusted identity or an "
+                        "otherwise non-repairable integrity failure. Preserve the "
+                        "rejection and do not guess a nearby path, snapshot, hash, "
+                        "or source range."
+                    ),
+                }
+                self._record_event(
+                    EventType.DECISION,
+                    "finding_repair",
+                    {
+                        "iteration": self._iteration,
+                        "stage": "pre_publish_invalid_rejection",
+                        "candidate_count": len(candidates),
+                        "needs_repair_count": 0,
+                        "invalid_count": len(invalid_gaps),
+                        "rejected_candidates": invalid_gaps,
+                    },
+                )
+            return response
+        gaps = [
+            self._integrity_result_gap_payload(
+                result,
+                candidate=candidate_by_id.get(result.candidate_id),
+                registry=self._candidate_registry,
+            )
+            for result in needs
+        ]
+        transaction = self._build_repair_transaction(
+            needs,
+            gaps,
+            evidence_catalog=state.evidence_ledger,
+        )
+        model_gaps = [
+            self._model_safe_repair_gap(
+                gap,
+                target_handle=next(
+                    (
+                        handle
+                        for handle, candidate_id in transaction.target_handles.items()
+                        if candidate_id == str(gap.get("candidate_id", "")).strip()
+                    ),
+                    "",
+                ),
+            )
+            for gap in gaps
+        ]
+        self._last_validator_result = {
+            "validator_passed": False,
+            "submit_allowed": False,
+            "unresolved_evidence_gaps": model_gaps,
+            "rejected_candidates": [
+                self._model_safe_repair_gap(
+                    gap,
+                    target_handle="",
+                )
+                for gap in invalid_gaps
+            ],
+            "repair_instruction": (
+                "Repair only the listed candidates. Preserve every candidate that "
+                "already passed. Fill each missing role with a real delivered-source "
+                "reference; never invent evidence, ids, hashes, or locations. "
+                "For every repaired issue set target_handle to exactly one opaque "
+                "target_handle from the feedback. Preserve each target's original "
+                "contents unless repairing that same target. Do not use finding_id, "
+                "candidate id, content version, text, location, position, or a one-candidate "
+                "assumption as a fallback. "
+                "If a target cannot be repaired, return that finding unchanged instead "
+                "of omitting it. Source evidence gaps may request one targeted read "
+                "or symbol lookup; after it returns, submit again and let validation "
+                "decide whether the candidate is repaired."
+            ),
+            "repair_transaction": self._model_safe_transaction(transaction),
+        }
+        source_gap_present = any(
+            classify_integrity_failure(failure) == "source_gap"
+            for result in needs
+            for failure in result.failures
+        )
+        required_repair_steps = 2 if source_gap_present else 1
+        repair_capacity = self._repair_sequence_capacity(
+            required_repair_steps,
+            transaction_scoped=True,
+        )
+        if not repair_capacity["allowed"]:
+            reason = str(
+                repair_capacity.get(
+                    "reason", "repair_sequence_budget_insufficient"
+                )
+            )
+            self._add_incomplete_reason(state, reason)
+            transaction.status = "deferred"
+            transaction.rejection_reasons.append(reason)
+            self._persist_repair_transaction(transaction, state=state)
+            self._record_event(
+                EventType.DECISION,
+                "finding_repair",
+                {
+                    "iteration": self._iteration,
+                    "stage": "repair_sequence_preflight",
+                    "succeeded": False,
+                    "reason": reason,
+                    "source_gap_present": source_gap_present,
+                    **repair_capacity,
+                    "needs_repair_count": len(needs),
+                },
+            )
+            return response
+        self._open_repair_transaction(transaction, state=state)
+        self._last_validator_result["repair_transaction"] = self._model_safe_transaction(
+            transaction
+        )
+        self._record_repair_transaction_step("preflight")
+        self._record_event(
+            EventType.DECISION,
+            "finding_repair",
+            {
+                "iteration": self._iteration,
+                "stage": "pre_publish_preflight",
+                "repair_attempt": self._review_repair_attempt_count,
+                "candidate_count": len(candidates),
+                "needs_repair_count": len(needs),
+                "invalid_count": self._integrity_invalid_count,
+                "gaps": gaps,
+                "rejected_candidates": invalid_gaps,
+            },
+        )
+        if source_gap_present:
+            self._repair_evidence_attempt_count += 1
+            # A missing observed body is an exploration problem, not a generic
+            # invalid JSON problem.  Spend the current bounded repair turn on
+            # the normal read/search tools and only then, if the shared budget
+            # still permits it, request a submit-only recheck.
+            exploration_plan = await self.analyze(
+                state,
+                request,
+                tool_specs=self._registry.list_specs(),
+                force_submit=False,
+                allow_exploration=True,
+            )
+            self._record_repair_model_call("source_exploration")
+            self._account_latest_model_usage()
+            self._observe_review_submission(exploration_plan)
+            self._observe_incomplete_plan(exploration_plan, state)
+            repair_results = await self.execute_tools(
+                exploration_plan,
+                self._registry,
+                state,
+            )
+            self._observe_workflow_tools(exploration_plan, repair_results)
+            self._refresh_evidence_ledger(state)
+            # Source exploration intentionally advances the delivered evidence
+            # snapshot. Rebind the still-open transaction at this explicit
+            # second preflight; otherwise every legitimate source-gap repair
+            # would be rejected as a stale context while an old candidate
+            # version remains safely unchanged.
+            transaction.base_snapshot_id = self._evidence_snapshot_id
+            transaction.base_revision = self._evidence_revision
+            transaction.base_evidence_context_digest = evidence_context_digest(
+                state.evidence_ledger,
+                snapshot_id=self._evidence_snapshot_id,
+                revision=self._evidence_revision,
+            )
+            transaction.record_step("preflight_refresh")
+            self._persist_repair_transaction(transaction, state=state)
+            self._last_validator_result["repair_transaction"] = (
+                self._model_safe_transaction(transaction)
+            )
+            submit_capacity = self._repair_sequence_capacity(
+                1,
+                transaction_scoped=True,
+                allow_active_transaction=True,
+            )
+            if not submit_capacity["allowed"]:
+                reason = str(
+                    submit_capacity.get("reason", "repair_budget_exhausted")
+                )
+                self._add_incomplete_reason(state, reason)
+                self._record_event(
+                    EventType.DECISION,
+                    "finding_repair",
+                    {
+                        "iteration": self._iteration,
+                        "stage": "source_gap_submit_recheck_skipped",
+                        "repair_attempt": self._review_repair_attempt_count,
+                        "succeeded": False,
+                        "reason": reason,
+                        **submit_capacity,
+                    },
+                )
+                return response
+            self._record_event(
+                EventType.DECISION,
+                "finding_repair",
+                {
+                    "iteration": self._iteration,
+                    "stage": "source_gap_submit_recheck",
+                    "repair_attempt": self._review_repair_attempt_count,
+                    "source_gap_exploration_tools": len(exploration_plan.tool_calls),
+                    "sequence_required_steps": 2,
+                    "remaining_repair_attempts": max(
+                        0,
+                        self._settings.review_repair_max_attempts
+                        - self._review_repair_attempt_count,
+                    ),
+                },
+            )
+            repair_plan = await self.analyze(
+                state,
+                request,
+                tool_specs=[],
+                force_submit=True,
+                repair_mode=True,
+            )
+            self._record_repair_model_call("submit")
+            self._account_latest_model_usage()
+            self._observe_review_submission(repair_plan)
+            self._observe_incomplete_plan(repair_plan, state)
+        else:
+            self._repair_contract_attempt_count += 1
+            repair_plan = await self.analyze(
+                state,
+                request,
+                tool_specs=[],
+                force_submit=True,
+                repair_mode=True,
+            )
+            self._record_repair_model_call("submit")
+            self._account_latest_model_usage()
+            self._observe_review_submission(repair_plan)
+            self._observe_incomplete_plan(repair_plan, state)
+        if repair_plan.repair_response is None:
+            self._record_event(
+                EventType.DECISION,
+                "finding_repair",
+                {
+                    "iteration": self._iteration,
+                    "stage": "pre_publish_repair_result",
+                    "repair_attempt": self._review_repair_attempt_count,
+                    "succeeded": False,
+                    "reason": repair_plan.incomplete_reason or "no_valid_submit",
+                },
+            )
+            return response
+        if not repair_plan.repair_response.repairs:
+            # An empty repair response is not evidence that any target was
+            # repaired. Preserve the original candidates for the full guard.
+            self._add_incomplete_reason(state, "empty_repair_submission")
+            self._record_event(
+                EventType.DECISION,
+                "finding_repair",
+                {
+                    "iteration": self._iteration,
+                    "stage": "pre_publish_empty_repair",
+                    "repair_attempt": self._review_repair_attempt_count,
+                    "succeeded": False,
+                    "reason": "empty_repair_submission",
+                    "target_candidate_count": len(needs),
+                },
+            )
+            return response
+        merge_diagnostics: list[dict[str, Any]] = []
+        merged = self._merge_repair_response(
+            submitted_report,
+            repair_plan.repair_response,
+            preview,
+            transaction=transaction,
+            registry=self._candidate_registry,
+            evidence_catalog=state.evidence_ledger,
+            snapshot_id=self._evidence_snapshot_id,
+            revision=self._evidence_revision,
+            diagnostics=merge_diagnostics,
+        )
+        if merge_diagnostics:
+            diagnostic_codes = list(
+                dict.fromkeys(
+                    str(item.get("code", "")).strip()
+                    for item in merge_diagnostics
+                    if str(item.get("code", "")).strip()
+                )
+            )
+            for diagnostic_code in diagnostic_codes:
+                self._add_incomplete_reason(state, diagnostic_code)
+            for diagnostic in merge_diagnostics:
+                target_id = str(
+                    diagnostic.get("target_candidate_id", "")
+                ).strip()
+                code = str(diagnostic.get("code", "")).strip()
+                dispositions: dict[
+                    str, Literal["unchanged", "incomplete", "deferred"]
+                ] = {
+                    "repair_target_unchanged": "unchanged",
+                    "repair_target_incomplete": "incomplete",
+                    "repair_target_deferred": "deferred",
+                    "repair_no_progress": "incomplete",
+                }
+                disposition = dispositions.get(code)
+                if target_id and disposition:
+                    self._candidate_registry.mark_status(target_id, disposition)
+            self._record_event(
+                EventType.DECISION,
+                "finding_repair",
+                {
+                    "iteration": self._iteration,
+                    "stage": "repair_target_rejected",
+                    "diagnostics": merge_diagnostics,
+                },
+        )
+        self._last_plan = repair_plan.model_copy(update={"draft_review": merged})
+        # Reapply the deterministic output policy to the repaired report for
+        # publication.  The unfiltered merged report remains in _last_plan so
+        # the final integrity guard sees every original candidate and can
+        # preserve unresolved failures truthfully.
+        response.report = ResultProcessor.merge_review_reports([merged])
+        repaired_candidates = build_candidates(
+            merged,
+            iteration=self._iteration,
+            registry=self._candidate_registry,
+            register=False,
+            include_non_risk=merged.schema_version == "3.0",
+        )
+        repaired_tool_evidence = self._observed_tool_evidence(state)
+        repaired_result = FindingIntegrityGuard(self._workspace_root).validate(
+            repaired_candidates,
+            request,
+            tool_evidence=repaired_tool_evidence,
+            context_manifests=[dict(item) for item in state.candidate_context_manifests],
+            context_mode=state.context_mode,
+            evidence_ledger=ledger_from_sources(
+                existing_payload=state.evidence_ledger,
+                snapshot_id=self._evidence_snapshot_id,
+                revision=self._evidence_revision,
+            ),
+            snapshot_id=self._evidence_snapshot_id,
+            revision=self._evidence_revision,
+        )
+        target_source_indexes = {
+            candidate.source_issue_index
+            for candidate, result in zip(
+                preview.bound_candidates,
+                preview.results,
+                strict=False,
+            )
+            if result.status == "needs_repair"
+        }
+        repaired_by_source_index = {
+            candidate.source_issue_index: result
+            for candidate, result in zip(
+                repaired_result.bound_candidates,
+                repaired_result.results,
+                strict=False,
+            )
+        }
+        succeeded = bool(target_source_indexes) and all(
+            repaired_by_source_index.get(source_index) is not None
+            and repaired_by_source_index[source_index].status == "verified"
+            for source_index in target_source_indexes
+        )
+        repaired_verified_count = sum(
+            result.status == "verified"
+            and candidate.source_issue_index in needs_source_indexes
+            for candidate, result in zip(
+                repaired_result.bound_candidates,
+                repaired_result.results,
+                strict=False,
+            )
+        )
+        for candidate, result in zip(
+            repaired_result.bound_candidates,
+            repaired_result.results,
+            strict=False,
+        ):
+            if (
+                candidate.source_issue_index in needs_source_indexes
+                and result.status == "verified"
+            ):
+                self._candidate_registry.commit_verified_version(
+                    candidate.candidate_id,
+                    candidate.issue,
+                )
+        self._review_repair_succeeded_count = repaired_verified_count
+        self._record_event(
+            EventType.DECISION,
+            "finding_repair",
+            {
+                "iteration": self._iteration,
+                "stage": "pre_publish_repair_result",
+                "repair_attempt": self._review_repair_attempt_count,
+                "succeeded": succeeded,
+                "verified_count": len(repaired_result.verified_candidate_ids),
+                "repaired_verified_count": repaired_verified_count,
+                "needs_repair_count": len(repaired_result.needs_repair_candidate_ids),
+                "invalid_count": len(repaired_result.invalid_candidate_ids),
+            },
+        )
+        return response
+
+    @staticmethod
+    def _merge_repair_response(
+        original: ReviewReport,
+        repair_response: Any,
+        preview: Any,
+        *,
+        transaction: RepairTransaction,
+        registry: CandidateRegistry,
+        evidence_catalog: list[dict[str, Any]] | None = None,
+        snapshot_id: str = "",
+        revision: str = "",
+        allowed_target_candidate_ids: set[str] | None = None,
+        diagnostics: list[dict[str, Any]] | None = None,
+    ) -> ReviewReport:
+        """Apply one opaque-handle repair response atomically.
+
+        No position, finding text, candidate id, or model-supplied version is
+        used for routing.  The transaction resolves the handle, verifies the
+        current base version/context, and only then materializes the explicit
+        semantic patch.  The returned report is a runtime-derived view.
+        """
+
+        def add(code: str, **payload: Any) -> None:
+            if diagnostics is not None:
+                diagnostics.append({"code": code, **payload})
+
+        if transaction.status != "open":
+            add(
+                "repair_transaction_not_open",
+                message="The repair transaction is no longer open; no patch was applied.",
+            )
+            return original
+
+        current_context = evidence_context_digest(
+            evidence_catalog or [], snapshot_id=snapshot_id, revision=revision
+        )
+        if (
+            transaction.base_evidence_context_digest
+            and current_context != transaction.base_evidence_context_digest
+        ):
+            add(
+                "repair_transaction_context_stale",
+                message=(
+                    "The evidence snapshot changed after preflight; the repair "
+                    "response was rejected without applying any target patch."
+                ),
+                expected_context=transaction.base_evidence_context_digest,
+                actual_context=current_context,
+            )
+            return original
+
+        allowed_targets = {
+            str(candidate_id).strip()
+            for candidate_id in (allowed_target_candidate_ids or set())
+            if str(candidate_id).strip()
+        }
+        repairable_candidates = {
+            candidate.source_issue_index: candidate
+            for candidate, result in zip(
+                preview.bound_candidates, preview.results, strict=False
+            )
+            if result.status == "needs_repair"
+            or (
+                candidate.candidate_id in allowed_targets
+                and result.status == "verified"
+            )
+        }
+        target_indexes = {
+            candidate.candidate_id: index
+            for index, candidate in repairable_candidates.items()
+            if candidate.candidate_id.strip()
+        }
+        if not isinstance(getattr(repair_response, "repairs", None), list):
+            add(
+                "repair_protocol_invalid",
+                message="Dedicated repair response did not contain a repairs list.",
+            )
+            return original
+
+        replacements: dict[int, ReviewIssue] = {}
+        dispositions: dict[int, str] = {}
+        seen_handles: set[str] = set()
+        for item in repair_response.repairs:
+            handle = str(getattr(item, "target_handle", "") or "").strip()
+            if not handle:
+                add(
+                    "repair_target_handle_missing",
+                    message="Repair item omitted target_handle; no target was guessed.",
+                )
+                continue
+            fingerprint = hashlib.sha256(
+                _json.dumps(
+                    item.model_dump(mode="json"),
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    default=str,
+                ).encode("utf-8")
+            ).hexdigest()[:24]
+            if fingerprint in transaction.applied_response_fingerprints:
+                add(
+                    "repair_response_replay",
+                    target_handle=handle,
+                    message="The same repair item was already applied; it is idempotently ignored.",
+                )
+                continue
+            if fingerprint in transaction.rejected_response_fingerprints:
+                add(
+                    "repair_response_replay_rejected",
+                    target_handle=handle,
+                    message="The same rejected repair item was already seen.",
+                )
+                continue
+            if handle in seen_handles:
+                add(
+                    "repair_target_duplicate",
+                    target_handle=handle,
+                    message="The same opaque repair target was submitted more than once.",
+                )
+                transaction.rejected_response_fingerprints.append(fingerprint)
+                continue
+            seen_handles.add(handle)
+            candidate_id = str(transaction.target_handles.get(handle, "")).strip()
+            target_index = target_indexes.get(candidate_id)
+            if not candidate_id or target_index is None:
+                add(
+                    "repair_target_handle_unknown",
+                    target_handle=handle,
+                    message="Repair target handle is unknown, passed, or belongs to another transaction.",
+                )
+                transaction.rejected_response_fingerprints.append(fingerprint)
+                continue
+            expected_version = str(transaction.base_versions.get(candidate_id, "")).strip()
+            current_version = registry.expected_version(candidate_id).strip()
+            if not expected_version or current_version != expected_version:
+                add(
+                    "repair_target_expired",
+                    target_handle=handle,
+                    target_candidate_id=candidate_id,
+                    message="The runtime candidate version changed after repair preflight.",
+                )
+                transaction.rejected_response_fingerprints.append(fingerprint)
+                continue
+            status = str(getattr(item, "repair_status", "") or "").strip()
+            if status in {"unchanged", "incomplete", "deferred"}:
+                dispositions[target_index] = status
+                transaction.target_results[candidate_id] = status
+                add(
+                    f"repair_target_{status}",
+                    target_handle=handle,
+                    target_candidate_id=candidate_id,
+                    repair_reason=str(getattr(item, "repair_reason", "") or "").strip(),
+                    message="The original runtime-owned finding remains unchanged.",
+                )
+                transaction.applied_response_fingerprints.append(fingerprint)
+                continue
+            if status != "repaired":
+                add(
+                    "repair_status_invalid",
+                    target_handle=handle,
+                    target_candidate_id=candidate_id,
+                    message="Repair status is not an allowed target disposition.",
+                )
+                transaction.rejected_response_fingerprints.append(fingerprint)
+                continue
+
+            patch = getattr(item, "repair_patch", None)
+            if patch is None:
+                add(
+                    "repair_patch_missing",
+                    target_handle=handle,
+                    target_candidate_id=candidate_id,
+                    message="repaired requires a non-empty semantic repair_patch.",
+                )
+                transaction.rejected_response_fingerprints.append(fingerprint)
+                continue
+            fields_set = set(getattr(patch, "model_fields_set", set()))
+            null_fields = sorted(
+                field
+                for field in fields_set
+                if field != "delete_fields" and getattr(patch, field, None) is None
+            )
+            if null_fields:
+                add(
+                    "repair_patch_null_ambiguous",
+                    target_handle=handle,
+                    target_candidate_id=candidate_id,
+                    fields=null_fields,
+                    message="Null is rejected explicitly; it is neither omission nor deletion.",
+                )
+                transaction.rejected_response_fingerprints.append(fingerprint)
+                continue
+            if not (fields_set - {"delete_fields"} or patch.delete_fields):
+                add(
+                    "repair_patch_missing",
+                    target_handle=handle,
+                    target_candidate_id=candidate_id,
+                    message="repaired requires a non-empty semantic repair_patch.",
+                )
+                transaction.rejected_response_fingerprints.append(fingerprint)
+                continue
+
+            original_issue = original.issues[target_index]
+            patch_payload = patch.model_dump(mode="json", exclude_none=True)
+            delete_fields = list(patch_payload.pop("delete_fields", []))
+            envelope = {
+                "target_candidate_id": candidate_id,
+                "candidate_content_version": expected_version,
+                "repair_status": "repaired",
+                "repair_reason": str(getattr(item, "repair_reason", "") or ""),
+                "repair_patch": patch_payload,
+            }
+            try:
+                if original_issue.is_v3_finding:
+                    replacement = AgentOrchestrator._apply_v3_repair_patch(
+                        original_issue,
+                        patch_payload,
+                        delete_fields=delete_fields,
+                        candidate_id=candidate_id,
+                        evidence_catalog=evidence_catalog or [],
+                    )
+                else:
+                    normalized = normalize_model_repair_payload(
+                        envelope,
+                        evidence_catalog=evidence_catalog or [],
+                    )
+                    repair_issue = ReviewIssue.model_validate(normalized)
+                    support_error = AgentOrchestrator._repair_support_patch_error(
+                        original_issue, repair_issue
+                    )
+                    if support_error is not None:
+                        raise ValueError(support_error[1])
+                    replacement = AgentOrchestrator._apply_repair_patch(
+                        original_issue,
+                        repair_issue,
+                        candidate_id=candidate_id,
+                    )
+                    replacement = AgentOrchestrator._apply_explicit_repair_deletes(
+                        replacement,
+                        delete_fields,
+                    )
+            except ValueError as exc:
+                add(
+                    "repair_patch_rejected",
+                    target_handle=handle,
+                    target_candidate_id=candidate_id,
+                    message=str(exc),
+                )
+                transaction.rejected_response_fingerprints.append(fingerprint)
+                continue
+            except Exception as exc:  # noqa: BLE001
+                add(
+                    "repair_patch_invalid",
+                    target_handle=handle,
+                    target_candidate_id=candidate_id,
+                    message=f"Repair patch could not be materialized: {exc}",
+                )
+                transaction.rejected_response_fingerprints.append(fingerprint)
+                continue
+            if candidate_content_version(replacement) == expected_version:
+                dispositions[target_index] = "no_progress"
+                transaction.target_results[candidate_id] = "no_progress"
+                add(
+                    "repair_no_progress",
+                    target_handle=handle,
+                    target_candidate_id=candidate_id,
+                    message="The repair patch produced no semantic change.",
+                )
+                transaction.rejected_response_fingerprints.append(fingerprint)
+                continue
+            replacements[target_index] = replacement
+            dispositions[target_index] = "repaired"
+            transaction.target_results[candidate_id] = "repaired"
+            transaction.applied_response_fingerprints.append(fingerprint)
+
+        for target_index, candidate in repairable_candidates.items():
+            if target_index not in replacements and target_index not in dispositions:
+                add(
+                    "repair_target_not_returned",
+                    target_handle=next(
+                        (
+                            handle
+                            for handle, candidate_id in transaction.target_handles.items()
+                            if candidate_id == candidate.candidate_id
+                        ),
+                        "",
+                    ),
+                    target_candidate_id=candidate.candidate_id,
+                    message="The target was omitted; the original finding remains visible.",
+                )
+                transaction.target_results[candidate.candidate_id] = "not_returned"
+
+        merged = [
+            replacements.get(index, issue)
+            for index, issue in enumerate(original.issues)
+        ]
+        return ReviewReport(
+            summary=original.summary,
+            issues=merged,
+            schema_version=original.schema_version,
+        )
+
+    @staticmethod
+    def _merge_repaired_report(
+        original: ReviewReport,
+        repaired: ReviewReport,
+        preview: Any,
+        *,
+        registry: CandidateRegistry | None = None,
+        diagnostics: list[dict[str, Any]] | None = None,
+    ) -> ReviewReport:
+        """Replace only explicit runtime targets and retain every other issue."""
+
+        repairable_candidates = {
+            candidate.source_issue_index: candidate
+            for candidate, result in zip(preview.bound_candidates, preview.results, strict=False)
+            if result.status == "needs_repair"
+        }
+        targets_by_candidate_id: dict[str, list[int]] = {}
+        for index, candidate in repairable_candidates.items():
+            candidate_id = candidate.candidate_id.strip()
+            if candidate_id:
+                targets_by_candidate_id.setdefault(candidate_id, []).append(index)
+
+        replacements: dict[int, Any] = {}
+        target_dispositions: dict[int, str] = {}
+        for repaired_issue in repaired.issues:
+            target_id = repaired_issue.target_candidate_id.strip()
+            if not target_id:
+                if diagnostics is not None:
+                    diagnostics.append(
+                        {
+                            "code": "repair_target_missing",
+                            "message": "Repair issue omitted required target_candidate_id.",
+                            "finding_id": repaired_issue.finding_id.strip(),
+                        }
+                    )
+                continue
+            matching = targets_by_candidate_id.get(target_id, [])
+            if not matching:
+                if diagnostics is not None:
+                    diagnostics.append(
+                        {
+                            "code": (
+                                "repair_target_cross_candidate"
+                                if registry is not None
+                                and registry.registration(target_id) is not None
+                                else "repair_target_unknown"
+                            ),
+                            "target_candidate_id": target_id,
+                            "message": (
+                                "Repair target is unknown, passed, duplicated, or belongs "
+                                "to another candidate set."
+                            ),
+                        }
+                    )
+                continue
+            if len(matching) != 1:
+                if diagnostics is not None:
+                    diagnostics.append(
+                        {
+                            "code": "repair_target_duplicate",
+                            "target_candidate_id": target_id,
+                            "message": "Repair target_candidate_id maps to more than one candidate.",
+                        }
+                    )
+                continue
+            target_index = matching[0]
+            if target_index in replacements:
+                if diagnostics is not None:
+                    diagnostics.append(
+                        {
+                            "code": "repair_target_duplicate",
+                            "target_candidate_id": target_id,
+                            "message": "The same repair target was submitted more than once.",
+                        }
+                    )
+                continue
+            expected_version = str(
+                registry.expected_version(target_id)
+                if registry is not None
+                else ""
+            ).strip() or str(
+                getattr(
+                    repairable_candidates[target_index],
+                    "candidate_content_version",
+                    "",
+                )
+                or getattr(repairable_candidates[target_index], "content_hash", "")
+            ).strip()
+            provided_version = str(
+                getattr(repaired_issue, "candidate_content_version", "")
+            ).strip()
+            legacy_preview = not expected_version
+            if expected_version and not provided_version:
+                if diagnostics is not None:
+                    diagnostics.append(
+                        {
+                            "code": "repair_target_version_missing",
+                            "target_candidate_id": target_id,
+                            "expected_candidate_content_version": expected_version,
+                            "message": (
+                                "Repair must copy the exact non-empty candidate "
+                                "content version from the runtime feedback."
+                            ),
+                        }
+                    )
+                continue
+            if provided_version and expected_version and provided_version != expected_version:
+                if diagnostics is not None:
+                    diagnostics.append(
+                        {
+                            "code": "repair_target_expired",
+                            "target_candidate_id": target_id,
+                            "expected_candidate_content_version": expected_version,
+                            "provided_candidate_content_version": provided_version,
+                            "message": (
+                                "The repair response targets an expired candidate "
+                                "content version; the original finding remains unchanged."
+                            ),
+                        }
+                    )
+                continue
+            repair_status = str(getattr(repaired_issue, "repair_status", "") or "")
+            if repair_status not in {
+                "",
+                "repaired",
+                "unchanged",
+                "incomplete",
+                "deferred",
+            }:
+                if diagnostics is not None:
+                    diagnostics.append(
+                        {
+                            "code": "repair_status_invalid",
+                            "target_candidate_id": target_id,
+                            "repair_status": repair_status,
+                            "message": "Repair status is not an allowed target disposition.",
+                        }
+                    )
+                continue
+            if not repair_status and not legacy_preview:
+                if diagnostics is not None:
+                    diagnostics.append(
+                        {
+                            "code": "repair_status_missing",
+                            "target_candidate_id": target_id,
+                            "message": (
+                                "Repair must explicitly return repaired, unchanged, "
+                                "or incomplete for the exact target."
+                            ),
+                        }
+                    )
+                continue
+            if repair_status in {"unchanged", "incomplete", "deferred"}:
+                target_dispositions[target_index] = repair_status
+                disposition_code = {
+                    "unchanged": "repair_target_unchanged",
+                    "incomplete": "repair_target_incomplete",
+                    "deferred": "repair_target_deferred",
+                }[repair_status]
+                if diagnostics is not None:
+                    diagnostics.append(
+                        {
+                            "code": disposition_code,
+                            "target_candidate_id": target_id,
+                            "repair_status": repair_status,
+                            "repair_reason": repaired_issue.repair_reason.strip(),
+                            "message": (
+                                "The repair protocol recorded an explicit target "
+                                "disposition; the original finding remains in the "
+                                "merged report."
+                            ),
+                        }
+                    )
+                continue
+            original_issue = original.issues[target_index]
+            if registry is not None:
+                patch_payload = (
+                    repaired_issue.repair_patch.model_dump(
+                        mode="json", exclude_none=True
+                    )
+                    if repaired_issue.repair_patch is not None
+                    else {}
+                )
+                if repair_status != "repaired" or not patch_payload:
+                    if diagnostics is not None:
+                        diagnostics.append(
+                            {
+                                "code": "repair_patch_missing",
+                                "target_candidate_id": target_id,
+                                "message": (
+                                    "Active runtime repair accepts only a non-empty "
+                                    "repair_patch for repaired targets; the original "
+                                    "candidate remains unchanged."
+                                ),
+                            }
+                        )
+                    target_dispositions[target_index] = "patch_missing"
+                    continue
+                support_error = AgentOrchestrator._repair_support_patch_error(
+                    original_issue,
+                    repaired_issue,
+                )
+                if support_error is not None:
+                    if diagnostics is not None:
+                        diagnostics.append(
+                            {
+                                "code": support_error[0],
+                                "target_candidate_id": target_id,
+                                "message": support_error[1],
+                            }
+                        )
+                    target_dispositions[target_index] = "patch_rejected"
+                    continue
+                replacement = AgentOrchestrator._apply_repair_patch(
+                    original_issue,
+                    repaired_issue,
+                    candidate_id=target_id,
+                )
+            else:
+                replacement = (
+                    AgentOrchestrator._apply_repair_patch(
+                        original_issue,
+                        repaired_issue,
+                        candidate_id=target_id,
+                    )
+                    if repaired_issue.repair_patch is not None
+                    else repaired_issue.model_copy(
+                        update={
+                            "candidate_id": target_id,
+                            "target_candidate_id": "",
+                            "repair_status": "",
+                            "repair_reason": "",
+                            "repair_patch": None,
+                        }
+                    )
+                )
+            if expected_version and candidate_content_version(replacement) == expected_version:
+                target_dispositions[target_index] = "no_progress"
+                if diagnostics is not None:
+                    diagnostics.append(
+                        {
+                            "code": "repair_no_progress",
+                            "target_candidate_id": target_id,
+                            "candidate_content_version": expected_version,
+                            "message": (
+                                "The repair response produced no semantic change "
+                                "for the exact candidate version."
+                            ),
+                        }
+                    )
+                continue
+            target_dispositions[target_index] = "repaired"
+            # The runtime rebinds the exact target and clears the selector
+            # before the next full integrity validation.
+            replacements[target_index] = replacement
+
+        if diagnostics is not None:
+            for target_index, candidate in repairable_candidates.items():
+                if (
+                    target_index not in replacements
+                    and target_index not in target_dispositions
+                ):
+                    diagnostics.append(
+                        {
+                            "code": "repair_target_not_returned",
+                            "target_candidate_id": candidate.candidate_id,
+                            "message": (
+                                "The repair response did not return this target; the "
+                                "original finding remains unchanged and unresolved."
+                            ),
+                        }
+                    )
+
+        merged: list[Any] = []
+        for index, issue in enumerate(original.issues):
+            if index in repairable_candidates and index in replacements:
+                merged.append(replacements[index])
+            else:
+                # A missing repair response must remain visible to the final
+                # integrity guard; omission is not an implicit withdrawal.
+                merged.append(issue)
+        return ReviewReport(
+            summary=repaired.summary or original.summary,
+            issues=merged,
+            schema_version=repaired.schema_version or original.schema_version,
+        )
+
+    @staticmethod
+    def _repair_support_patch_error(
+        original_issue: ReviewIssue,
+        repaired_issue: ReviewIssue,
+    ) -> tuple[str, str] | None:
+        """Reject evidence replacement that loses or invents a trusted ref."""
+
+        patch = repaired_issue.repair_patch
+        if patch is None or patch.supports is None:
+            return None
+        patch_roles = {item.role for item in patch.supports}
+        original_by_role: dict[str, set[str]] = {}
+        for support in issue_supports(original_issue):
+            role = str(support.role)
+            if role not in patch_roles:
+                continue
+            original_by_role.setdefault(role, set()).update(
+                str(reference).strip()
+                for reference in support.evidence_refs
+                if str(reference).strip()
+            )
+
+        patched_by_role: dict[str, set[str]] = {}
+        for role, field in (
+            ("cause", "cause_evidence"),
+            ("contract", "contract_evidence"),
+            ("trigger", "trigger_evidence"),
+            ("impact", "impact_evidence"),
+        ):
+            if role not in patch_roles:
+                continue
+            for support in issue_supports(repaired_issue):
+                if support.role != role:
+                    continue
+                patched_by_role.setdefault(role, set()).update(
+                    str(reference).strip()
+                    for reference in support.evidence_refs
+                    if str(reference).strip()
+                )
+
+        for role, required in original_by_role.items():
+            if not required.issubset(patched_by_role.get(role, set())):
+                return (
+                    "repair_patch_evidence_dropped",
+                    (
+                        f"repair_patch.supports for role {role} drops an already "
+                        "trusted evidence reference; omitted roles inherit, and "
+                        "patched roles must preserve existing trusted refs."
+                    ),
+                )
+        return None
+
+    @staticmethod
+    def _apply_repair_patch(
+        original_issue: Any,
+        repaired_issue: Any,
+        *,
+        candidate_id: str,
+    ) -> Any:
+        """Apply only explicit semantic patch fields to one original issue."""
+
+        patch = repaired_issue.repair_patch
+        if patch is None:
+            return repaired_issue
+        updates = patch.model_dump(mode="json", exclude_none=True)
+        updates.pop("delete_fields", None)
+        if "supports" in updates:
+            # normalize_model_repair_payload has already resolved these refs
+            # into the live evidence catalog on the temporary envelope.
+            patch_roles = {
+                str(item.get("role", "")).strip()
+                for item in updates["supports"]
+                if isinstance(item, dict)
+            }
+            if not patch_roles:
+                # An explicitly supplied empty collection means clear, not
+                # "field omitted".  Clear the compatibility role arrays too,
+                # otherwise issue_supports() would silently resurrect them.
+                updates["supports"] = []
+                for field in (
+                    "cause_evidence",
+                    "contract_evidence",
+                    "trigger_evidence",
+                    "impact_evidence",
+                ):
+                    updates[field] = []
+            else:
+                inherited_supports = [
+                    item
+                    for item in issue_supports(original_issue)
+                    if item.role not in patch_roles
+                ]
+                updates["supports"] = [
+                    *inherited_supports,
+                    *repaired_issue.supports,
+                ]
+                for field in (
+                    "cause_evidence",
+                    "contract_evidence",
+                    "trigger_evidence",
+                    "impact_evidence",
+                ):
+                    role = field.removesuffix("_evidence")
+                    if role in patch_roles:
+                        updates[field] = getattr(repaired_issue, field)
+        if "primary_anchor" in updates:
+            anchor = updates["primary_anchor"]
+            if isinstance(anchor, dict):
+                updates["location"] = SourceAnchor.model_validate(anchor).location
+        updates.update(
+            {
+                "candidate_id": candidate_id,
+                "target_candidate_id": "",
+                "repair_status": "",
+                "candidate_content_version": "",
+                "repair_reason": "",
+                "repair_patch": None,
+            }
+        )
+        payload = original_issue.model_dump(mode="json")
+        payload.update(updates)
+        return ReviewIssue.model_validate(payload)
+
+    @staticmethod
+    def _apply_v3_repair_patch(
+        original_issue: ReviewIssue,
+        patch_payload: dict[str, Any],
+        *,
+        delete_fields: list[str],
+        candidate_id: str,
+        evidence_catalog: list[dict[str, Any]],
+    ) -> ReviewIssue:
+        """Apply one 3.0 patch atomically and rebind all selected evidence."""
+
+        if not original_issue.is_v3_finding:
+            raise ValueError("3.0 repair patch requires a 3.0 finding")
+        anchor = patch_payload.get(
+            "anchor",
+            original_issue.primary_anchor.model_dump(mode="json")
+            if original_issue.primary_anchor is not None
+            else {},
+        )
+        description = patch_payload.get("description", original_issue.description)
+        evidence_refs = patch_payload.get("evidence_refs", original_issue.evidence_refs)
+        severity = patch_payload.get("severity", original_issue.severity.value)
+        suggestion = patch_payload.get("suggestion", original_issue.suggestion)
+        related_locations = patch_payload.get(
+            "related_locations",
+            [item.model_dump(mode="json") for item in original_issue.related_locations],
+        )
+        if "suggestion" in delete_fields:
+            suggestion = None
+        if "related_locations" in delete_fields:
+            related_locations = []
+        normalized = normalize_model_finding_v3_payload(
+            {
+                "anchor": anchor,
+                "description": description,
+                "evidence_refs": evidence_refs,
+                "severity": severity,
+                "suggestion": suggestion,
+                "related_locations": related_locations,
+            },
+            evidence_catalog=evidence_catalog,
+        )
+        normalized.update(
+            {
+                "candidate_id": candidate_id,
+                "finding_id": original_issue.finding_id,
+                "target_candidate_id": "",
+                "repair_status": "",
+                "candidate_content_version": "",
+                "repair_reason": "",
+                "repair_patch": None,
+            }
+        )
+        return ReviewIssue.model_validate(normalized)
+
+    @staticmethod
+    def _apply_explicit_repair_deletes(
+        issue: ReviewIssue,
+        delete_fields: list[str],
+    ) -> ReviewIssue:
+        """Apply explicit delete semantics before the final integrity guard."""
+
+        if not delete_fields:
+            return issue
+        payload = issue.model_dump(mode="json")
+        for field in delete_fields:
+            if field == "severity":
+                raise ValueError("severity cannot be explicitly deleted")
+            if field in {"primary_anchor"}:
+                payload[field] = None
+            elif field == "repair_intent":
+                payload[field] = {}
+            elif field == "confidence":
+                payload[field] = 0.0
+            elif field in {"related_locations", "supports"}:
+                payload[field] = []
+                if field == "supports":
+                    for evidence_field in (
+                        "cause_evidence",
+                        "contract_evidence",
+                        "trigger_evidence",
+                        "impact_evidence",
+                    ):
+                        payload[evidence_field] = []
+            else:
+                payload[field] = ""
+        return ReviewIssue.model_validate(payload)
 
     async def _maybe_recover_review_workflow(
         self,
@@ -538,6 +3940,14 @@ class AgentOrchestrator:
         request: ReviewRequest,
         state: ContextState,
     ) -> ReviewResponse:
+        if (
+            self._settings.finding_contract_version == "3.0"
+            or self._runtime_closeout_done
+        ):
+            # v3 closeout is a one-way runtime handoff.  Recovery here used to
+            # re-enter analyze/execute after the loop and could append candidates
+            # after the authoritative snapshot had already been taken.
+            return response
         if self._workflow_enforcement != "enforce":
             return response
         has_candidates = bool(response.report.issues)
@@ -584,9 +3994,7 @@ class AgentOrchestrator:
             request,
             self._registry.list_specs(),
         )
-        self._total_tokens += self._latest_tokens
-        self._budget_state = self._result_processor.budget_state(self._total_tokens)
-        self._budget_exhausted = self._budget_state != "none"
+        self._account_latest_model_usage()
         recovery_results = await self.execute_tools(
             recovery_plan,
             self._registry,
@@ -626,6 +4034,14 @@ class AgentOrchestrator:
         workflow_filtered_issue_count = 0
         workflow_invalid = bool(missing)
         if missing and self._workflow_enforcement == "enforce":
+            # Filtering findings is a safety restriction, not evidence that the
+            # remaining report is complete.  Keep the limiting reason attached
+            # to the run even when partial content survives the filter.
+            self._add_incomplete_reason(
+                state,
+                "workflow_incomplete",
+                close_pending_drafts=False,
+            )
             before_filter_count = len(response.report.issues)
             response.report.issues = [
                 issue
@@ -692,7 +4108,10 @@ class AgentOrchestrator:
                 validator_result,
                 all_tools_succeeded=(
                     len(results) == len(plan.tool_calls)
-                    and all(result.ok for result in results)
+                    and all(result.ok or result.recoverable for result in results)
+                ),
+                input_payload=self._parse_tool_call(plan.tool_calls[validator_index]).get(
+                    "arguments", {}
                 ),
             )
         if self._workflow_enforcement == "off":
@@ -721,24 +4140,36 @@ class AgentOrchestrator:
         result: ToolResult,
         *,
         all_tools_succeeded: bool,
+        input_payload: dict[str, Any] | None = None,
     ) -> None:
         """Advance to submit-ready only after deterministic validation really passes."""
 
         data = result.data if isinstance(result.data, dict) else {}
         validator_payload = dict(data)
         validator_payload.setdefault(
-            "validated_draft_ids", [draft.id for draft in self._draft_finding_store.all()]
+            "validated_draft_ids", []
         )
         validator_payload.setdefault("validated_finding_ids", [])
+        validator_payload.setdefault("repair_transaction_open", False)
+        validator_payload.setdefault(
+            "candidate_binding_state", "not_registered_initial_submission"
+        )
         if not result.ok:
             validator_payload["validator_passed"] = False
             validator_payload["submit_allowed"] = False
+            validator_payload["repair_transaction_open"] = False
+            validator_payload["initial_submission_required"] = True
             validator_payload.setdefault(
                 "unresolved_evidence_gaps", [result.error or "validator_tool_error"]
             )
             self._last_validator_result = validator_payload
             self._validator_passed = False
             self._review_stage = "explore"
+            self._persist_preflight_journal(
+                input_payload=input_payload or {},
+                result_payload=validator_payload,
+                all_tools_succeeded=all_tools_succeeded,
+            )
             self._record_event(
                 EventType.DECISION,
                 "review_stage",
@@ -765,7 +4196,7 @@ class AgentOrchestrator:
         )
         unresolved = data.get("unresolved_evidence_gaps", [])
         unresolved = (
-            [str(item) for item in unresolved]
+            [item for item in unresolved if isinstance(item, (dict, str))]
             if isinstance(unresolved, list)
             else []
         )
@@ -776,35 +4207,63 @@ class AgentOrchestrator:
         ]
         effective_count = int(data.get("effective_issue_count", 0) or 0)
         empty_submit_allowed = data.get("should_submit_empty_issues") is True
-        has_draft = bool(self._draft_finding_store.all())
         passed = bool(
             all_tools_succeeded
             and not summary_warnings
             and not unresolved
             and not failed_issues
             and (effective_count > 0 or empty_submit_allowed)
-            and has_draft
         )
+        validated_draft_ids = data.get("validated_draft_ids", [])
+        validated_draft_ids = (
+            [str(item).strip() for item in validated_draft_ids if str(item).strip()]
+            if isinstance(validated_draft_ids, list)
+            else []
+        )
+        # This is initial model preflight, before CandidateRegistry owns the
+        # finding identity.  Never echo a model-supplied finding label as if it
+        # had been validated by the runtime.
+        validated_finding_ids: list[str] = []
         validator_payload.update(
             {
-                "validated_draft_ids": [
-                    draft.id for draft in self._draft_finding_store.all()
-                ],
-                "validated_finding_ids": [
-                    str(item.get("finding_id"))
-                    for item in issue_results
-                    if isinstance(item, dict) and item.get("finding_id")
-                ],
+                "validated_draft_ids": validated_draft_ids,
+                "validated_finding_ids": validated_finding_ids,
                 "unresolved_evidence_gaps": unresolved,
                 "policy_warnings": summary_warnings,
                 "validator_passed": passed,
                 "submit_allowed": passed,
+                "repair_transaction_open": False,
+                "initial_submission_required": bool(unresolved),
+                "candidate_binding_state": "not_registered_initial_submission",
             }
         )
         self._last_validator_result = validator_payload
         self._validator_passed = passed
+        self._persist_preflight_journal(
+            input_payload=input_payload or {},
+            result_payload=validator_payload,
+            all_tools_succeeded=all_tools_succeeded,
+        )
+        self._record_event(
+            EventType.PREFLIGHT_COMPLETED,
+            "preflight",
+            {
+                "candidate_identity_checked": bool(
+                    validator_payload.get("candidate_identity_checked", False)
+                ),
+                "candidate_version_checked": bool(
+                    validator_payload.get("candidate_version_checked", False)
+                ),
+                "repair_transaction_open": False,
+                "initial_submission_required": bool(unresolved),
+                "unresolved_gap_count": len(unresolved),
+                "validator_passed": passed,
+            },
+        )
+
         if passed:
             self._review_stage = "submit_ready"
+            self._investigation_ready = True
         else:
             self._review_stage = "explore"
         self._record_event(
@@ -820,6 +4279,30 @@ class AgentOrchestrator:
                 "policy_warning_count": len(summary_warnings),
                 "failed_issue_count": len(failed_issues),
             },
+        )
+
+    def _persist_preflight_journal(
+        self,
+        *,
+        input_payload: dict[str, Any],
+        result_payload: dict[str, Any],
+        all_tools_succeeded: bool,
+    ) -> None:
+        """Persist the exact validator boundary without runtime credentials."""
+
+        if self._run_journal is None:
+            return
+        payload = PreflightJournalPayload(
+            iteration=self._iteration,
+            all_tools_succeeded=all_tools_succeeded,
+            input=redact_sensitive_values(input_payload),
+            result=redact_sensitive_values(result_payload),
+        )
+        self._run_journal.append(
+            PendingRunJournalEntry(
+                type="preflight",
+                payload=payload.model_dump(mode="json"),
+            )
         )
 
     def _complete_workflow_step(self, step_id: str) -> None:
@@ -861,6 +4344,15 @@ class AgentOrchestrator:
         )
 
     async def run_debug(self, request: DebugRequest) -> DebugResponse:
+        """Run debug mode and persist a cancellation snapshot before propagating it."""
+
+        try:
+            return await self._run_debug(request)
+        except asyncio.CancelledError:
+            self._persist_cancelled_run(self._active_state)
+            raise
+
+    async def _run_debug(self, request: DebugRequest) -> DebugResponse:
         """Run debug mode through the orchestrator loop."""
         self._reset_run(
             max_iterations=(
@@ -872,8 +4364,10 @@ class AgentOrchestrator:
         if self._external_registry is None:
             self._registry = create_default_registry(include_execute=True)
         state = self.prepare_context(request)
+        self._active_state = state
         response: ReviewResponse | DebugResponse | None = None
         while True:
+            self._iteration_progress = False
             tool_specs = (
                 [] if self._permission_mode == "plan" else self._registry.list_specs()
             )
@@ -909,30 +4403,127 @@ class AgentOrchestrator:
     ) -> ReviewResponse | DebugResponse:
         """Finalize normal runs or recover a truncated review submission."""
         assert response is not None
+        if self._settings.finding_contract_version == "3.0":
+            # Compatibility callers may still invoke this hook, but v3 never
+            # asks the model for a submit-only supplement or infers finish.
+            return self._closeout_v3_response(state, response)
         if self._permission_mode == "plan":
+            self._finalization_status = "skipped_plan_mode"
             return response
         if not isinstance(response, ReviewResponse):
             return response
+        if self._finalization_attempted:
+            return response
+        self._finalization_attempted = True
         plan = self._last_plan
         if plan is None:
+            self._finalization_status = "skipped_no_plan"
+            return response
+        if plan.format_recovery_rejected:
+            # The salvage report is intentionally kept for integrity checking,
+            # but it is not a valid submit_review.  Do not turn it into a false
+            # completion or run a second unconstrained finalization.
+            self._finalization_attempted = True
+            self._finalization_status = "format_recovery_rejected"
             return response
         if self._has_review_business_output(plan.draft_review):
+            self._finalization_status = "already_submitted"
+            self._finalization_response_id = plan.source_response_id
+            if self._draft_finding_store.has_pending():
+                self._close_pending_drafts_after_finalization(
+                    state,
+                    plan.draft_review or ReviewReport(),
+                )
+                self._clear_exploration_incomplete_reasons()
             return response
         if self._length_recovery_required:
-            return await self._recover_review_after_length(state, request, response)
-        skip_reason = self._finalize_skip_reason()
+            recovered = await self._recover_review_after_length(state, request, response)
+            recovered_plan = self._last_plan
+            if recovered_plan is not None:
+                self._finalization_response_id = recovered_plan.source_response_id
+            if (
+                recovered_plan is not None
+                and self._has_review_business_output(recovered_plan.draft_review)
+            ):
+                self._finalization_status = "submitted"
+                if self._draft_finding_store.has_pending():
+                    self._close_pending_drafts_after_finalization(
+                        state,
+                        recovered_plan.draft_review or ReviewReport(),
+                    )
+                    self._clear_exploration_incomplete_reasons()
+                response.incomplete_reasons = [
+                    reason
+                    for reason in response.incomplete_reasons
+                    if reason
+                    not in {
+                        "max_iterations",
+                        "draft_stagnation",
+                        "no_effective_action",
+                        "unresolved_draft_findings",
+                    }
+                ]
+            else:
+                self._finalization_status = "failed"
+            return recovered
+        pending_drafts = self._draft_finding_store.has_pending()
+        skip_reason = self._finalize_skip_reason(pending_drafts=pending_drafts)
         if skip_reason:
+            if not self._has_review_business_output(plan.draft_review):
+                incomplete_reason = {
+                    "model_timeout": "provider_timeout",
+                    "budget_hard_capped": "token_budget_exhausted",
+                    "pre_budget_submit_attempted": "no_valid_submit",
+                    "model_incomplete": "model_incomplete",
+                    "run_timeout": "run_timeout",
+                }.get(skip_reason, skip_reason)
+                self._add_incomplete_reason(state, incomplete_reason)
+                self._apply_completion_state(response, state)
+            self._finalization_status = "skipped"
+            self._finalization_skip_reason = skip_reason
             self._record_finalize_skipped(skip_reason)
             return response
+        # This call is deliberately submit-only.  The engine receives an empty
+        # tool list and serializes only the active completion action, so exhausted
+        # exploration cannot be mistaken for a finalization attempt.
         finalize_plan = await self.analyze(
             state, request, tool_specs=[], force_submit=True
         )
         self._last_plan = finalize_plan
+        self._finalization_response_id = finalize_plan.source_response_id
+        if self._settings.finding_contract_version == "3.0":
+            await self.execute_tools(finalize_plan, self._registry, state)
         self._observe_review_submission(finalize_plan)
         self._observe_incomplete_plan(finalize_plan, state)
         formatted = self.format_result(state, tool_results=[])
         assert isinstance(formatted, ReviewResponse)
         response = formatted
+        if self._has_review_business_output(finalize_plan.draft_review):
+            self._finalization_status = "submitted"
+            if self._draft_finding_store.has_pending():
+                self._close_pending_drafts_after_finalization(
+                    state,
+                    finalize_plan.draft_review or ReviewReport(),
+                )
+            self._clear_exploration_incomplete_reasons()
+            response.incomplete_reasons = [
+                reason
+                for reason in response.incomplete_reasons
+                if reason
+                not in {
+                    "max_iterations",
+                    "draft_stagnation",
+                    "no_effective_action",
+                    "unresolved_draft_findings",
+                }
+            ]
+        else:
+            self._finalization_status = "failed"
+            self._add_incomplete_reason(
+                state,
+                finalize_plan.incomplete_reason or "no_valid_submit",
+            )
+            self._apply_completion_state(response, state)
         self._record_event(
             EventType.DECISION,
             "finalize",
@@ -940,6 +4531,11 @@ class AgentOrchestrator:
                 "iteration": self._iteration,
                 "finalize_attempt": True,
                 "finalize_submit_seen": finalize_plan.draft_review is not None,
+                "ordinary_exploration_tools_exposed": False,
+                "ordinary_exploration_tool_count": 0,
+                "pending_drafts_before": pending_drafts,
+                "pending_drafts_after": self._draft_finding_store.has_pending(),
+                "finalization_status": self._finalization_status,
                 "budget_state": self._budget_state,
                 "prior_length_finish_seen": self._model_length_finish_seen,
                 "final_submit_evidence_included_count": (
@@ -992,6 +4588,8 @@ class AgentOrchestrator:
             force_submit=True,
         )
         self._last_plan = finalize_plan
+        if self._settings.finding_contract_version == "3.0":
+            await self.execute_tools(finalize_plan, self._registry, state)
         self._observe_review_submission(finalize_plan)
         self._observe_incomplete_plan(finalize_plan, state)
         formatted = self.format_result(state, tool_results=[])
@@ -1057,6 +4655,8 @@ class AgentOrchestrator:
             state, request, tool_specs=[], force_submit=True
         )
         self._last_plan = finalize_plan
+        if self._settings.finding_contract_version == "3.0":
+            await self.execute_tools(finalize_plan, self._registry, state)
         self._observe_incomplete_plan(finalize_plan, state)
         response = self.format_result(state, tool_results=[])
         self._record_event(
@@ -1085,6 +4685,8 @@ class AgentOrchestrator:
         """Create the initial context state for one run."""
         start = perf_counter()
         state = self._context_builder.prepare_context(request)
+        state.evidence_snapshot_id = self._evidence_snapshot_id
+        state.evidence_revision = self._evidence_revision
         if isinstance(request, ReviewRequest) and request.diff_mode:
             state.constraints.append("diff_mode")
         if isinstance(request, DebugRequest) and (
@@ -1107,15 +4709,52 @@ class AgentOrchestrator:
         tool_specs: list[ToolSpec],
         *,
         force_submit: bool = False,
+        allow_exploration: bool = False,
+        repair_mode: bool = False,
     ) -> AnalysisPlan:
         """Run model analysis and return structured plan."""
         start = perf_counter()
+        self._latest_budget_tokens = 0
         self._last_actual_reasoning_effort = "unknown"
-        submit_only_call = force_submit or (
+        self._iteration_state_action_applied = False
+        pending_draft_exploration = (
+            isinstance(request, ReviewRequest)
+            and self._draft_finding_store.has_pending()
+            and (
+                allow_exploration
+                or self._can_explore_pending_draft()
+            )
+        )
+        explicit_exploration_allowed = allow_exploration or pending_draft_exploration
+        contract_version = (
+            self._settings.finding_contract_version
+            if isinstance(request, ReviewRequest)
+            else "2.0"
+        )
+        v3_normal_review = (
+            isinstance(request, ReviewRequest)
+            and contract_version == "3.0"
+            and not repair_mode
+        )
+        near_last_iteration = (
             self._iteration + 1 >= self._max_iterations
+            and not explicit_exploration_allowed
+            and not v3_normal_review
+        )
+        submit_only_call = repair_mode or (
+            not v3_normal_review
+            and (
+                force_submit
+                or (
+                    self._iteration + 1 >= self._max_iterations
+                    and not explicit_exploration_allowed
+                )
+            )
         )
         logical_stage = (
-            "submit_only"
+            "repair"
+            if repair_mode
+            else "submit_only"
             if submit_only_call
             else "validate"
             if any(spec.name == "validate_review_draft" for spec in tool_specs)
@@ -1123,6 +4762,11 @@ class AgentOrchestrator:
         )
         model_call_success = False
         wire_tool_schema_count = 0
+        engine_force_submit = (
+            submit_only_call
+            if contract_version == "3.0"
+            else (force_submit or repair_mode)
+        )
         state.decisions.append(
             DecisionStep(
                 phase="analyze",
@@ -1160,6 +4804,23 @@ class AgentOrchestrator:
             skill_selection = None
             skill_telemetry = None
 
+        # Publish only already-delivered tool evidence.  Diff, file, and graph
+        # bodies are registered by the inference engine after the exact request
+        # survives assembly and receives a provider response.
+        state.evidence_ledger = ledger_from_sources(
+            existing_payload=state.evidence_ledger,
+            tool_evidence=self._verifier_tool_evidence,
+            snapshot_id=self._evidence_snapshot_id,
+            revision=self._evidence_revision,
+        ).to_payload()
+        remaining_call_token_budget = self._remaining_call_token_budget(
+            request,
+            repair_mode=repair_mode,
+        )
+        current_finding_handles = (
+            self._current_v3_finding_handles() if v3_normal_review else None
+        )
+
         engine = self._build_engine()
         if engine is None:
             self._provider_error_seen = True
@@ -1173,10 +4834,12 @@ class AgentOrchestrator:
             result = self._fallback_plan(request)
             self._latest_tokens = 0
         else:
+            exploration_time_limit = False
+            soft_exploration_deadline_elapsed = 0.0
             try:
                 defer_review_submit = (
                     isinstance(request, ReviewRequest)
-                    and not force_submit
+                    and not submit_only_call
                     and self._iteration < self._review_min_tool_iterations
                     and self._permission_mode != "plan"
                 )
@@ -1185,8 +4848,6 @@ class AgentOrchestrator:
                     request=request,
                     defer_submit=defer_review_submit,
                 )
-                near_last_iteration = (self._iteration + 1) >= self._max_iterations
-                submit_only_call = force_submit or near_last_iteration
                 call_stage = (
                     "submit_only"
                     if submit_only_call
@@ -1197,50 +4858,268 @@ class AgentOrchestrator:
                 # The stage must describe the schemas actually sent on the wire;
                 # the initial deferred round may have had validator in the full
                 # registry but intentionally removes it before serialization.
-                logical_stage = call_stage
-                if force_submit:
-                    serialized_tools = build_submit_tool_schemas()
+                logical_stage = "repair" if repair_mode else call_stage
+                repair_submit_schema = False
+                if repair_mode:
+                    serialized_tools = build_repair_tool_schemas(
+                        contract_version=contract_version
+                    )
+                elif submit_only_call:
+                    serialized_tools = (
+                        build_v3_finding_action_tool_schemas(
+                            include_save=True,
+                            include_revise=True,
+                            include_finish=True,
+                        )
+                        if contract_version == "3.0"
+                        else build_submit_tool_schemas(
+                            model_input=True,
+                            repair=repair_submit_schema,
+                            contract_version=contract_version,
+                        )
+                    )
                 else:
                     serialized_tools = build_tool_schemas(active_tool_specs)
                     if (
                         isinstance(request, ReviewRequest)
                         and self._permission_mode != "plan"
+                        and contract_version != "3.0"
                     ):
                         serialized_tools.append(build_draft_finding_tool_schema())
-                    if not defer_review_submit:
-                        serialized_tools += build_submit_tool_schemas()
+                        serialized_tools.append(build_draft_finding_update_tool_schema())
+                    if contract_version == "3.0":
+                        serialized_tools += build_v3_finding_action_tool_schemas(
+                            include_finish=not defer_review_submit
+                        )
+                    elif not defer_review_submit:
+                        serialized_tools += build_submit_tool_schemas(
+                            model_input=True,
+                            repair=repair_submit_schema,
+                            contract_version=contract_version,
+                        )
                 wire_tool_schema_count = len(serialized_tools)
-                result, usage = await engine.analyze(
-                    state=state,
-                    request=request,
-                    tool_specs=active_tool_specs,
-                    tool_schemas=serialized_tools,
-                    diff_text=diff_text,
-                    error_log=error_log_text,
-                    project_structure=project_structure,
-                    file_contents=file_contents,
-                    tool_feedback=self._tool_feedback,
-                    feedback_digest_index=self._feedback_digest_index,
-                    draft_findings=self._draft_finding_store.all(),
-                    validator_result=self._last_validator_result,
-                    prompt_input_token_budget=self._settings.prompt_input_token_budget,
-                    iteration=self._iteration,
-                    force_submit=force_submit,
-                    near_last_iteration=near_last_iteration,
-                    defer_submit=defer_review_submit,
-                    stage=call_stage,
-                    skill_selection=skill_selection,
-                    skill_telemetry=skill_telemetry,
+                self._final_submit_attempt_count += int(submit_only_call)
+                charged_tokens = max(
+                    self._total_tokens,
+                    self._conservative_budget_tokens_used,
                 )
+                if (
+                    self._budget_state == "hard_capped"
+                    or charged_tokens >= self._settings.token_hard_budget
+                ):
+                    # A hard cap is a no-new-provider-call boundary.  The
+                    # semantic verifier has the same guard for its reserve.
+                    raise ModelClientError(
+                        "Model analysis skipped after the hard token budget was reached.",
+                        code="runtime_token_hard_preflight",
+                    )
+                if (
+                    remaining_call_token_budget is not None
+                    and remaining_call_token_budget <= 0
+                ):
+                    # Soft-cap exhaustion stops normal exploration while
+                    # leaving the protected post-processing reserve available.
+                    raise ModelClientError(
+                        "Model analysis skipped after the protected token reserve was reached.",
+                        code="runtime_token_soft_preflight",
+                    )
+                remaining_run_seconds = (
+                    self._run_timeout_seconds - self._run_elapsed_seconds()
+                )
+                if remaining_run_seconds <= 0:
+                    raise asyncio.TimeoutError
+                time_reserve = self._postprocessing_time_reserve_seconds(
+                    request,
+                    repair_mode=repair_mode,
+                )
+                call_timeout = remaining_run_seconds - time_reserve
+                exploration_time_limit = bool(
+                    v3_normal_review and time_reserve > 0
+                )
+                soft_exploration_deadline_elapsed = (
+                    self._run_elapsed_seconds() + max(0.0, call_timeout)
+                )
+                if call_timeout <= 0:
+                    raise ModelClientError(
+                        "Model analysis stopped to preserve post-processing time.",
+                        code="runtime_time_reserve",
+                    )
+                engine_parameters = inspect.signature(engine.analyze).parameters
+                accepts_runtime_kwargs = any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD
+                    for parameter in engine_parameters.values()
+                )
+                runtime_kwargs: dict[str, Any] = {}
+                if (
+                    "remaining_call_token_budget" in engine_parameters
+                    or accepts_runtime_kwargs
+                ):
+                    runtime_kwargs["remaining_call_token_budget"] = (
+                        remaining_call_token_budget
+                    )
+                if (
+                    v3_normal_review
+                    and (
+                        "current_finding_handles" in engine_parameters
+                        or accepts_runtime_kwargs
+                    )
+                ):
+                    runtime_kwargs["current_finding_handles"] = (
+                        current_finding_handles or []
+                    )
+                result, usage = await asyncio.wait_for(
+                    engine.analyze(
+                        state=state,
+                        request=request,
+                        tool_specs=active_tool_specs,
+                        tool_schemas=serialized_tools,
+                        diff_text=diff_text,
+                        error_log=error_log_text,
+                        project_structure=project_structure,
+                        file_contents=file_contents,
+                        tool_feedback=self._tool_feedback,
+                        feedback_digest_index=self._feedback_digest_index,
+                        draft_findings=self._draft_finding_store.all(),
+                        validator_result=self._last_validator_result,
+                        prompt_input_token_budget=self._settings.prompt_input_token_budget,
+                        iteration=self._iteration,
+                        # v2 keeps the historical split: near-last iteration
+                        # is expressed through near_last_iteration/stage, while
+                        # force_submit remains reserved for an explicit caller
+                        # request or repair.  v3 normal turns never become
+                        # submit-only merely because the loop is closing.
+                        force_submit=engine_force_submit,
+                        near_last_iteration=near_last_iteration,
+                        defer_submit=defer_review_submit,
+                        stage=call_stage,
+                        skill_selection=skill_selection,
+                        skill_telemetry=skill_telemetry,
+                        repair_attempt_budget=(
+                            max(
+                                0,
+                                self._settings.review_repair_max_attempts
+                                - self._review_repair_attempt_count,
+                            )
+                            if isinstance(request, ReviewRequest)
+                            else None
+                        ),
+                        allow_exploration=explicit_exploration_allowed,
+                        repair_mode=repair_mode,
+                        submit_tool_name=(
+                            "repair_review"
+                            if repair_mode
+                            else "finish_review"
+                            if contract_version == "3.0" and submit_only_call
+                            else None
+                        ),
+                        contract_version=contract_version,
+                        **runtime_kwargs,
+                    ),
+                    timeout=call_timeout,
+                )
+                self._prepare_format_recovery(result, state)
+                # The engine updates the ledger only after it has confirmed which
+                # source bodies survived request serialization.  Publish that same
+                # snapshot before execute_tools so preflight sees the exact catalog
+                # that the model just received.
+                self._publish_evidence_catalog(state)
                 self._latest_tokens = usage.total_tokens
-                self._persist_draft_finding_calls(result)
-                if result.draft_review is not None:
+                if result.schema_repair_attempted_count:
+                    self._repair_format_attempt_count += (
+                        result.schema_repair_attempted_count
+                    )
+                    if self._active_repair_transaction is None:
+                        format_transaction = RepairTransaction(
+                            required_steps=["format"],
+                            input_recovery_id=result.format_recovery_id,
+                            token_budget=self._settings.submit_max_output_tokens,
+                            time_budget_seconds=min(
+                                self._settings.model_request_timeout_seconds,
+                                30.0,
+                            ),
+                        )
+                        self._open_repair_transaction(format_transaction, state=state)
+                    self._record_repair_model_call("format")
+                    self._record_event(
+                        EventType.DECISION,
+                        "finding_repair",
+                        {
+                            "iteration": self._iteration,
+                            "stage": "schema_validation_repair",
+                            "repair_attempt": self._review_repair_attempt_count,
+                            "schema_repair_attempted_count": result.schema_repair_attempted_count,
+                            "repair_format_attempt_count": self._repair_format_attempt_count,
+                            "shared_repair_budget": self._settings.review_repair_max_attempts,
+                        },
+                    )
+                self._persist_draft_finding_calls(result, state=state)
+                self._sync_draft_states(state)
+                if result.draft_review is not None and not result.format_recovery_rejected:
                     self._submit_review_seen_any = True
                 if result.draft_debug is not None:
                     self._submit_debug_seen_any = True
                 model_call_success = True
+            except asyncio.TimeoutError:
+                soft_exploration_timeout = bool(
+                    exploration_time_limit
+                    and not self._run_timeout_exceeded()
+                    and self._run_elapsed_seconds()
+                    >= soft_exploration_deadline_elapsed - 0.05
+                )
+                if soft_exploration_timeout:
+                    self._analysis_time_reserve_hit = True
+                    self._analysis_time_reserve_reason = "exploration_time_limit"
+                else:
+                    self._run_timeout_hit = True
+                error_detail = ErrorDetail(
+                    file=request.repo_path,
+                    message=(
+                        "Model exploration stopped at the protected time reserve."
+                        if soft_exploration_timeout
+                        else "Model analysis stopped at the run wall-clock deadline."
+                    ),
+                    category="runtime",
+                )
+                state.errors.append(error_detail)
+                self._record_event(
+                    EventType.ERROR,
+                    "analyze",
+                    {
+                        "iteration": self._iteration,
+                        "error_type": (
+                            "ExplorationTimeLimit"
+                            if soft_exploration_timeout
+                            else "RunTimeoutError"
+                        ),
+                        "message": error_detail.message,
+                    },
+                )
+                result = self._fallback_plan(request)
+                self._latest_tokens = 0
             except ModelClientError as exc:
-                self._provider_error_seen = True
+                runtime_limit_reasons = {
+                    "runtime_time_reserve": "runtime_time_reserve",
+                    "runtime_token_soft_preflight": "token_budget_exhausted",
+                    "runtime_token_hard_preflight": "token_budget_exhausted",
+                    "token_soft_limit": "token_budget_exhausted",
+                    "token_hard_limit": "token_budget_exhausted",
+                }
+                runtime_limit_reason = runtime_limit_reasons.get(exc.code or "")
+                if exc.code == "runtime_time_reserve":
+                    self._analysis_time_reserve_hit = True
+                    self._analysis_time_reserve_reason = "runtime_time_reserve"
+                if runtime_limit_reason:
+                    # These failures happen before a provider request.  They
+                    # are bounded runtime termination, not provider health
+                    # errors, so semantic verification may still use the
+                    # protected reserve when the global deadline permits it.
+                    self._add_incomplete_reason(
+                        state,
+                        runtime_limit_reason,
+                        close_pending_drafts=False,
+                    )
+                else:
+                    self._provider_error_seen = True
                 if isinstance(exc, ModelTimeoutError):
                     self._model_timeout_seen = True
                 error_detail = ErrorDetail(
@@ -1283,6 +5162,25 @@ class AgentOrchestrator:
                 )
                 result = self._fallback_plan(request)
                 self._latest_tokens = 0
+            finally:
+                # B's engine charge includes every actually sent attempt and
+                # any internal schema-repair request.  Read it even when the
+                # provider raises so the conservative run ledger cannot lose a
+                # partial/unknown-usage request.  It never replaces TokenUsage.
+                try:
+                    self._latest_budget_tokens = max(
+                        0,
+                        int(
+                            getattr(
+                                engine,
+                                "last_call_budget_tokens_used",
+                                0,
+                            )
+                            or 0
+                        ),
+                    )
+                except (TypeError, ValueError):
+                    self._latest_budget_tokens = 0
 
         self._record_event(
             EventType.MODEL_CALL,
@@ -1294,6 +5192,7 @@ class AgentOrchestrator:
                 "elapsed_ms": int((perf_counter() - start) * 1000),
                 "tokens": self._latest_tokens,
                 "total_tokens": self._latest_tokens,
+                "budget_tokens_used": self._latest_budget_tokens,
                 "success": model_call_success,
                 "usage_present": model_call_success and self._latest_tokens > 0,
                 "stage": logical_stage,
@@ -1305,7 +5204,7 @@ class AgentOrchestrator:
                 "tool_schema_count": wire_tool_schema_count,
                 "model_request_timeout_seconds": self._settings.model_request_timeout_seconds,
                 "model_max_retries": self._settings.model_max_retries,
-                "force_submit": submit_only_call,
+                "force_submit": engine_force_submit,
                 "model_finish_reason": result.model_finish_reason,
                 "model_length_finish_seen": (
                     self._model_length_finish_seen
@@ -1320,6 +5219,7 @@ class AgentOrchestrator:
                 "final_submit_evidence_truncated_count": (
                     result.final_submit_evidence_truncated_count
                 ),
+                "schema_repair_attempted_count": result.schema_repair_attempted_count,
                 "budget_state": self._budget_state,
             },
         )
@@ -1453,9 +5353,41 @@ class AgentOrchestrator:
 
         if not isinstance(request, ReviewRequest):
             return tool_specs
+        if self._settings.finding_contract_version == "3.0":
+            # 3.0 deliberately removes the old draft/whole-report preflight
+            # ritual from the model-visible path.  The runtime registry still
+            # retains crash recovery and bounded repair facts, but the reviewer
+            # is not asked to maintain a second finding representation.
+            return [
+                spec
+                for spec in tool_specs
+                if spec.name
+                not in {
+                    "record_draft_finding",
+                    "update_draft_finding",
+                    "validate_review_draft",
+                }
+            ]
         if not defer_submit or self._draft_finding_store.all():
             return tool_specs
         return [spec for spec in tool_specs if spec.name != "validate_review_draft"]
+
+    def _can_explore_pending_draft(self) -> bool:
+        """Allow a pending checkpoint to use tools at the nominal last round.
+
+        A draft-only round gets one genuine follow-up opportunity.  If the
+        preceding round already used exploration and the run is at its ceiling,
+        the existing bounded submit path remains the safe terminal fallback.
+        """
+
+        plan = self._last_plan
+        if plan is None or not plan.tool_calls:
+            return True
+        for raw_call in plan.tool_calls:
+            function = raw_call.get("function") if isinstance(raw_call, dict) else {}
+            if isinstance(function, dict) and str(function.get("name", "")) in EXPLORATION_TOOL_NAMES:
+                return True
+        return False
 
     async def execute_tools(
         self,
@@ -1464,6 +5396,12 @@ class AgentOrchestrator:
         state: ContextState,
     ) -> list[ToolResult]:
         """Execute model-planned tools via registry."""
+        v3_actions = bool(
+            plan.v3_save_findings
+            or plan.v3_revise_findings
+            or plan.v3_finish_review is not None
+            or getattr(plan, "v3_action_call_refs", ())
+        )
         state.decisions.append(
             DecisionStep(
                 phase="execute_tools",
@@ -1479,13 +5417,23 @@ class AgentOrchestrator:
         )
         if self._permission_mode == "plan":
             return []
-        if not plan.needs_tools:
-            return []
-
         results: list[ToolResult] = []
         executed_feedback: list[dict[str, Any]] = []
+        if v3_actions:
+            action_results = self._execute_v3_finding_actions(plan, state)
+            results.extend(result for _, result in action_results)
+            executed_feedback.extend(
+                {"tool_call": raw_call, "result": result}
+                for raw_call, result in action_results
+            )
+        if not plan.needs_tools:
+            self._append_tool_feedback(executed_feedback)
+            return results
         index = 0
         while index < len(plan.tool_calls):
+            if self._run_timeout_hit or self._run_timeout_exceeded():
+                self._run_timeout_hit = True
+                break
             if self._tool_call_count >= self._settings.agent_max_tool_calls:
                 state.errors.append(
                     ErrorDetail(
@@ -1535,7 +5483,19 @@ class AgentOrchestrator:
                 state.errors.append(
                     ErrorDetail(file="", message=err, category="runtime")
                 )
-                results.append(ToolResult(ok=False, error=err, data=structured))
+                results.append(
+                    ToolResult(
+                        ok=False,
+                        error=err,
+                        data=structured,
+                        error_type="tool_not_found",
+                        failure_class="parameter_error",
+                        recoverable=True,
+                        recommended_next_step=str(
+                            structured["recommended_next_step"]
+                        ),
+                    )
+                )
                 self._journal_tool_result(plan, raw_call, results[-1])
                 executed_feedback.append(
                     {
@@ -1554,7 +5514,18 @@ class AgentOrchestrator:
                     state.errors.append(
                         ErrorDetail(file="", message=err, category="security")
                     )
-                    results.append(ToolResult(ok=False, error=err))
+                    results.append(
+                        ToolResult(
+                            ok=False,
+                            error=err,
+                            error_type="confirmation_required",
+                            failure_class="permission_policy",
+                            recoverable=False,
+                            recommended_next_step=(
+                                "Wait for explicit confirmation before using this write or execute tool."
+                            ),
+                        )
+                    )
                     self._journal_tool_result(plan, raw_call, results[-1])
                     self._record_event(
                         EventType.ERROR,
@@ -1754,6 +5725,459 @@ class AgentOrchestrator:
         self._append_tool_feedback(executed_feedback)
         return results
 
+    def _execute_v3_finding_actions(
+        self,
+        plan: AnalysisPlan,
+        state: ContextState,
+    ) -> list[tuple[dict[str, Any], ToolResult]]:
+        """Execute v3 registry actions before ordinary read-only tools."""
+
+        if self._runtime_closeout_done:
+            # Closeout freezes the candidate set.  A compatibility recovery
+            # path must not mutate it after verification input was snapshotted.
+            return []
+        catalog = list(self._live_evidence_catalog or state.evidence_ledger)
+        actions: list[tuple[dict[str, Any], ToolResult]] = []
+        # Source indexes are audit-only.  They are deliberately allocated from
+        # the action stream and never used to choose an existing candidate.
+        source_index = sum(
+            len(record.source_issue_indexes)
+            for record in self._candidate_registry.records
+        )
+        runtime_bindings = self._v3_runtime_action_bindings(plan)
+
+        def record(
+            name: str,
+            payload: dict[str, Any],
+            result: ToolResult,
+            action_index: int,
+        ) -> None:
+            nonlocal source_index
+            binding = runtime_bindings.get((name, action_index))
+            provider_call_id = (
+                str(binding.get("provider_id", "")).strip()
+                if binding is not None
+                else ""
+            )
+            synthetic = not provider_call_id
+            call_id = provider_call_id or (
+                f"runtime_v3_{plan.source_response_id or self._run_id}_"
+                f"{name}_{action_index}"
+            )
+            raw_call = {
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": _json.dumps(payload, ensure_ascii=True),
+                },
+                "synthetic_runtime_action": synthetic,
+                "provider_action_ordinal": (
+                    binding.get("ordinal") if binding is not None else None
+                ),
+            }
+            self._journal_tool_result(plan, raw_call, result)
+            self._record_event(
+                EventType.TOOL_CALL,
+                "execute_tools",
+                self._build_tool_call_event_payload(
+                    name=name,
+                    result=result,
+                    elapsed_ms=0,
+                ),
+            )
+            actions.append((raw_call, result))
+            source_index += 1
+
+        def record_invalid(ref: Any) -> None:
+            """Journal one parser-rejected v3 action at its raw call boundary.
+
+            Invalid refs are runtime receipts, not executable finding actions.
+            Their provider id and raw arguments are retained exactly so a
+            provider transcript can be joined without guessing from candidate
+            content.  An offline ref without a provider id is explicitly
+            synthetic and is never added to the provider conversation.
+            """
+
+            if isinstance(ref, dict):
+                name_value = ref.get("name", "")
+                provider_value = ref.get("provider_call_id", "")
+                ordinal_value = ref.get("raw_call_index", -1)
+                raw_arguments = ref.get("raw_arguments")
+                validation_error = ref.get("validation_error", "")
+            else:
+                name_value = getattr(ref, "name", "")
+                provider_value = getattr(ref, "provider_call_id", "")
+                ordinal_value = getattr(ref, "raw_call_index", -1)
+                raw_arguments = getattr(ref, "raw_arguments", None)
+                validation_error = getattr(ref, "validation_error", "")
+            name = str(name_value or "").strip() or "unknown"
+            provider_call_id = str(provider_value or "").strip()
+            try:
+                ordinal = int(ordinal_value)
+            except (TypeError, ValueError):
+                ordinal = -1
+            error = str(validation_error or "").strip() or (
+                f"Invalid v3 {name} action"
+            )
+            synthetic = not provider_call_id
+            call_id = provider_call_id or (
+                f"runtime_v3_{plan.source_response_id or self._run_id}"
+                f"_invalid_{ordinal}"
+            )
+            if isinstance(raw_arguments, str):
+                wire_arguments = raw_arguments
+            else:
+                wire_arguments = _json.dumps(
+                    raw_arguments if raw_arguments is not None else {},
+                    ensure_ascii=True,
+                    default=str,
+                )
+            raw_call = {
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": wire_arguments,
+                },
+                "synthetic_runtime_action": synthetic,
+                "provider_action_ordinal": ordinal,
+            }
+            result = ToolResult(
+                ok=False,
+                error=error,
+                error_type="v3_action_validation_error",
+                failure_class="parameter_error",
+                recoverable=True,
+                data={
+                    "ok": False,
+                    "error_type": "v3_action_validation_error",
+                    "message": error,
+                    "name": name,
+                    "raw_call_index": ordinal,
+                    "action_index": None,
+                    "provider_call_id": provider_call_id,
+                },
+            )
+            state.errors.append(
+                ErrorDetail(
+                    file="",
+                    message=f"Invalid v3 {name} action: {error}",
+                    category="runtime",
+                )
+            )
+            self._journal_tool_result(plan, raw_call, result)
+            self._record_event(
+                EventType.TOOL_CALL,
+                "execute_tools",
+                self._build_tool_call_event_payload(
+                    name=name,
+                    result=result,
+                    elapsed_ms=0,
+                ),
+            )
+            actions.append((raw_call, result))
+
+        def safe_action_payload(action: Any) -> dict[str, Any]:
+            """Keep a malformed action failure journalable without re-raising."""
+
+            try:
+                payload = action.model_dump(mode="json")
+            except Exception:  # noqa: BLE001
+                return {"serialization_error": "action_payload_unserializable"}
+            return payload if isinstance(payload, dict) else {}
+
+        ordered_actions: list[tuple[int, int, str, Any, bool]] = []
+        fallback_ordinal = 10**9
+        for name, action_index, action in (
+            *[
+                ("save_finding", index, action)
+                for index, action in enumerate(plan.v3_save_findings)
+            ],
+            *[
+                ("revise_finding", index, action)
+                for index, action in enumerate(plan.v3_revise_findings)
+            ],
+            *(
+                [("finish_review", 0, plan.v3_finish_review)]
+                if plan.v3_finish_review is not None
+                else []
+            ),
+        ):
+            binding = runtime_bindings.get((name, action_index))
+            ordinal = (
+                int(binding["ordinal"])
+                if binding is not None
+                else fallback_ordinal
+            )
+            fallback_ordinal += 1
+            ordered_actions.append((ordinal, action_index, name, action, False))
+        for ref in self._v3_invalid_action_refs(plan):
+            try:
+                ordinal = int(
+                    ref.get("raw_call_index", -1)
+                    if isinstance(ref, dict)
+                    else getattr(ref, "raw_call_index", -1)
+                )
+            except (TypeError, ValueError):
+                continue
+            name_value = (
+                ref.get("name", "")
+                if isinstance(ref, dict)
+                else getattr(ref, "name", "")
+            )
+            ordered_actions.append((ordinal, -1, str(name_value), ref, True))
+        ordered_actions.sort(key=lambda item: (item[0], item[2], item[1]))
+
+        for _, action_index, name, action, invalid in ordered_actions:
+            if invalid:
+                record_invalid(action)
+                continue
+            if name == "save_finding":
+                try:
+                    normalized = normalize_model_finding_v3_payload(
+                        action.finding.model_dump(mode="json"),
+                        evidence_catalog=catalog,
+                    )
+                    issue = ReviewIssue.model_validate(normalized)
+                    registration = self._candidate_registry.save_finding(
+                        issue,
+                        source_issue_index=source_index,
+                        iteration=self._iteration,
+                    )
+                    handle = self._candidate_registry.opaque_handle(
+                        registration.candidate_id
+                    )
+                    self._iteration_progress = True
+                    self._iteration_state_action_applied = True
+                    record(
+                        name,
+                        safe_action_payload(action),
+                        ToolResult(
+                            ok=True,
+                            data={
+                                "saved": True,
+                                "opaque_handle": handle,
+                                "mechanical_gaps": canonical_contract_gaps(issue),
+                            },
+                        ),
+                        action_index,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    record(
+                        name,
+                        safe_action_payload(action),
+                        ToolResult(
+                            ok=False,
+                            error=str(exc),
+                            error_type="finding_action_invalid",
+                            failure_class="parameter_error",
+                            recoverable=True,
+                        ),
+                        action_index,
+                    )
+                continue
+
+            if name == "revise_finding":
+                candidate_id = self._candidate_registry.candidate_for_handle(
+                    action.opaque_handle
+                )
+                current = self._candidate_registry.authoritative_issue(candidate_id)
+                try:
+                    if not candidate_id or current is None:
+                        raise ValueError("unknown opaque finding handle")
+                    bound_version = self._candidate_registry.version_for_handle(
+                        action.opaque_handle
+                    )
+                    current_version = self._candidate_registry.expected_version(candidate_id)
+                    if not bound_version or bound_version != current_version:
+                        raise ValueError("opaque finding handle is stale")
+                    patch_payload = action.patch.model_dump(
+                        mode="json", exclude_unset=True, exclude_none=True
+                    )
+                    delete_fields = list(patch_payload.pop("delete_fields", []))
+                    replacement = self._apply_v3_repair_patch(
+                        current,
+                        patch_payload,
+                        delete_fields=delete_fields,
+                        candidate_id=candidate_id,
+                        evidence_catalog=catalog,
+                    )
+                    if not self._candidate_registry.revise_finding(
+                        candidate_id,
+                        replacement,
+                        base_version=current_version,
+                    ):
+                        raise ValueError("opaque finding handle is stale")
+                    next_handle = self._candidate_registry.opaque_handle(candidate_id)
+                    self._iteration_progress = True
+                    self._iteration_state_action_applied = True
+                    record(
+                        name,
+                        safe_action_payload(action),
+                        ToolResult(
+                            ok=True,
+                            data={
+                                "revised": True,
+                                "opaque_handle": next_handle,
+                            },
+                        ),
+                        action_index,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    record(
+                        name,
+                        safe_action_payload(action),
+                        ToolResult(
+                            ok=False,
+                            error=str(exc),
+                            error_type="finding_action_invalid",
+                            failure_class="parameter_error",
+                            recoverable=True,
+                        ),
+                        action_index,
+                    )
+                continue
+
+            self._v3_finish_seen = True
+            self._v3_finish_summary = action.summary
+            self._submit_review_seen_any = True
+            self._submit_iteration = self._iteration
+            plan.draft_review = ReviewReport(
+                summary=action.summary,
+                issues=list(self._candidate_registry.finish_review()),
+                schema_version="3.0",
+            )
+            self._iteration_progress = True
+            record(
+                name,
+                action.model_dump(mode="json"),
+                ToolResult(
+                    ok=True,
+                    data={
+                        "finished": True,
+                        "finding_count": len(plan.draft_review.issues),
+                        "content_in_payload": False,
+                    },
+                ),
+                action_index,
+            )
+        return actions
+
+    @staticmethod
+    def _v3_invalid_action_refs(plan: AnalysisPlan) -> list[Any]:
+        """Return parser-invalid refs without interpreting their payload.
+
+        ``action_index=None`` is the parser's explicit marker that a raw
+        provider action did not enter the validated action sequence.  These
+        refs must still receive an error receipt, including when the response
+        contains no executable v3 action.  No candidate identity or semantic
+        matching is involved here.
+        """
+
+        raw_refs = getattr(plan, "v3_action_call_refs", ())
+        if not isinstance(raw_refs, (list, tuple)):
+            return []
+        allowed = {"save_finding", "revise_finding", "finish_review"}
+        invalid: list[Any] = []
+        seen_ordinals: set[int] = set()
+        for ref in raw_refs:
+            if isinstance(ref, dict):
+                name_value = ref.get("name", "")
+                action_value = ref.get("action_index")
+                error_value = ref.get("validation_error", "")
+                ordinal_value = ref.get("raw_call_index", -1)
+            else:
+                name_value = getattr(ref, "name", "")
+                action_value = getattr(ref, "action_index", None)
+                error_value = getattr(ref, "validation_error", "")
+                ordinal_value = getattr(ref, "raw_call_index", -1)
+            name = str(name_value or "").strip()
+            if name not in allowed:
+                continue
+            if action_value is not None and not str(error_value or "").strip():
+                continue
+            try:
+                ordinal = int(ordinal_value)
+            except (TypeError, ValueError):
+                continue
+            if ordinal < 0 or ordinal in seen_ordinals:
+                # Duplicate raw positions cannot be mechanically associated;
+                # do not emit a second receipt by semantic guesswork.
+                continue
+            seen_ordinals.add(ordinal)
+            invalid.append(ref)
+        return invalid
+
+    @staticmethod
+    def _v3_runtime_action_bindings(
+        plan: AnalysisPlan,
+    ) -> dict[tuple[str, int], dict[str, Any]]:
+        """Validate B's exact provider-id/order bridge for parsed v3 actions.
+
+        This deliberately binds by the parser's action kind and parsed index.
+        Candidate content, finding ids, handles, and prose are never used to
+        select a provider call.  Ambiguous or malformed entries are discarded
+        so the caller falls back to an explicitly synthetic journal id.
+        """
+
+        raw_bindings = getattr(plan, "v3_action_call_refs", ())
+        if not isinstance(raw_bindings, (list, tuple)):
+            return {}
+        allowed = {"save_finding", "revise_finding", "finish_review"}
+        action_lengths = {
+            "save_finding": len(plan.v3_save_findings),
+            "revise_finding": len(plan.v3_revise_findings),
+            "finish_review": int(plan.v3_finish_review is not None),
+        }
+        bindings: dict[tuple[str, int], dict[str, Any]] = {}
+        used_provider_ids: set[str] = set()
+        used_ordinals: set[int] = set()
+        ambiguous: set[tuple[str, int]] = set()
+        for raw in raw_bindings:
+            if isinstance(raw, dict):
+                name_value = raw.get("name", "")
+                provider_value = raw.get("provider_call_id", "")
+                action_value = raw.get("action_index", -1)
+                ordinal_value = raw.get("raw_call_index", -1)
+            else:
+                name_value = getattr(raw, "name", "")
+                provider_value = getattr(raw, "provider_call_id", "")
+                action_value = getattr(raw, "action_index", -1)
+                ordinal_value = getattr(raw, "raw_call_index", -1)
+            kind = str(name_value or "").strip()
+            provider_id = str(provider_value or "").strip()
+            try:
+                action_index = int(action_value)
+                ordinal = int(ordinal_value)
+            except (TypeError, ValueError):
+                continue
+            key = (kind, action_index)
+            if (
+                kind not in allowed
+                or action_index < 0
+                or action_index >= action_lengths[kind]
+                or ordinal < 0
+                or key in bindings
+                or key in ambiguous
+                or provider_id in used_provider_ids
+                or ordinal in used_ordinals
+            ):
+                if kind in allowed and action_index >= 0:
+                    ambiguous.add(key)
+                    bindings.pop(key, None)
+                continue
+            bindings[key] = {
+                "provider_id": provider_id,
+                "ordinal": ordinal,
+            }
+            if provider_id:
+                used_provider_ids.add(provider_id)
+            used_ordinals.add(ordinal)
+        for key in ambiguous:
+            bindings.pop(key, None)
+        return bindings
+
     def format_result(
         self,
         state: ContextState,
@@ -1761,15 +6185,16 @@ class AgentOrchestrator:
     ) -> ReviewResponse | DebugResponse:
         """Build final response according to run mode."""
         plan = self._last_plan or AnalysisPlan(needs_tools=False, tool_calls=[])
-        self._total_tokens += self._latest_tokens
-        self._budget_state = self._result_processor.budget_state(self._total_tokens)
-        self._budget_exhausted = self._budget_state != "none"
+        self._account_latest_model_usage()
 
         response: ReviewResponse | DebugResponse
         blocking_error: bool
         if self._is_review_mode(state):
             response, blocking_error = self._result_processor.format_review(
-                plan, tool_results, state
+                plan,
+                tool_results,
+                state,
+                contract_version=self._settings.finding_contract_version,
             )
         else:
             response, blocking_error = self._result_processor.format_debug(
@@ -1778,6 +6203,7 @@ class AgentOrchestrator:
         self._blocking_error = blocking_error
         response.context = state
         response.run_id = self._run_id or str(uuid4())
+        self._apply_completion_state(response, state)
         self._record_event(
             EventType.PHASE_END,
             "format",
@@ -1814,34 +6240,470 @@ class AgentOrchestrator:
         )
         return response
 
+    def _account_latest_model_usage(self) -> None:
+        """Charge every completed model call, including repair-only calls."""
+
+        actual_tokens = max(0, int(self._latest_tokens or 0))
+        engine_budget_tokens = max(0, int(self._latest_budget_tokens or 0))
+        self._total_tokens += actual_tokens
+        # Actual provider usage remains the cost/telemetry ledger.  The
+        # conservative budget ledger charges the larger of that usage and the
+        # engine's per-call estimate/attempt ceiling, including hidden schema
+        # repair and unknown-usage attempts.
+        self._conservative_budget_tokens_used += max(
+            actual_tokens,
+            engine_budget_tokens,
+        )
+        self._refresh_budget_state()
+
+    def _refresh_budget_state(self) -> None:
+        """Refresh stop state from actual and conservative budget ledgers."""
+
+        charged_tokens = max(
+            self._total_tokens,
+            self._conservative_budget_tokens_used,
+        )
+        self._budget_state = self._result_processor.budget_state(charged_tokens)
+        self._budget_exhausted = self._budget_state != "none"
+
+    def _sync_draft_states(self, state: ContextState) -> None:
+        """Copy the durable store's explicit checkpoint view into shared state."""
+
+        state.draft_findings = [item.model_copy(deep=True) for item in self._draft_finding_store.states()]
+
+    def _mark_pending_drafts_incomplete(
+        self,
+        state: ContextState,
+        reason: str,
+    ) -> None:
+        """Close open hypotheses with a truthful bounded-run reason."""
+
+        changed_ids: list[str] = []
+        for checkpoint in self._draft_finding_store.states():
+            if checkpoint.status != "pending":
+                continue
+            update = DraftFindingUpdateInput(
+                draft_id=checkpoint.draft_id,
+                status="incomplete",
+                reason=reason,
+                missing_checks=list(checkpoint.missing_checks),
+                evidence_refs=list(checkpoint.evidence_refs),
+            )
+            transition = self._draft_finding_store.update(
+                update,
+                iteration=self._iteration,
+            )
+            if transition is not None and transition[1]:
+                changed_ids.append(checkpoint.draft_id)
+                next_state = transition[0]
+                if self._run_journal is not None:
+                    self._run_journal.append(
+                        PendingRunJournalEntry(
+                            type="draft_finding_state",
+                            payload=DraftFindingStateJournalPayload(
+                                draft_id=next_state.draft_id,
+                                status=next_state.status,
+                                reason=next_state.reason,
+                                missing_checks=next_state.missing_checks,
+                                evidence_refs=next_state.evidence_refs,
+                                iteration=self._iteration,
+                            ).model_dump(mode="json"),
+                        )
+                    )
+        if changed_ids:
+            self._draft_state_transition_count += len(changed_ids)
+            self._record_event(
+                EventType.DECISION,
+                "draft_finding_state",
+                {
+                    "iteration": self._iteration,
+                    "status": "incomplete",
+                    "draft_ids": changed_ids,
+                    "reason": reason,
+                    "origin": "runtime_termination",
+                },
+            )
+        self._sync_draft_states(state)
+
+    def _add_incomplete_reason(
+        self,
+        state: ContextState,
+        reason: str,
+        *,
+        close_pending_drafts: bool = True,
+    ) -> None:
+        """Record one incomplete reason and optionally close open hypotheses.
+
+        Exploration termination is provisional until the submit-only finalizer
+        has had its bounded chance.  Those paths therefore keep pending drafts
+        open; hard runtime blockers still close them immediately.
+        """
+
+        normalized = str(reason or "").strip()
+        if not normalized:
+            return
+        if normalized not in self._completion_incomplete_reasons:
+            self._completion_incomplete_reasons.append(normalized)
+        if close_pending_drafts:
+            self._mark_pending_drafts_incomplete(state, normalized)
+
+    def _clear_exploration_incomplete_reasons(self) -> None:
+        """Remove provisional exploration-stop reasons after finalization."""
+
+        provisional = {
+            "max_iterations",
+            "draft_stagnation",
+            "no_effective_action",
+            "unresolved_draft_findings",
+        }
+        self._completion_incomplete_reasons = [
+            reason
+            for reason in self._completion_incomplete_reasons
+            if reason not in provisional
+        ]
+
+    def _close_pending_drafts_after_finalization(
+        self,
+        state: ContextState,
+        report: ReviewReport,
+    ) -> None:
+        """Record a truthful terminal state for drafts after final submit."""
+
+        terminal_status: Literal["evidence_sufficient", "disproved"] = (
+            "evidence_sufficient" if report.issues else "disproved"
+        )
+        reason = (
+            "finalization_submission_received"
+            if report.issues
+            else "finalization_submitted_no_finding"
+        )
+        changed_ids: list[str] = []
+        for checkpoint in self._draft_finding_store.states():
+            if checkpoint.status != "pending":
+                continue
+            update = DraftFindingUpdateInput(
+                draft_id=checkpoint.draft_id,
+                status=terminal_status,
+                reason=reason,
+                missing_checks=list(checkpoint.missing_checks),
+                evidence_refs=list(checkpoint.evidence_refs),
+            )
+            transition = self._draft_finding_store.update(
+                update,
+                iteration=self._iteration,
+            )
+            if transition is None or not transition[1]:
+                continue
+            changed_ids.append(checkpoint.draft_id)
+            next_state = transition[0]
+            if self._run_journal is not None:
+                self._run_journal.append(
+                    PendingRunJournalEntry(
+                        type="draft_finding_state",
+                        payload=DraftFindingStateJournalPayload(
+                            draft_id=next_state.draft_id,
+                            status=next_state.status,
+                            reason=next_state.reason,
+                            missing_checks=next_state.missing_checks,
+                            evidence_refs=next_state.evidence_refs,
+                            iteration=self._iteration,
+                        ).model_dump(mode="json"),
+                    )
+                )
+        if changed_ids:
+            self._draft_state_transition_count += len(changed_ids)
+            self._record_event(
+                EventType.DECISION,
+                "draft_finding_state",
+                {
+                    "iteration": self._iteration,
+                    "status": terminal_status,
+                    "draft_ids": changed_ids,
+                    "reason": reason,
+                    "origin": "submit_only_finalization",
+                },
+            )
+        self._sync_draft_states(state)
+
+    def _apply_completion_state(
+        self,
+        response: ReviewResponse | DebugResponse,
+        state: ContextState,
+    ) -> None:
+        """Expose incomplete run semantics without changing legacy complete payloads."""
+
+        if not isinstance(response, ReviewResponse):
+            return
+        reasons = list(
+            dict.fromkeys(
+                [
+                    *getattr(response, "incomplete_reasons", []),
+                    *self._completion_incomplete_reasons,
+                ]
+            )
+        )
+        if self._model_incomplete_seen and self._last_plan is not None:
+            if self._last_plan.incomplete_reason:
+                reasons.append(self._last_plan.incomplete_reason)
+        if self._draft_finding_store.has_incomplete():
+            reasons.append("incomplete_draft_findings")
+        for reason in reasons:
+            if reason and reason not in self._completion_incomplete_reasons:
+                self._completion_incomplete_reasons.append(reason)
+        if reasons:
+            response.completion_status = "incomplete"
+            response.incomplete_reasons = list(dict.fromkeys(reasons))
+        elif (
+            (
+                (
+                    self._finalization_status == "submitted"
+                    and self._submit_review_seen_any
+                )
+                or (
+                    self._settings.finding_contract_version == "3.0"
+                    and self._runtime_closeout_done
+                )
+            )
+            and (
+                self._submit_review_seen_any
+                if self._settings.finding_contract_version != "3.0"
+                else self._runtime_closeout_done
+            )
+            and not self._blocking_error
+            and (not self._provider_error_seen or self._model_timeout_recovered)
+            and not response.workflow_invalid
+            and not self._draft_finding_store.has_incomplete()
+            and not self._integrity_needs_repair_count
+            and not self._integrity_invalid_count
+            and (
+                not self._semantic_verifier_required
+                or (
+                    self._semantic_verifier_completed
+                    and not self._semantic_unresolved_count
+                    and not self._semantic_needs_revision_count
+                )
+            )
+        ):
+            # The loop may have formatted an iteration-guard placeholder
+            # before the bounded submit-only finalizer ran.  A valid final
+            # submission is the authoritative terminal response; clear only
+            # those stale provisional flags so publication is not reported as
+            # incomplete after a finding was actually published.
+            response.completion_status = "complete"
+            response.incomplete_reasons = []
+        self._sync_draft_states(state)
+        response.investigation_ready = bool(
+            self._investigation_ready
+            or (
+                not self._draft_finding_store.has_pending()
+                and not self._blocking_error
+                and not self._model_incomplete_seen
+            )
+        )
+        response.submission_received = bool(
+            self._runtime_closeout_done
+            if self._settings.finding_contract_version == "3.0"
+            else self._submit_review_seen_any
+        )
+        response.review_complete = bool(
+            self._review_finalized
+            and (
+                self._runtime_closeout_done
+                if self._settings.finding_contract_version == "3.0"
+                else self._submit_review_seen_any
+            )
+            and not self._blocking_error
+            and (
+                not self._provider_error_seen or self._model_timeout_recovered
+            )
+        )
+        response.finding_run_status = response.completion_status
+        response.semantic_verifier_required = self._semantic_verifier_required
+        response.semantic_verifier_completed = self._semantic_verifier_completed
+        response.semantic_accepted_count = self._semantic_accepted_count
+        response.semantic_rejected_count = self._semantic_rejected_count
+        response.semantic_needs_revision_count = self._semantic_needs_revision_count
+        response.semantic_unresolved_count = self._semantic_unresolved_count
+        response.report_ready = bool(
+            response.completion_status == "complete"
+            and response.review_complete
+            and not response.workflow_invalid
+            and not self._completion_incomplete_reasons
+            and (
+                not self._semantic_verifier_required
+                or self._semantic_verifier_completed
+            )
+        )
+        if response.report_ready and response.external_publish_status == "not_requested":
+            response.external_publish_status = "ready"
+        elif not response.report_ready and response.external_publish_status == "ready":
+            response.external_publish_status = "not_requested"
+        response.delivery_complete = bool(
+            response.review_complete
+            and response.completion_status == "complete"
+            and not self._integrity_needs_repair_count
+            and not self._integrity_invalid_count
+            and not self._policy_rejected_issue_count
+            and not self._completion_incomplete_reasons
+            and (
+                not self._semantic_verifier_required
+                or (
+                    self._semantic_verifier_completed
+                    and not self._semantic_unresolved_count
+                    and not self._semantic_needs_revision_count
+                )
+            )
+        )
+
     def should_continue(
         self, state: ContextState, response: ReviewResponse | DebugResponse
     ) -> bool:
         """Decide whether another loop iteration should run."""
+        plan = self._last_plan
+        is_review = self._is_review_mode(state)
+        v3_mode = bool(
+            is_review and self._settings.finding_contract_version == "3.0"
+        )
         has_pending_tools = (
             False
             if self._permission_mode == "plan"
-            else bool(self._last_plan and self._last_plan.needs_tools)
+            else bool(plan and plan.needs_tools and plan.tool_calls)
+        )
+        has_explicit_submit = bool(plan and plan.has_explicit_submit)
+        has_state_action = bool(plan and plan.has_state_action)
+        has_valid_state_action = bool(
+            has_state_action and self._iteration_state_action_applied
+        )
+        has_effective_action = bool(
+            has_pending_tools or has_valid_state_action or has_explicit_submit
+        )
+        has_pending_drafts = is_review and self._draft_finding_store.has_pending()
+        has_pending_v3_findings = bool(
+            v3_mode
+            and self._candidate_registry.records
+            and not self._v3_finish_seen
         )
         defer_review_submit = (
-            self._is_review_mode(state)
+            is_review
             and self._iteration < self._review_min_tool_iterations
+            and self._iteration + 1 < self._max_iterations
             and not self._blocking_error
             and self._permission_mode != "plan"
         )
+
+        # A newly recorded hypothesis is progress but not completion.  A
+        # repeated state action without new evidence is tracked separately so
+        # the run can close with a bounded, truthful reason.
+        if has_pending_drafts:
+            fingerprint = self._plan_action_fingerprint(plan)
+            if not self._iteration_progress:
+                if fingerprint and fingerprint == self._last_draft_action_fingerprint:
+                    self._draft_stagnation_streak += 1
+                else:
+                    self._draft_stagnation_streak = 1
+            else:
+                self._draft_stagnation_streak = 0
+            self._last_draft_action_fingerprint = fingerprint
+
+        terminal_reason = ""
+        if not has_effective_action and not defer_review_submit:
+            terminal_reason = "no_effective_action"
+            if v3_mode and not self._v3_finish_seen and not self._candidate_registry.records:
+                terminal_reason = "no_candidates_without_finish"
+            if (
+                has_pending_drafts
+                or self._permission_mode == "plan"
+                or (
+                    v3_mode
+                    and not self._v3_finish_seen
+                    and not self._candidate_registry.records
+                )
+            ):
+                self._add_incomplete_reason(
+                    state,
+                    terminal_reason,
+                    close_pending_drafts=not has_pending_drafts and not v3_mode,
+                )
+        elif (
+            has_pending_drafts
+            and not has_explicit_submit
+            and self._draft_stagnation_streak
+            >= self._settings.draft_stagnation_max_rounds
+        ):
+            terminal_reason = "draft_stagnation"
+            self._add_incomplete_reason(
+                state,
+                terminal_reason,
+                close_pending_drafts=False,
+            )
+
+        if self._analysis_time_reserve_hit:
+            reserve_reason = (
+                self._analysis_time_reserve_reason or "runtime_time_reserve"
+            )
+            terminal_reason = terminal_reason or reserve_reason
+            self._add_incomplete_reason(
+                state,
+                reserve_reason,
+                close_pending_drafts=False,
+            )
+
         self._model_completed = (
             not has_pending_tools
             and not self._blocking_error
             and not defer_review_submit
             and not self._model_incomplete_seen
+            and not has_pending_drafts
+            and not has_pending_v3_findings
+            and has_effective_action
         )
         submit_ready = self._review_stage == "submit_ready"
         reached_limit = (self._iteration + 1) >= self._max_iterations
-        run_timed_out = self._run_timeout_exceeded()
+        run_timed_out = self._run_timeout_hit or self._run_timeout_exceeded()
         self._run_timeout_hit = self._run_timeout_hit or run_timed_out
         submit_recovery_allowed = (
             self._submit_only_retry_pending and not reached_limit
         )
+
+        if self._budget_exhausted:
+            terminal_reason = terminal_reason or "token_budget_exhausted"
+            if has_pending_drafts or (v3_mode and not self._v3_finish_seen):
+                self._add_incomplete_reason(
+                    state,
+                    terminal_reason,
+                    close_pending_drafts=not v3_mode,
+                )
+        elif run_timed_out:
+            terminal_reason = terminal_reason or "run_timeout"
+            self._add_incomplete_reason(state, terminal_reason)
+        elif self._model_incomplete_seen and not self._length_recovery_required:
+            terminal_reason = terminal_reason or "model_incomplete"
+            self._add_incomplete_reason(state, terminal_reason)
+        elif self._blocking_error:
+            terminal_reason = terminal_reason or "unrecoverable_error"
+            self._add_incomplete_reason(state, terminal_reason)
+        elif has_explicit_submit and has_pending_drafts:
+            terminal_reason = terminal_reason or "unresolved_draft_findings"
+            self._add_incomplete_reason(state, terminal_reason)
+        elif reached_limit and has_pending_drafts:
+            terminal_reason = terminal_reason or "max_iterations"
+            self._add_incomplete_reason(
+                state,
+                terminal_reason,
+                close_pending_drafts=False,
+            )
+        elif (
+            reached_limit
+            and v3_mode
+            and self._candidate_registry.records
+            and not self._v3_finish_seen
+        ):
+            terminal_reason = terminal_reason or "max_iterations"
+            self._add_incomplete_reason(
+                state,
+                terminal_reason,
+                close_pending_drafts=False,
+            )
 
         stop = (
             self._model_incomplete_seen
@@ -1853,6 +6715,7 @@ class AgentOrchestrator:
             or (reached_limit and not submit_ready and not submit_recovery_allowed)
             or self._budget_exhausted
             or run_timed_out
+            or bool(terminal_reason)
         )
         if self._budget_exhausted:
             state.errors.append(
@@ -1879,6 +6742,10 @@ class AgentOrchestrator:
             reason = "model_incomplete"
         elif run_timed_out:
             reason = "run_timeout"
+        elif terminal_reason and not (
+            terminal_reason == "no_effective_action" and reached_limit
+        ):
+            reason = terminal_reason
         elif self._model_completed and not submit_ready and not submit_recovery_allowed:
             reason = "model_completed"
         elif submit_ready:
@@ -1910,6 +6777,20 @@ class AgentOrchestrator:
                 "iteration": self._iteration,
                 "max_iterations": self._max_iterations,
                 "has_pending_tools": has_pending_tools,
+                "has_explicit_submit": has_explicit_submit,
+                "has_state_action": has_state_action,
+                "has_valid_state_action": has_valid_state_action,
+                "action_kinds": list(plan.action_kinds) if plan is not None else [],
+                "has_effective_action": has_effective_action,
+                "pending_draft_count": int(
+                    sum(
+                        item.status == "pending"
+                        for item in self._draft_finding_store.states()
+                    )
+                ),
+                "draft_status_counts": self._draft_finding_store.status_counts(),
+                "draft_stagnation_streak": self._draft_stagnation_streak,
+                "iteration_progress": self._iteration_progress,
                 "model_completed": self._model_completed,
                 "model_incomplete": self._model_incomplete_seen,
                 "reached_limit": reached_limit,
@@ -1930,6 +6811,18 @@ class AgentOrchestrator:
     def _reset_run(self, max_iterations: int, repo_path: str) -> None:
         self._run_id = str(uuid4())
         self._workspace_root = Path(repo_path).resolve()
+        try:
+            repository_id = repository_identity(self._workspace_root)
+            self._evidence_revision = revision_identity(self._workspace_root)
+            self._evidence_snapshot_id = hashlib.sha256(
+                f"{repository_id}|{self._evidence_revision}".encode("utf-8")
+            ).hexdigest()[:24]
+        except Exception:  # noqa: BLE001
+            self._evidence_revision = "working-tree"
+            self._evidence_snapshot_id = hashlib.sha256(
+                str(self._workspace_root).encode("utf-8")
+            ).hexdigest()[:24]
+        self._live_evidence_catalog = []
         configured_log_dir = Path(self._settings.event_log_dir)
         if not configured_log_dir.is_absolute():
             configured_log_dir = Path(repo_path) / configured_log_dir
@@ -1954,12 +6847,15 @@ class AgentOrchestrator:
         self._tool_feedback = []
         self._feedback_digest_index = {}
         self._tool_dedup_cache = {}
+        self._recoverable_tool_error_counts = {}
         self._submit_review_seen_any = False
         self._submit_iteration = None
         self._submit_debug_seen_any = False
         self._latest_tokens = 0
+        self._latest_budget_tokens = 0
         self._model_conversation = ModelConversation()
         self._total_tokens = 0
+        self._conservative_budget_tokens_used = 0
         self._successful_prompt_tokens = 0
         self._successful_completion_tokens = 0
         self._successful_reasoning_tokens = 0
@@ -1980,10 +6876,15 @@ class AgentOrchestrator:
         self._last_decision_reason = ""
         self._iteration_guard_hit = False
         self._run_timeout_hit = False
+        self._analysis_time_reserve_hit = False
+        self._analysis_time_reserve_reason = ""
         self._provider_error_seen = False
         self._tool_bearing_iterations = set()
         self._run_started_at = perf_counter()
         self._run_timeout_seconds = self._agent_run_timeout_seconds
+        self._active_state = None
+        self._cancellation_persisted = False
+        self._cancelled = False
         self._model_timeout_seen = False
         self._model_timeout_errors = []
         self._model_timeout_recovered = False
@@ -1997,6 +6898,8 @@ class AgentOrchestrator:
         self._final_submit_evidence_included_count = 0
         self._final_submit_evidence_token_count = 0
         self._final_submit_evidence_truncated_count = 0
+        self._investigation_ready = False
+        self._review_finalized = False
         self._pre_budget_submit_attempted = False
         self._review_workflow = ReviewWorkflowTracker()
         self._review_stage = "explore"
@@ -2007,6 +6910,7 @@ class AgentOrchestrator:
         self._workflow_reprompt_count = 0
         self._model_raw_issue_count = 0
         self._submitted_issue_count = 0
+        self._submitted_attempt_count = 0
         self._policy_passed_issue_count = 0
         self._policy_rejected_issue_count = 0
         self._non_risk_issue_count = 0
@@ -2034,6 +6938,63 @@ class AgentOrchestrator:
         self._tool_result_journal_writes = 0
         self._draft_findings_created = 0
         self._draft_findings_from_visible_content = 0
+        self._draft_state_transition_count = 0
+        self._draft_stagnation_streak = 0
+        self._last_draft_action_fingerprint = ""
+        self._iteration_state_action_applied = False
+        self._iteration_progress = False
+        self._completion_incomplete_reasons = []
+        self._candidate_registry = CandidateRegistry()
+        self._repair_transactions = []
+        self._active_repair_transaction = None
+        self._repair_model_call_count = 0
+        self._evidence_catalog_digest = ""
+        self._review_repair_attempt_count = 0
+        self._repair_format_attempt_count = 0
+        self._repair_contract_attempt_count = 0
+        self._repair_evidence_attempt_count = 0
+        self._final_submit_attempt_count = 0
+        self._finalization_attempted = False
+        self._finalization_status = "not_attempted"
+        self._finalization_skip_reason = ""
+        self._finalization_response_id = ""
+        self._review_repair_succeeded_count = 0
+        self._integrity_needs_repair_count = 0
+        self._integrity_invalid_count = 0
+        self._final_published_count = 0
+        self._semantic_verifier_required = False
+        self._semantic_verifier_completed = False
+        self._semantic_accepted_count = 0
+        self._semantic_rejected_count = 0
+        self._semantic_needs_revision_count = 0
+        self._semantic_unresolved_count = 0
+        self._semantic_model_call_count = 0
+        self._semantic_investigation_call_count = 0
+        self._semantic_investigation_tool_call_count = 0
+        self._semantic_telemetry_totals = {
+            "successful_model_call_count": 0,
+            "failed_model_call_count": 0,
+            "provider_attempt_count": 0,
+            "failed_provider_attempt_count": 0,
+            "failed_unknown_usage_count": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "reasoning_tokens": 0,
+            "total_tokens": 0,
+            "budget_tokens_used": 0,
+            "cached_prompt_tokens": 0,
+            "cache_observation_count": 0,
+            "cache_hit_count": 0,
+        }
+        self._runtime_closeout_done = False
+        self._runtime_closeout_reason = ""
+        self._semantic_receipts = []
+        self._semantic_handles = {}
+        self._v3_handle_to_candidate = {}
+        self._v3_candidate_to_handle = {}
+        self._v3_finish_seen = False
+        self._v3_finish_summary = ""
+        self._last_integrity_guard_result = None
         self._record_event(
             EventType.PHASE_START,
             "prepare",
@@ -2054,7 +7015,19 @@ class AgentOrchestrator:
                 "agent_run_timeout_seconds": self._agent_run_timeout_seconds,
                 "agent_tool_timeout_seconds": self._settings.agent_tool_timeout_seconds,
                 "agent_max_tool_calls": self._settings.agent_max_tool_calls,
+                "agent_max_recoverable_tool_errors": (
+                    self._settings.agent_max_recoverable_tool_errors
+                ),
                 "model_max_tokens": self._settings.model_max_tokens,
+                "exploration_max_output_tokens": (
+                    self._settings.exploration_max_output_tokens
+                ),
+                "submit_max_output_tokens": self._settings.submit_max_output_tokens,
+                "effective_stage_output_token_budgets": {
+                    "explore": self._settings.exploration_max_output_tokens,
+                    "validate": self._settings.exploration_max_output_tokens,
+                    "submit_only": self._settings.submit_max_output_tokens,
+                },
                 "pre_budget_submit_token_ratio": self._settings.pre_budget_submit_token_ratio,
                 "review_diff_first_changed_files": self._review_diff_first_changed_files,
                 "review_diff_first_changed_files_max": self._settings.review_diff_first_changed_files_max,
@@ -2079,6 +7052,94 @@ class AgentOrchestrator:
     def _run_timeout_exceeded(self) -> bool:
         return self._run_elapsed_seconds() >= self._run_timeout_seconds
 
+    def _persist_cancelled_run(self, state: ContextState | None) -> None:
+        """Persist the best available run snapshot before cancellation escapes."""
+
+        if self._cancellation_persisted:
+            return
+        self._cancellation_persisted = True
+        self._cancelled = True
+        snapshot = self._candidate_registry.snapshot()
+        if state is not None:
+            self._add_incomplete_reason(state, "cancelled")
+            state.candidate_registrations = snapshot
+            self._sync_draft_states(state)
+
+        def persist(action: Any) -> None:
+            try:
+                action()
+            except Exception as exc:  # noqa: BLE001
+                # Cancellation must remain a cancellation even if a best-effort
+                # journal/evidence flush itself fails.
+                try:
+                    self._record_event(
+                        EventType.ERROR,
+                        "runtime",
+                        {
+                            "reason": "cancellation_persistence_failed",
+                            "error_type": exc.__class__.__name__,
+                            "message": str(exc),
+                        },
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+
+        if state is not None:
+            persist(lambda: self._publish_evidence_catalog(state))
+        if self._run_journal is not None:
+            duplicate_sources = {
+                record.candidate_id: list(
+                    self._candidate_registry.duplicate_sources(record.candidate_id)
+                )
+                for record in self._candidate_registry.records
+                if self._candidate_registry.duplicate_sources(record.candidate_id)
+            }
+            persist(
+                lambda: self._run_journal.append(
+                    PendingRunJournalEntry(
+                        type="candidate_registration",
+                        payload=CandidateRegistrationJournalPayload(
+                            iteration=self._iteration,
+                            registrations=snapshot,
+                            duplicate_sources=duplicate_sources,
+                        ).model_dump(mode="json"),
+                    )
+                )
+            )
+            statuses: dict[str, str] = {
+                record.candidate_id: record.status
+                for record in self._candidate_registry.records
+            }
+            persist(
+                lambda: self._run_journal.append(
+                    PendingRunJournalEntry(
+                        type="finding_finalization",
+                        payload=FindingFinalizationJournalPayload(
+                            candidate_statuses=statuses,
+                            final_published_count=self._final_published_count,
+                            finding_run_status="incomplete",
+                            review_outcome=self._review_outcome,
+                        ).model_dump(mode="json"),
+                    )
+                )
+            )
+        persist(
+            lambda: self._record_event(
+                EventType.ERROR,
+                "runtime",
+                {
+                    "reason": "cancelled",
+                    "iteration": self._iteration,
+                    "candidate_count": len(snapshot),
+                    "finish_seen": self._v3_finish_seen,
+                    "runtime_closeout_done": self._runtime_closeout_done,
+                    "budget_state": self._budget_state,
+                    "elapsed_ms": int(self._run_elapsed_seconds() * 1000),
+                },
+            )
+        )
+        persist(self._close_event_log)
+
     def _has_useful_tool_feedback(self) -> bool:
         """Return True when at least one tool call returned usable data."""
         if not self._tool_feedback:
@@ -2090,6 +7151,11 @@ class AgentOrchestrator:
 
     def _should_pre_budget_submit(self, state: ContextState) -> bool:
         """Decide whether to trigger a bounded submit-only call before the next analysis turn."""
+        if self._settings.finding_contract_version == "3.0":
+            # v3 closes the current Registry set at the loop boundary.  A
+            # pre-budget submit would be a second model turn after normal
+            # exploration and could append candidates outside that snapshot.
+            return False
         if self._permission_mode == "plan":
             return False
         if self._pre_budget_submit_attempted:
@@ -2098,6 +7164,11 @@ class AgentOrchestrator:
             return False
         if self._model_timeout_seen:
             return False
+        if self._draft_finding_store.has_pending():
+            # Evidence gathering must get the next available turn; spending
+            # the reserve on an automatic submit would recreate the old
+            # draft-only -> forced-submit path.
+            return False
         plan = self._last_plan
         if plan is not None and (
             self._has_review_business_output(plan.draft_review)
@@ -2105,7 +7176,11 @@ class AgentOrchestrator:
         ):
             return False
         analysis_ceiling = self._analysis_token_ceiling()
-        if self._total_tokens >= analysis_ceiling:
+        charged_tokens = max(
+            self._total_tokens,
+            self._conservative_budget_tokens_used,
+        )
+        if charged_tokens >= analysis_ceiling:
             return True
         if not self._has_useful_tool_feedback():
             return False
@@ -2114,7 +7189,7 @@ class AgentOrchestrator:
             int(self._settings.token_budget * ratio),
             analysis_ceiling,
         )
-        return self._total_tokens >= threshold
+        return charged_tokens >= threshold
 
     def _analysis_token_ceiling(self) -> int:
         """Return the cumulative-token ceiling available to non-final model calls."""
@@ -2124,7 +7199,168 @@ class AgentOrchestrator:
             self._settings.token_hard_budget
             - self._settings.final_submit_reserve_tokens,
         )
-        return min(self._settings.token_budget, reserve_ceiling)
+        return min(
+            self._settings.token_budget,
+            reserve_ceiling,
+        )
+
+    def _remaining_call_token_budget(
+        self,
+        request: ReviewRequest | DebugRequest,
+        *,
+        repair_mode: bool,
+    ) -> int | None:
+        """Return the one-call hard budget handed to the inference engine.
+
+        The engine owns request assembly and output fitting.  The orchestrator
+        only supplies the run-wide remaining envelope: ordinary v3 exploration
+        cannot consume the protected semantic/finalization reserve, while a
+        repair call may use the full hard remainder.  Legacy v2/direct calls
+        keep ``None`` for compatibility unless they are an explicit repair.
+        """
+
+        if not isinstance(request, ReviewRequest):
+            return None
+        if not repair_mode and self._settings.finding_contract_version != "3.0":
+            return None
+        charged_tokens = max(
+            self._total_tokens,
+            getattr(self, "_conservative_budget_tokens_used", 0),
+        )
+        ceiling = (
+            self._settings.token_hard_budget
+            if repair_mode
+            else self._analysis_token_ceiling()
+        )
+        return max(0, int(ceiling) - charged_tokens)
+
+    def _postprocessing_time_reserve_seconds(
+        self,
+        request: ReviewRequest | DebugRequest,
+        *,
+        repair_mode: bool,
+    ) -> float:
+        """Reserve a bounded wall-clock slice for v3 verification/rechecks."""
+
+        if (
+            repair_mode
+            or not isinstance(request, ReviewRequest)
+            or self._settings.finding_contract_version != "3.0"
+        ):
+            return 0.0
+        semantic_calls = max(
+            1,
+            min(2, int(self._settings.semantic_verifier_max_model_calls)),
+        )
+        repair_calls = min(1, int(self._settings.review_repair_max_attempts))
+        required_windows = semantic_calls + repair_calls
+        # Keep at most half of the run for closeout/gates, bounded by the
+        # existing per-request timeout.  This is a runtime reserve, not a new
+        # provider retry budget.
+        return min(
+            self._run_timeout_seconds * 0.5,
+            self._settings.model_request_timeout_seconds * required_windows,
+        )
+
+    def _current_v3_finding_handles(self) -> list[dict[str, str]]:
+        """Expose a compact current-handle directory to ordinary v3 calls."""
+
+        handles: list[dict[str, str]] = []
+        for record in self._candidate_registry.records:
+            issue = self._candidate_registry.authoritative_issue(record.candidate_id)
+            if issue is None:
+                continue
+            anchor = issue.primary_anchor
+            anchor_text = (
+                f"{anchor.file}:{anchor.line}" if anchor is not None else ""
+            )
+            handles.append(
+                {
+                    "opaque_handle": self._candidate_registry.opaque_handle(
+                        record.candidate_id
+                    ),
+                    "anchor": anchor_text,
+                    "description_short": str(issue.description or "")[:160],
+                }
+            )
+        return handles
+
+    def _repair_sequence_capacity(
+        self,
+        required_steps: int,
+        *,
+        transaction_scoped: bool = False,
+        allow_active_transaction: bool = False,
+    ) -> dict[str, Any]:
+        """Preflight a complete repair sequence before spending its first call.
+
+        The compatibility default keeps the old helper semantics for direct
+        callers.  The orchestrator uses ``transaction_scoped=True`` so one
+        source-exploration-plus-submit sequence consumes one transaction while
+        retaining separate model-call telemetry.
+        """
+
+        steps = max(1, int(required_steps))
+        remaining_attempts = max(
+            0,
+            self._settings.review_repair_max_attempts
+            - self._review_repair_attempt_count,
+        )
+        remaining_tokens = max(
+            0,
+            self._settings.token_hard_budget
+            - max(
+                self._total_tokens,
+                getattr(self, "_conservative_budget_tokens_used", 0),
+            ),
+        )
+        # Reserve bounded completion capacity for every step.  The exact
+        # serialized request cap is enforced by InferenceEngine; this preflight
+        # only prevents a source->submit sequence from starting when the shared
+        # hard budget cannot accommodate both calls at all.
+        required_tokens = max(
+            self._settings.final_submit_request_token_budget,
+            steps * self._settings.submit_max_output_tokens,
+        )
+        remaining_seconds = max(
+            0.0,
+            self._run_timeout_seconds - self._run_elapsed_seconds(),
+        )
+        required_seconds = steps * min(
+            self._settings.model_request_timeout_seconds,
+            30.0,
+        )
+        reason = ""
+        if self._budget_state == "hard_capped":
+            reason = "repair_budget_exhausted"
+        elif transaction_scoped and not allow_active_transaction and remaining_attempts < 1:
+            reason = "repair_transaction_budget_exhausted"
+        elif (
+            transaction_scoped
+            and allow_active_transaction
+            and getattr(self, "_active_repair_transaction", None) is None
+        ):
+            reason = "repair_transaction_missing"
+        elif not transaction_scoped and remaining_attempts < steps:
+            reason = "repair_sequence_attempt_budget_insufficient"
+        elif remaining_tokens < required_tokens:
+            reason = "repair_sequence_token_budget_insufficient"
+        elif remaining_seconds < required_seconds:
+            reason = "repair_sequence_time_budget_insufficient"
+        return {
+            "allowed": not reason,
+            "reason": reason,
+            "required_steps": steps,
+            "remaining_repair_attempts": remaining_attempts,
+            "transaction_scoped": transaction_scoped,
+            "active_transaction": getattr(self, "_active_repair_transaction", None)
+            is not None,
+            "remaining_repair_transactions": remaining_attempts,
+            "required_token_reserve": required_tokens,
+            "remaining_token_budget": remaining_tokens,
+            "required_time_reserve_seconds": required_seconds,
+            "remaining_time_budget_seconds": round(remaining_seconds, 3),
+        }
 
     def _record_pre_budget_submit(
         self,
@@ -2175,7 +7411,7 @@ class AgentOrchestrator:
             )
         self._record_event(EventType.DECISION, "pre_budget_submit", payload)
 
-    def _finalize_skip_reason(self) -> str:
+    def _finalize_skip_reason(self, *, pending_drafts: bool = False) -> str:
         if self._model_timeout_seen:
             return "model_timeout"
         if self._model_incomplete_seen:
@@ -2184,8 +7420,25 @@ class AgentOrchestrator:
             return "pre_budget_submit_attempted"
         if self._budget_state == "hard_capped":
             return "budget_hard_capped"
-        if self._run_timeout_exceeded():
+        if self._run_timeout_hit or self._run_timeout_exceeded():
             return "run_timeout"
+        for reason in self._completion_incomplete_reasons:
+            if reason in {
+                "max_iterations",
+                "draft_stagnation",
+                "no_effective_action",
+                "unresolved_draft_findings",
+                "token_budget_exhausted",
+                "unrecoverable_error",
+            }:
+                if pending_drafts and reason in {
+                    "max_iterations",
+                    "draft_stagnation",
+                    "no_effective_action",
+                    "unresolved_draft_findings",
+                }:
+                    continue
+                return reason
         return ""
 
     def _length_recovery_block_reason(self) -> str:
@@ -2214,6 +7467,9 @@ class AgentOrchestrator:
                 "finalize_attempt": False,
                 "skip_reason": skip_reason,
                 "budget_state": self._budget_state,
+                "finalization_status": self._finalization_status,
+                "pending_drafts": self._draft_finding_store.has_pending(),
+                "ordinary_exploration_tools_exposed": False,
                 "run_timed_out": self._run_timeout_exceeded(),
                 "elapsed_ms": int(self._run_elapsed_seconds() * 1000),
             },
@@ -2273,6 +7529,7 @@ class AgentOrchestrator:
                 category="runtime",
             )
         )
+        self._add_incomplete_reason(state, reason)
 
     def _observe_incomplete_plan(
         self,
@@ -2430,7 +7687,22 @@ class AgentOrchestrator:
                 request.diff_text = diff_text
         if not diff_text.strip():
             return None
-        return ReviewToolContext.from_diff(request.repo_path, diff_text)
+        try:
+            repository_id = repository_identity(Path(request.repo_path).resolve())
+            self._evidence_revision = revision_identity(Path(request.repo_path).resolve())
+            diff_hash = hashlib.sha256(diff_text.encode("utf-8")).hexdigest()
+            self._evidence_snapshot_id = hashlib.sha256(
+                f"{repository_id}|{self._evidence_revision}|{diff_hash}".encode(
+                    "utf-8"
+                )
+            ).hexdigest()[:24]
+        except Exception:  # noqa: BLE001
+            pass
+        return ReviewToolContext.from_diff(
+            request.repo_path,
+            diff_text,
+            evidence_catalog_provider=lambda: list(self._live_evidence_catalog),
+        )
 
     async def _execute_one_tool(
         self,
@@ -2440,6 +7712,55 @@ class AgentOrchestrator:
         args: dict[str, Any],
     ) -> tuple[ToolResult, ErrorDetail | None, int]:
         started = perf_counter()
+
+        def bound_failure(result: ToolResult) -> ToolResult:
+            """Keep correctable failures recoverable, but bound repeated retries."""
+
+            if result.ok or not result.recoverable:
+                return result
+            failure_key = self._tool_dedup_key(
+                f"{tool_name}:{result.error_type or result.failure_class}", args
+            )
+            count = self._recoverable_tool_error_counts.get(failure_key, 0) + 1
+            self._recoverable_tool_error_counts[failure_key] = count
+            data = result.data if isinstance(result.data, dict) else {}
+            data = {
+                **data,
+                "recoverable": True,
+                "recoverable_error_count": count,
+                "recoverable_error_limit": self._settings.agent_max_recoverable_tool_errors,
+            }
+            if count <= self._settings.agent_max_recoverable_tool_errors:
+                return result.model_copy(update={"data": data})
+            bounded_message = (
+                f"Repeated recoverable failure for {tool_name} exceeded the "
+                f"limit of {self._settings.agent_max_recoverable_tool_errors}."
+            )
+            data.update(
+                {
+                    "ok": False,
+                    "error_type": "repeated_recoverable_tool_error",
+                    "failure_class": "repeat_bound",
+                    "recoverable": False,
+                    "message": bounded_message,
+                    "recommended_next_step": (
+                        "Stop retrying this call and preserve the remaining evidence gap."
+                    ),
+                }
+            )
+            return result.model_copy(
+                update={
+                    "data": data,
+                    "error": bounded_message,
+                    "error_type": "repeated_recoverable_tool_error",
+                    "failure_class": "repeat_bound",
+                    "recoverable": False,
+                    "recommended_next_step": (
+                        "Stop retrying this call and preserve the remaining evidence gap."
+                    ),
+                }
+            )
+
         dedup_key = None
         if tool.spec().safety == ToolSafety.READONLY:
             dedup_key = self._tool_dedup_key(tool_name, args)
@@ -2467,44 +7788,122 @@ class AgentOrchestrator:
                 )
                 return ToolResult(ok=True, data=hint), None, 0
         with tool_workspace_root(self._workspace_root):
+            remaining_run_seconds = (
+                self._run_timeout_seconds - self._run_elapsed_seconds()
+            )
+            if remaining_run_seconds <= 0:
+                self._run_timeout_hit = True
+                err = f"Tool execution skipped for {tool_name}: run wall-clock deadline reached"
+                return (
+                    ToolResult(
+                        ok=False,
+                        error=err,
+                        data={
+                            "ok": False,
+                            "error_type": "RunTimeoutError",
+                            "tool_name": tool_name,
+                            "skip_reason": "run_timeout",
+                            "message": err,
+                        },
+                        error_type="run_timeout",
+                        failure_class="timeout",
+                        recoverable=False,
+                    ),
+                    ErrorDetail(file="", message=err, category="runtime"),
+                    max(1, int((perf_counter() - started) * 1000)),
+                )
+            timeout = min(
+                self._settings.agent_tool_timeout_seconds,
+                remaining_run_seconds,
+            )
             try:
                 data = await asyncio.wait_for(
                     tool.execute(**args),
-                    timeout=self._settings.agent_tool_timeout_seconds,
+                    timeout=timeout,
                 )
                 result = ToolResult(ok=True, data=data)
                 if dedup_key is not None:
                     self._tool_dedup_cache[dedup_key] = result
                 return result, None, int((perf_counter() - started) * 1000)
             except TimeoutError:
-                timeout = self._settings.agent_tool_timeout_seconds
+                run_timeout = (
+                    timeout < self._settings.agent_tool_timeout_seconds
+                    or self._run_timeout_exceeded()
+                )
+                self._run_timeout_hit = self._run_timeout_hit or run_timeout
                 elapsed_ms = max(1, int((perf_counter() - started) * 1000))
-                err = f"Tool execution timed out for {tool_name} after {timeout:g}s"
+                timeout_kind = "run_timeout" if run_timeout else "tool_timeout"
+                err = (
+                    f"Tool execution stopped for {tool_name} at the run wall-clock deadline"
+                    if run_timeout
+                    else f"Tool execution timed out for {tool_name} after {timeout:g}s"
+                )
                 data = {
                     "ok": False,
                     "error_type": "ToolTimeoutError",
                     "tool_name": tool_name,
                     "timeout_seconds": timeout,
-                    "skip_reason": "tool_timeout",
+                    "skip_reason": timeout_kind,
                     "message": err,
                 }
                 return (
-                    ToolResult(ok=False, error=err, data=data),
+                    bound_failure(
+                        ToolResult(
+                            ok=False,
+                            error=err,
+                            data=data,
+                            error_type=timeout_kind,
+                            failure_class="timeout",
+                            recoverable=not run_timeout,
+                            recommended_next_step=(
+                                "Retry with a narrower, bounded request; repeated timeouts stop the run."
+                            ),
+                        )
+                    ),
                     ErrorDetail(file="", message=err, category="runtime"),
                     elapsed_ms,
                 )
             except ToolError as exc:
                 err = f"Tool execution failed for {tool_name}: {exc}"
-                hint = self._tool_error_hint(tool_name=tool_name, message=str(exc))
+                classification = classify_tool_failure(
+                    exc, tool_name=tool_name, message=str(exc)
+                )
+                hint = {
+                    **self._tool_error_hint(tool_name=tool_name, message=str(exc)),
+                    **classification,
+                }
                 return (
-                    ToolResult(ok=False, error=err, data=hint),
+                    bound_failure(
+                        ToolResult(
+                            ok=False,
+                            error=err,
+                            data=hint,
+                            error_type=str(classification["error_type"]),
+                            failure_class=str(classification["failure_class"]),
+                            recoverable=bool(classification["recoverable"]),
+                            recommended_next_step=str(
+                                classification["recommended_next_step"]
+                            ),
+                        )
+                    ),
                     ErrorDetail(file=exc.path, message=err, category="runtime"),
                     int((perf_counter() - started) * 1000),
                 )
             except Exception as exc:  # noqa: BLE001
                 err = f"Tool execution failed for {tool_name}: {exc}"
                 return (
-                    ToolResult(ok=False, error=err),
+                    bound_failure(
+                        ToolResult(
+                            ok=False,
+                            error=err,
+                            error_type="tool_execution_failed",
+                            failure_class="execution_error",
+                            recoverable=False,
+                            recommended_next_step=(
+                                "Preserve the failure and return a partial result; no automatic bypass is allowed."
+                            ),
+                        )
+                    ),
                     ErrorDetail(file="", message=err, category="runtime"),
                     int((perf_counter() - started) * 1000),
                 )
@@ -2552,15 +7951,628 @@ class AgentOrchestrator:
             error_type = str(result.data.get("error_type", "")).strip()
             if error_type:
                 payload["error_type"] = error_type
+        if not result.ok:
+            if result.error_type:
+                payload["error_type"] = result.error_type
+            if result.failure_class:
+                payload["failure_class"] = result.failure_class
+            payload["recoverable"] = bool(result.recoverable)
+            if result.recommended_next_step:
+                payload["recommended_next_step"] = result.recommended_next_step
         return payload
+
+    @staticmethod
+    def _format_recovery_error_fields(error: str) -> set[str]:
+        """Extract fields the schema explicitly reported as missing/invalid."""
+
+        fields: set[str] = set()
+        for pattern in (r"issues\.\d+\.([A-Za-z_]\w*)", r"issues\[\d+\]\.([A-Za-z_]\w*)"):
+            fields.update(re.findall(pattern, error or ""))
+        return fields
+
+    @staticmethod
+    def _format_recovery_canonical_ref(
+        reference: str,
+        evidence_catalog: list[dict[str, Any]],
+    ) -> str:
+        """Map an input alias to the exact delivered catalog id for comparison."""
+
+        value = str(reference or "").strip()
+        if not value:
+            return ""
+        for record in evidence_catalog:
+            if not isinstance(record, dict):
+                continue
+            identifiers = {
+                str(record.get(key, "") or "").strip()
+                for key in ("evidence_id", "artifact_id", "reference_id")
+            }
+            aliases = record.get("aliases", [])
+            if isinstance(aliases, str):
+                identifiers.add(aliases.strip())
+            elif isinstance(aliases, list):
+                identifiers.update(str(item or "").strip() for item in aliases)
+            if value in identifiers:
+                return str(record.get("evidence_id", "") or value).strip()
+        return value
+
+    @classmethod
+    def _format_recovery_refs(
+        cls,
+        raw_issue: dict[str, Any],
+        evidence_catalog: list[dict[str, Any]],
+    ) -> set[str]:
+        refs: set[str] = set()
+        direct_refs = raw_issue.get("evidence_refs", [])
+        if isinstance(direct_refs, list):
+            refs.update(
+                cls._format_recovery_canonical_ref(item, evidence_catalog)
+                for item in direct_refs
+                if str(item or "").strip()
+            )
+        supports = raw_issue.get("supports", [])
+        if isinstance(supports, list):
+            for support in supports:
+                if not isinstance(support, dict):
+                    continue
+                raw_refs = support.get("evidence_refs", [])
+                if not isinstance(raw_refs, list):
+                    continue
+                refs.update(
+                    cls._format_recovery_canonical_ref(item, evidence_catalog)
+                    for item in raw_refs
+                    if str(item or "").strip()
+                )
+        return {item for item in refs if item}
+
+    @staticmethod
+    def _recovered_issue_refs(issue: ReviewIssue) -> set[str]:
+        refs = {
+            str(item or "").strip()
+            for item in issue.evidence_refs
+            if str(item or "").strip()
+        }
+        refs.update(
+            str(item or "").strip()
+            for support in issue.supports
+            for item in support.evidence_refs
+            if str(item or "").strip()
+        )
+        refs.update(
+            str(item.evidence_id or item.reference_id).strip()
+            for item in issue.all_evidence()
+            if str(item.evidence_id or item.reference_id).strip()
+        )
+        return refs
+
+    @staticmethod
+    def _format_recovery_value(field: str, value: Any) -> Any:
+        if field == "primary_anchor" and isinstance(value, dict):
+            try:
+                return SourceAnchor.model_validate(value).model_dump(mode="json")
+            except Exception:  # noqa: BLE001
+                return value
+        if field == "repair_intent" and isinstance(value, dict):
+            return {
+                "action": str(value.get("action", "") or "").strip(),
+                "targets": [str(item) for item in value.get("targets", [])],
+                "boundary": str(value.get("boundary", "") or "").strip(),
+            }
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+    @classmethod
+    def _check_format_recovery_preservation(
+        cls,
+        plan: AnalysisPlan,
+        state: ContextState,
+        *,
+        contract_version: str = "2.0",
+    ) -> tuple[bool, list[str], list[dict[str, Any]]]:
+        """Ensure format recovery did not mutate semantic/evidence content."""
+
+        raw_payload = plan.format_recovery_raw_payload
+        raw_issues = raw_payload.get("issues") if isinstance(raw_payload, dict) else None
+        report = plan.draft_review
+        if not isinstance(raw_issues, list) or report is None:
+            return (
+                False,
+                [],
+                [{"code": "format_recovery_missing_comparable_payload"}],
+            )
+        if len(raw_issues) != len(report.issues):
+            return (
+                False,
+                [],
+                [
+                    {
+                        "code": "format_recovery_issue_count_changed",
+                        "raw_issue_count": len(raw_issues),
+                        "recovered_issue_count": len(report.issues),
+                    }
+                ],
+            )
+        allowed_fields = cls._format_recovery_error_fields(
+            plan.format_recovery_validation_error
+        )
+        preserved_refs: set[str] = set()
+        for index, (raw_issue, recovered_issue) in enumerate(
+            zip(raw_issues, report.issues, strict=True)
+        ):
+            if not isinstance(raw_issue, dict):
+                return (
+                    False,
+                    sorted(preserved_refs),
+                    [{"code": "format_recovery_raw_issue_not_object", "index": index}],
+                )
+            raw_refs = cls._format_recovery_refs(raw_issue, state.evidence_ledger)
+            recovered_refs = cls._recovered_issue_refs(recovered_issue)
+            preserved_refs.update(raw_refs)
+            if not raw_refs.issubset(recovered_refs):
+                return (
+                    False,
+                    sorted(preserved_refs),
+                    [
+                        {
+                            "code": "format_recovery_evidence_changed",
+                            "index": index,
+                            "raw_refs": sorted(raw_refs),
+                            "recovered_refs": sorted(recovered_refs),
+                        }
+                    ],
+                )
+            if not recovered_refs.issubset(raw_refs):
+                return (
+                    False,
+                    sorted(preserved_refs),
+                    [
+                        {
+                            "code": "format_recovery_evidence_added",
+                            "index": index,
+                            "raw_refs": sorted(raw_refs),
+                            "recovered_refs": sorted(recovered_refs),
+                        }
+                    ],
+                )
+            for evidence in recovered_issue.all_evidence():
+                if evidence.resolution_status != "resolved":
+                    return (
+                        False,
+                        sorted(preserved_refs),
+                        [
+                            {
+                                "code": "format_recovery_unresolved_evidence",
+                                "index": index,
+                                "reference_id": evidence.reference_id,
+                            }
+                        ],
+                    )
+            for field in (
+                "severity",
+                "primary_anchor",
+                "description",
+                "evidence_refs",
+                "related_locations",
+                "evidence",
+                "suggestion",
+                "confidence",
+                "observed_behavior",
+                "causal_mechanism",
+                "violated_invariant",
+                "repair_intent",
+                "trigger",
+                "impact",
+            ):
+                if field in allowed_fields:
+                    continue
+                raw_field = field
+                if field == "primary_anchor" and contract_version == "3.0":
+                    raw_field = "anchor"
+                if raw_field not in raw_issue or raw_issue.get(raw_field) in (None, "", []):
+                    continue
+                raw_value = cls._format_recovery_value(
+                    field, raw_issue.get(raw_field)
+                )
+                recovered_value = cls._format_recovery_value(
+                    field,
+                    getattr(recovered_issue, field),
+                )
+                if field == "evidence_refs":
+                    raw_value = [str(item).strip() for item in raw_value]
+                    recovered_value = [
+                        str(item).strip() for item in recovered_value
+                    ]
+                elif field == "related_locations":
+                    raw_value = [
+                        SourceAnchor.model_validate(item).model_dump(mode="json")
+                        for item in raw_value
+                    ]
+                    recovered_value = [
+                        SourceAnchor.model_validate(item).model_dump(mode="json")
+                        for item in recovered_value
+                    ]
+                if raw_value != recovered_value:
+                    return (
+                        False,
+                        sorted(preserved_refs),
+                        [
+                            {
+                                "code": "format_recovery_semantic_changed",
+                                "index": index,
+                                "field": field,
+                            }
+                        ],
+                    )
+            raw_supports = raw_issue.get("supports", [])
+            if isinstance(raw_supports, list):
+                recovered_supports: dict[str, str] = {
+                    str(support.role): support.statement
+                    for support in recovered_issue.supports
+                }
+                for support in raw_supports:
+                    if not isinstance(support, dict):
+                        continue
+                    role = str(support.get("role", "")).strip()
+                    statement = str(support.get("statement", "")).strip()
+                    if statement and role not in allowed_fields and recovered_supports.get(role) != statement:
+                        return (
+                            False,
+                            sorted(preserved_refs),
+                            [
+                                {
+                                    "code": "format_recovery_support_statement_changed",
+                                    "index": index,
+                                    "role": role,
+                                }
+                            ],
+                        )
+        return True, sorted(preserved_refs), []
+
+    @staticmethod
+    def _build_format_recovery_salvage(
+        plan: AnalysisPlan,
+        state: ContextState,
+        *,
+        contract_version: str = "2.0",
+    ) -> ReviewReport:
+        """Materialize the original payload with placeholders, never guesses."""
+
+        raw = plan.format_recovery_raw_payload
+        raw_issues = raw.get("issues", []) if isinstance(raw, dict) else []
+        issues: list[ReviewIssue] = []
+        if isinstance(raw_issues, list):
+            for raw_issue in raw_issues:
+                if not isinstance(raw_issue, dict):
+                    continue
+                normalized = normalize_model_finding_payload(
+                    raw_issue,
+                    evidence_catalog=state.evidence_ledger,
+                )
+                if not isinstance(normalized, dict):
+                    continue
+                is_v3 = contract_version == "3.0"
+                normalized.setdefault("severity", "info")
+                normalized.setdefault(
+                    "primary_anchor",
+                    {"file": "__format_recovery__", "line": 1},
+                )
+                normalized.setdefault("location", "__format_recovery__:1")
+                normalized.setdefault("evidence", "")
+                normalized.setdefault("suggestion", "")
+                normalized.setdefault("confidence", 0.0)
+                normalized["schema_version"] = contract_version
+                normalized.update(
+                    {
+                        "candidate_id": "",
+                        "finding_id": "",
+                        "target_candidate_id": "",
+                        "repair_status": "",
+                        "candidate_content_version": "",
+                        "repair_reason": "",
+                        "repair_patch": None,
+                    }
+                )
+                try:
+                    issues.append(ReviewIssue.model_validate(normalized))
+                except Exception:  # noqa: BLE001
+                    # Keep an explicit placeholder issue only when the raw
+                    # severity is still a valid compatibility value.
+                    try:
+                        if is_v3:
+                            issues.append(
+                                ReviewIssue(
+                                    severity=Severity(
+                                        str(raw_issue.get("severity", "info"))
+                                    ),
+                                    location=str(
+                                        normalized.get(
+                                            "location", "__format_recovery__:1"
+                                        )
+                                    ),
+                                    evidence="",
+                                    suggestion=str(
+                                        raw_issue.get("suggestion", "") or ""
+                                    ),
+                                    confidence=0.0,
+                                    description=str(
+                                        raw_issue.get("description", "") or ""
+                                    ),
+                                    evidence_refs=[
+                                        str(item).strip()
+                                        for item in raw_issue.get("evidence_refs", [])
+                                        if str(item).strip()
+                                    ],
+                                    primary_anchor=SourceAnchor(
+                                        file="__format_recovery__", line=1
+                                    ),
+                                    schema_version="3.0",
+                                )
+                            )
+                        else:
+                            issues.append(
+                                ReviewIssue(
+                                    severity=Severity(
+                                        str(raw_issue.get("severity", "info"))
+                                    ),
+                                    location=str(normalized.get("location", "")),
+                                    evidence=str(raw_issue.get("evidence", "") or ""),
+                                    suggestion=str(raw_issue.get("suggestion", "") or ""),
+                                    confidence=float(raw_issue.get("confidence", 0.0) or 0.0),
+                                    schema_version="2.0",
+                                )
+                            )
+                    except Exception:  # noqa: BLE001
+                        continue
+        summary = str(raw.get("summary", "") or "").strip() if isinstance(raw, dict) else ""
+        return ReviewReport(
+            summary=summary
+            or "Format recovery rejected; the original candidate was preserved for integrity validation.",
+            issues=issues,
+            schema_version=(
+                contract_version
+            ),
+        )
+
+    def _prepare_format_recovery(
+        self,
+        plan: AnalysisPlan,
+        state: ContextState,
+    ) -> None:
+        """Persist and, when necessary, reject unsafe schema-recovery mutation."""
+
+        if not plan.format_recovery_required or not plan.format_recovery_id:
+            return
+        diagnostics: list[dict[str, Any]] = []
+        preserved_refs: list[str] = []
+        if plan.draft_review is not None:
+            safe, preserved_refs, diagnostics = self._check_format_recovery_preservation(
+                plan,
+                state,
+                contract_version=self._settings.finding_contract_version,
+            )
+        else:
+            safe = False
+            plan.draft_review = self._build_format_recovery_salvage(
+                plan,
+                state,
+                contract_version=self._settings.finding_contract_version,
+            )
+            diagnostics = [{"code": "format_recovery_no_valid_recovered_report"}]
+        if safe:
+            plan.format_recovery_status = "accepted"
+        else:
+            plan.draft_review = self._build_format_recovery_salvage(
+                plan,
+                state,
+                contract_version=self._settings.finding_contract_version,
+            )
+            plan.format_recovery_status = "rejected_preserved_input"
+            plan.format_recovery_rejected = True
+        payload = FormatRecoveryJournalPayload(
+            recovery_id=plan.format_recovery_id,
+            iteration=self._iteration,
+            input_response_id=plan.format_recovery_input_response_id,
+            recovery_response_id=plan.format_recovery_response_id,
+            validation_error=plan.format_recovery_validation_error,
+            status=plan.format_recovery_status,
+            raw_payload=redact_sensitive_values(plan.format_recovery_raw_payload),
+            preserved_evidence_refs=preserved_refs,
+            diagnostics=diagnostics,
+        ).model_dump(mode="json")
+        if self._run_journal is not None:
+            self._run_journal.append(
+                PendingRunJournalEntry(type="format_recovery", payload=payload)
+            )
+        self._record_event(
+            EventType.DECISION,
+            "format_recovery",
+            {
+                "recovery_id": plan.format_recovery_id,
+                "iteration": self._iteration,
+                "status": plan.format_recovery_status,
+                "input_response_id": plan.format_recovery_input_response_id,
+                "recovery_response_id": plan.format_recovery_response_id,
+                "preserved_evidence_refs": preserved_refs,
+                "diagnostics": diagnostics,
+            },
+        )
+
+    def _close_format_recovery_transaction(self, plan: AnalysisPlan) -> None:
+        """Close the format-only transaction before candidate repair can open."""
+
+        transaction = self._active_repair_transaction
+        if (
+            transaction is None
+            or not plan.format_recovery_id
+            or transaction.input_recovery_id != plan.format_recovery_id
+        ):
+            return
+        status: Literal[
+            "accepted", "partially_accepted", "rejected", "incomplete", "deferred"
+        ] = (
+            "accepted"
+            if plan.format_recovery_status == "accepted"
+            else "rejected"
+        )
+        transaction.status = status
+        transaction.target_results = {
+            plan.format_recovery_id: plan.format_recovery_status or "deferred"
+        }
+        if plan.format_recovery_rejected:
+            transaction.rejection_reasons.append("format_recovery_preservation_failed")
+        self._persist_repair_transaction(transaction)
+        self._record_event(
+            EventType.REPAIR_TRANSACTION,
+            "repair",
+            {
+                "stage": "closed",
+                **transaction.model_dump(mode="json"),
+                "repair_transaction_count": self._review_repair_attempt_count,
+                "repair_model_call_count": self._repair_model_call_count,
+            },
+        )
+        self._active_repair_transaction = None
 
     def _observe_review_submission(self, plan: AnalysisPlan) -> None:
         """Record the first valid submit_review on its 0-based loop iteration."""
 
-        if plan.draft_review is not None and self._submit_iteration is None:
+        format_recovery_rejected = plan.format_recovery_rejected
+        if (
+            plan.draft_review is not None
+            and not format_recovery_rejected
+            and self._submit_iteration is None
+        ):
             self._submit_iteration = self._iteration
         if plan.draft_review is not None:
-            self._review_stage = "complete"
+            if not self._repair_schema_open():
+                self._register_initial_candidates(plan.draft_review)
+            if not format_recovery_rejected:
+                self._submitted_attempt_count += 1
+                self._review_stage = "complete"
+            else:
+                self._review_stage = "explore"
+            if plan.format_recovery_id and self._run_journal is not None:
+                mapped_candidate_ids = sorted(
+                    {
+                        issue.candidate_id.strip()
+                        for issue in plan.draft_review.issues
+                        if issue.candidate_id.strip()
+                    }
+                )
+                self._run_journal.append(
+                    PendingRunJournalEntry(
+                        type="format_recovery",
+                        payload=FormatRecoveryJournalPayload(
+                            recovery_id=plan.format_recovery_id,
+                            iteration=self._iteration,
+                            input_response_id=plan.format_recovery_input_response_id,
+                            recovery_response_id=plan.format_recovery_response_id,
+                            validation_error=plan.format_recovery_validation_error,
+                            status=plan.format_recovery_status or "deferred",
+                            raw_payload=redact_sensitive_values(
+                                plan.format_recovery_raw_payload
+                            ),
+                            mapped_candidate_ids=mapped_candidate_ids,
+                        ).model_dump(mode="json"),
+                    )
+                )
+        self._close_format_recovery_transaction(plan)
+
+    def _register_initial_candidates(self, report: ReviewReport) -> None:
+        """Register the initial report before any identity-sensitive repair."""
+
+        # The simplified model input may still carry a legacy finding_id for
+        # replay compatibility, but initial runtime registration owns this
+        # identity and must not allow the model to rename it.
+        for issue in report.issues:
+            if not issue.target_candidate_id.strip():
+                issue.finding_id = ""
+        registrations = self._candidate_registry.register_report(
+            report,
+            iteration=self._iteration,
+            include_non_risk=report.schema_version == "3.0",
+        )
+        if not registrations:
+            return
+        payload = {
+            "iteration": self._iteration,
+            "registrations": self._candidate_registry.snapshot(),
+            "registered_candidate_ids": [item.candidate_id for item in registrations],
+            "duplicate_source_indexes": {
+                item.candidate_id: list(
+                    self._candidate_registry.duplicate_sources(item.candidate_id)
+                )
+                for item in registrations
+                if self._candidate_registry.duplicate_sources(item.candidate_id)
+            },
+        }
+        self._record_event(EventType.CANDIDATE_REGISTERED, "preflight", payload)
+        if self._run_journal is not None:
+            self._run_journal.append(
+                PendingRunJournalEntry(
+                    type="candidate_registration",
+                    payload={
+                        "iteration": self._iteration,
+                        "registrations": self._candidate_registry.snapshot(),
+                        "duplicate_sources": payload["duplicate_source_indexes"],
+                    },
+                )
+            )
+
+    def _repair_schema_open(self) -> bool:
+        """Return true only when a runtime-created repair transaction is open."""
+
+        result = self._last_validator_result
+        if not isinstance(result, dict):
+            return False
+        transaction = result.get("repair_transaction")
+        if not isinstance(transaction, dict):
+            return False
+        if str(transaction.get("status", "")).strip() != "open":
+            return False
+        targets = transaction.get("candidate_ids")
+        return isinstance(targets, list) and bool(
+            [str(item).strip() for item in targets if str(item).strip()]
+        )
+
+    @staticmethod
+    def _plan_action_fingerprint(plan: AnalysisPlan | None) -> str:
+        """Create a stable action signature for the draft anti-spin guard."""
+
+        if plan is None:
+            return ""
+        actions: list[dict[str, Any]] = []
+        for draft_call in plan.draft_finding_calls:
+            actions.append({"kind": "record_draft", "value": draft_call.model_dump(mode="json")})
+        for draft_update in plan.draft_finding_updates:
+            actions.append({"kind": "update_draft", "value": draft_update.model_dump(mode="json")})
+        for raw_call in plan.tool_calls:
+            function = raw_call.get("function") if isinstance(raw_call, dict) else {}
+            if not isinstance(function, dict):
+                continue
+            arguments = function.get("arguments", {})
+            if isinstance(arguments, str):
+                try:
+                    arguments = _json.loads(arguments)
+                except (TypeError, ValueError):
+                    arguments = str(arguments)
+            actions.append(
+                {
+                    "kind": "explore",
+                    "name": str(function.get("name", "")),
+                    "arguments": arguments,
+                }
+            )
+        if plan.has_explicit_submit:
+            actions.append({"kind": "submit"})
+        if not actions:
+            return "none"
+        try:
+            encoded = _json.dumps(actions, ensure_ascii=True, sort_keys=True, default=str)
+        except Exception:  # noqa: BLE001
+            encoded = str(actions)
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:20]
 
     def _recover_model_timeout_after_valid_review(self, state: ContextState) -> None:
         """Keep a recovered timeout diagnostic from invalidating a valid review."""
@@ -2595,6 +8607,8 @@ class AgentOrchestrator:
     def _termination_reason(self) -> str:
         """Normalize the final loop outcome into one stable primary reason."""
 
+        if self._cancelled:
+            return "cancelled"
         if self._model_timeout_seen and not self._model_timeout_recovered:
             return "provider_timeout"
         if self._run_timeout_hit:
@@ -2615,11 +8629,42 @@ class AgentOrchestrator:
             self._provider_error_seen and not self._model_timeout_recovered
         ):
             return "blocking_error"
+        if self._completion_incomplete_reasons:
+            return self._completion_incomplete_reasons[0]
+        if self._integrity_needs_repair_count or self._integrity_invalid_count:
+            return "finding_delivery_incomplete"
+        for reason in (
+            "draft_stagnation",
+            "unresolved_draft_findings",
+            "no_effective_action",
+            "no_candidates_without_finish",
+            "unrecoverable_error",
+            "model_incomplete",
+            "untrusted_finding_candidates",
+            "finding_contract_incomplete",
+            "finding_contract_invalid",
+            "support_role_missing",
+            "support_reference_missing",
+            "support_reference_unresolved",
+            "support_reference_undelivered",
+            "evidence_not_observed",
+            "evidence_incomplete",
+            "evidence_identity_mismatch",
+            "role_claim_missing",
+            "repair_target_unmatched",
+        ):
+            if self._last_decision_reason == reason or reason in self._completion_incomplete_reasons:
+                return reason
         if self._last_decision_reason == "model_completed" or self._model_completed:
             return "natural_model_stop"
         return "other"
 
-    def _record_review_telemetry(self, state: ContextState) -> None:
+    def _record_review_telemetry(
+        self,
+        state: ContextState,
+        *,
+        response: ReviewResponse | None = None,
+    ) -> None:
         """Emit one complete, mode-aware review telemetry envelope."""
 
         graph = dict(state.relation_graph_summary)
@@ -2632,7 +8677,10 @@ class AgentOrchestrator:
             "tool_call_count": self._tool_call_count,
             "tool_bearing_iterations": len(self._tool_bearing_iterations),
             "submit_iteration": self._submit_iteration,
-            "natural_completion": termination_reason == "natural_model_stop",
+            "natural_completion": (
+                termination_reason == "natural_model_stop"
+                and (response is None or response.completion_status == "complete")
+            ),
             "iteration_guard_hit": self._iteration_guard_hit,
             "pre_budget_submit_triggered": self._pre_budget_submit_attempted,
             "termination_reason": termination_reason,
@@ -2642,10 +8690,36 @@ class AgentOrchestrator:
             "draft_findings_from_visible_content": (
                 self._draft_findings_from_visible_content
             ),
+            "draft_state_transition_count": self._draft_state_transition_count,
+            "draft_status_counts": self._draft_finding_store.status_counts(),
+            "draft_stagnation_streak": self._draft_stagnation_streak,
+            "incomplete_reasons": list(self._completion_incomplete_reasons),
             "length_recoveries_attempted": self._length_recovery_attempted,
             "length_recoveries_succeeded": self._length_recovery_succeeded,
             "length_recoveries_failed": self._length_recovery_failed,
+            "finalization_attempted": self._finalization_attempted,
+            "finalization_status": self._finalization_status,
+            "finalization_skip_reason": self._finalization_skip_reason,
+            "finalization_response_id": self._finalization_response_id,
             "submit_review_seen_any": self._submit_review_seen_any,
+            "investigation_ready": bool(
+                response.investigation_ready
+                if response is not None
+                else self._investigation_ready
+            ),
+            "submission_received": bool(
+                response.submission_received
+                if response is not None
+                else self._submit_review_seen_any
+            ),
+            "review_complete": bool(
+                response.review_complete
+                if response is not None
+                else self._review_finalized
+            ),
+            "delivery_complete": bool(
+                response.delivery_complete if response is not None else False
+            ),
             "provider_timeout_recovered": self._model_timeout_recovered,
             "budget_exhausted": self._budget_exhausted,
             "budget_state": self._budget_state,
@@ -2676,9 +8750,72 @@ class AgentOrchestrator:
             "failed_attempt_count": self._failed_attempt_count,
             "failed_unknown_usage_count": self._failed_unknown_usage_count,
             "total_tokens": self._total_tokens,
+            "conservative_budget_tokens_used": self._conservative_budget_tokens_used,
             "candidate_finding_count": self._verifier_candidate_count,
             "accepted_finding_count": self._verifier_accepted_count,
             "verifier_rejection_count": self._verifier_rejected_count,
+            "logical_candidate_count": self._verifier_candidate_count,
+            "submitted_finding_count": self._submitted_issue_count,
+            "submitted_attempt_count": self._submitted_attempt_count,
+            "no_finding_run_count": int(self._submitted_issue_count == 0),
+            "non_risk_not_routed_count": self._non_risk_issue_count,
+            "pre_verifier_rejected_count": self._policy_rejected_issue_count,
+            "policy_passed_count": self._policy_passed_issue_count,
+            "policy_rejected_count": self._policy_rejected_issue_count,
+            "risk_candidate_count": self._risk_candidate_count,
+            "integrity_checked_count": self._verifier_candidate_count,
+            "integrity_verified_count": self._verifier_accepted_count,
+            "integrity_needs_repair_count": self._integrity_needs_repair_count,
+            "integrity_invalid_count": self._integrity_invalid_count,
+            "deterministic_rejected_count": self._deterministic_rejected_count,
+            "repair_attempted_count": self._review_repair_attempt_count,
+            "repair_budget_total": self._settings.review_repair_max_attempts,
+            "repair_budget_remaining": max(
+                0,
+                self._settings.review_repair_max_attempts
+                - self._review_repair_attempt_count,
+            ),
+            "repair_format_attempt_count": self._repair_format_attempt_count,
+            "repair_contract_attempt_count": self._repair_contract_attempt_count,
+            "repair_evidence_attempt_count": self._repair_evidence_attempt_count,
+            "final_submit_attempt_count": self._final_submit_attempt_count,
+            "repair_succeeded_count": self._review_repair_succeeded_count,
+            "final_published_count": self._final_published_count,
+            "final_risk_finding_count": sum(
+                issue.severity.value in {"critical", "warning"}
+                for issue in (response.report.issues if response is not None else [])
+            ),
+            "evidence_complete_count": sum(
+                self._issue_evidence_complete(issue)
+                for issue in (response.report.issues if response is not None else [])
+            ),
+            "evidence_validated_count": self._verifier_accepted_count,
+            "finding_contract_version": self._settings.finding_contract_version,
+            "semantic_verifier_required": self._semantic_verifier_required,
+            "semantic_model_call_count": self._semantic_model_call_count,
+            "semantic_investigation_call_count": self._semantic_investigation_call_count,
+            "semantic_investigation_tool_call_count": (
+                self._semantic_investigation_tool_call_count
+            ),
+            "semantic_accepted_count": self._semantic_accepted_count,
+            "semantic_rejected_count": self._semantic_rejected_count,
+            "semantic_needs_revision_count": self._semantic_needs_revision_count,
+            "semantic_unresolved_count": self._semantic_unresolved_count,
+            "report_ready": bool(
+                response.report_ready if response is not None else False
+            ),
+            "external_publish_status": (
+                response.external_publish_status
+                if response is not None
+                else "not_requested"
+            ),
+            "external_published_count": int(
+                response is not None
+                and response.external_publish_status == "published"
+            ),
+            "finding_run_status": (
+                response.completion_status if response is not None else ""
+            ),
             "review_outcome": self._review_outcome,
             "integrity_failures": self._integrity_failure_codes,
             "integrity_failure_details": self._integrity_failure_details,
@@ -2763,26 +8900,88 @@ class AgentOrchestrator:
     def _record_finding_funnel(self, response: ReviewResponse) -> None:
         """Emit one mutually inspectable finding funnel after all output gates."""
 
+        final_evidence_complete_count = sum(
+            self._issue_evidence_complete(issue) for issue in response.report.issues
+        )
+        final_risk_count = sum(
+            issue.severity.value in {"critical", "warning"}
+            for issue in response.report.issues
+        )
+        self._final_published_count = len(response.report.issues)
         payload = {
+            "logical_candidate_count": self._verifier_candidate_count,
             "submitted_finding_count": self._submitted_issue_count,
+            "submitted_attempt_count": self._submitted_attempt_count,
+            "provider_attempt_count": self._provider_attempt_count,
             "no_finding_run_count": int(self._submitted_issue_count == 0),
             "non_risk_not_routed_count": self._non_risk_issue_count,
             "pre_verifier_rejected_count": max(
                 0, self._policy_rejected_issue_count
             ),
+            "policy_passed_count": self._policy_passed_issue_count,
+            "policy_rejected_count": self._policy_rejected_issue_count,
             "risk_candidate_count": self._risk_candidate_count,
+            "integrity_checked_count": self._verifier_candidate_count,
+            "integrity_verified_count": self._verifier_accepted_count,
+            "integrity_needs_repair_count": self._integrity_needs_repair_count,
+            "integrity_invalid_count": self._integrity_invalid_count,
             "deterministic_rejected_count": self._deterministic_rejected_count,
+            "repair_attempted_count": self._review_repair_attempt_count,
+            "repair_succeeded_count": self._review_repair_succeeded_count,
+            "evidence_complete_count": final_evidence_complete_count,
+            "evidence_validated_count": self._verifier_accepted_count,
             "review_outcome": self._review_outcome,
-            "final_risk_finding_count": sum(
-                issue.severity.value in {"critical", "warning"}
-                for issue in response.report.issues
-            ),
+            "final_published_count": len(response.report.issues),
+            "final_risk_finding_count": final_risk_count,
             "final_effective_issue_count": len(response.report.issues),
+            "run_status": response.completion_status,
+            "investigation_ready": bool(response.investigation_ready),
+            "submission_received": bool(response.submission_received),
+            "review_complete": bool(response.review_complete),
+            "delivery_complete": bool(response.delivery_complete),
+            "finding_contract_version": self._settings.finding_contract_version,
+            "semantic_verifier_required": self._semantic_verifier_required,
+            "semantic_model_call_count": self._semantic_model_call_count,
+            "semantic_investigation_call_count": self._semantic_investigation_call_count,
+            "semantic_investigation_tool_call_count": (
+                self._semantic_investigation_tool_call_count
+            ),
+            "semantic_accepted_count": self._semantic_accepted_count,
+            "semantic_rejected_count": self._semantic_rejected_count,
+            "semantic_needs_revision_count": self._semantic_needs_revision_count,
+            "semantic_unresolved_count": self._semantic_unresolved_count,
+            "report_ready": bool(response.report_ready),
+            "external_publish_status": response.external_publish_status,
+            "external_published_count": int(
+                response.external_publish_status == "published"
+            ),
         }
         self._record_event(
             EventType.FINDING_FUNNEL_COMPLETED,
             "finding_funnel",
             payload,
+        )
+
+    @staticmethod
+    def _issue_evidence_complete(issue: Any) -> int:
+        """Count only explicit final-result role evidence, not mere locations."""
+
+        if not getattr(issue, "is_structured_hypothesis", False):
+            return 0
+        gaps = canonical_contract_gaps(issue)
+        return int(
+            not any(
+                gap.code
+                in {
+                    "evidence_incomplete",
+                    "evidence_binding_missing",
+                    "support_reference_missing",
+                    "support_reference_unresolved",
+                    "support_reference_undelivered",
+                    "role_claim_missing",
+                }
+                for gap in gaps
+            )
         )
 
     @staticmethod
@@ -2801,6 +9000,7 @@ class AgentOrchestrator:
             "tool_name": tool_name,
             "message": message,
             "recommended_next_step": recommendation,
+            "recoverable": True,
         }
 
     @staticmethod
@@ -2818,12 +9018,44 @@ class AgentOrchestrator:
         """Append feedback entries with iteration metadata, maintain ring-buffer window
         and digest index for folded-summary injection."""
         self._verifier_tool_evidence.extend(
-            capture_verifier_tool_evidence(entries, self._workspace_root)
+            capture_verifier_tool_evidence(
+                entries,
+                self._workspace_root,
+                snapshot_id=self._evidence_snapshot_id,
+                revision=self._evidence_revision,
+            )
         )
         window = max(1, self._settings.feedback_window_iterations)
         for entry in entries:
             tool_call = entry.get("tool_call", {})
             result = entry.get("result")
+            function = tool_call.get("function") if isinstance(tool_call, dict) else {}
+            tool_name = (
+                str(function.get("name", "")).strip()
+                if isinstance(function, dict)
+                else ""
+            )
+            if (
+                isinstance(result, ToolResult)
+                and result.ok
+                and tool_name
+                and tool_name
+                in {
+                    "read_file",
+                    "grep_files",
+                    "glob_files",
+                    "list_dir",
+                    "get_changed_context",
+                    "changed_context",
+                    "find_symbol_context",
+                    "symbol_context",
+                }
+                and not (
+                    isinstance(result.data, dict)
+                    and result.data.get("dedup_hit") is True
+                )
+            ):
+                self._iteration_progress = True
             enriched = {
                 "iteration": self._iteration,
                 "tool_call": tool_call,
@@ -2844,6 +9076,77 @@ class AgentOrchestrator:
         self._tool_feedback = [
             item for item in self._tool_feedback if item.get("iteration", 0) >= min_keep
         ]
+
+    def _observed_tool_evidence(self, state: ContextState) -> list[dict[str, Any]]:
+        """Return only tool observations already recorded in the delivered ledger."""
+
+        ledger = ledger_from_sources(
+            existing_payload=state.evidence_ledger,
+            snapshot_id=self._evidence_snapshot_id,
+            revision=self._evidence_revision,
+        )
+        delivered_call_ids = {
+            record.source_tool_call_id.strip()
+            for record in ledger.records
+            if record.source_tool_call_id.strip()
+        }
+        return [
+            entry
+            for entry in self._verifier_tool_evidence
+            if str(entry.get("tool_call_id", "")).strip() in delivered_call_ids
+        ]
+
+    def _refresh_evidence_ledger(self, state: ContextState) -> None:
+        """Rebuild the catalog after an exploration repair turn delivers tools."""
+
+        state.evidence_ledger = ledger_from_sources(
+            existing_payload=state.evidence_ledger,
+            tool_evidence=self._verifier_tool_evidence,
+            snapshot_id=self._evidence_snapshot_id,
+            revision=self._evidence_revision,
+        ).to_payload()
+        self._publish_evidence_catalog(state)
+
+    def _publish_evidence_catalog(self, state: ContextState) -> None:
+        """Expose and persist one exact delivered-evidence snapshot."""
+
+        self._live_evidence_catalog[:] = state.evidence_ledger
+        digest = hashlib.sha256(
+            _json.dumps(
+                state.evidence_ledger,
+                ensure_ascii=True,
+                sort_keys=True,
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        if digest == self._evidence_catalog_digest:
+            return
+        self._evidence_catalog_digest = digest
+        self._record_event(
+            EventType.EVIDENCE_LEDGER_UPDATED,
+            "evidence",
+            {
+                "snapshot_id": self._evidence_snapshot_id,
+                "revision": self._evidence_revision,
+                "delivered_count": len(state.evidence_ledger),
+                "evidence_ids": [
+                    str(item.get("evidence_id", ""))
+                    for item in state.evidence_ledger
+                    if str(item.get("evidence_id", "")).strip()
+                ],
+            },
+        )
+        if self._run_journal is not None:
+            self._run_journal.append(
+                PendingRunJournalEntry(
+                    type="evidence_catalog",
+                    payload={
+                        "snapshot_id": self._evidence_snapshot_id,
+                        "revision": self._evidence_revision,
+                        "records": state.evidence_ledger,
+                    },
+                )
+            )
 
     @staticmethod
     def _compute_feedback_digest(tool_call: dict[str, Any]) -> str:
@@ -2975,10 +9278,16 @@ class AgentOrchestrator:
         self._model_response_journal_writes += 1
         return entry.id
 
-    def _persist_draft_finding_calls(self, plan: AnalysisPlan) -> None:
+    def _persist_draft_finding_calls(
+        self,
+        plan: AnalysisPlan,
+        *,
+        state: ContextState | None = None,
+    ) -> None:
         """Journal runtime-bound drafts before making them available in memory."""
 
         for draft_input in plan.draft_finding_calls:
+            created_before = self._draft_findings_created
             draft = self._persist_one_draft_finding(
                 draft_input,
                 source_response_id=(
@@ -2990,8 +9299,102 @@ class AgentOrchestrator:
                 "record_draft_finding",
                 {
                     "ok": True,
-                    "recorded": True,
+                    "recorded": self._draft_findings_created > created_before,
                     "draft_id": draft.id,
+                },
+            )
+        for update in plan.draft_finding_updates:
+            unknown_evidence_refs = self._unknown_draft_evidence_refs(update, state)
+            if unknown_evidence_refs:
+                self._model_conversation.add_tool_result_for_name(
+                    "update_draft_finding",
+                    {
+                        "ok": False,
+                        "updated": False,
+                        "error_type": "reference_not_delivered",
+                        "draft_id": update.draft_id,
+                        "unknown_evidence_refs": unknown_evidence_refs,
+                    },
+                )
+                self._record_event(
+                    EventType.DECISION,
+                    "draft_finding_state",
+                    {
+                        "iteration": self._iteration,
+                        "draft_id": update.draft_id,
+                        "status": update.status,
+                        "changed": False,
+                        "reason": "reference_not_delivered",
+                        "unknown_evidence_refs": unknown_evidence_refs,
+                    },
+                )
+                continue
+            transition = self._draft_finding_store.update(
+                update,
+                iteration=self._iteration,
+            )
+            if transition is None:
+                self._model_conversation.add_tool_result_for_name(
+                    "update_draft_finding",
+                    {
+                        "ok": False,
+                        "updated": False,
+                        "error_type": "unknown_draft_id",
+                        "draft_id": update.draft_id,
+                    },
+                )
+                self._record_event(
+                    EventType.DECISION,
+                    "draft_finding_state",
+                    {
+                        "iteration": self._iteration,
+                        "draft_id": update.draft_id,
+                        "status": update.status,
+                        "changed": False,
+                        "reason": "unknown_draft_id",
+                    },
+                )
+                continue
+            transition_state, changed = transition
+            if changed:
+                self._draft_state_transition_count += 1
+                self._iteration_progress = True
+                self._iteration_state_action_applied = True
+            if self._run_journal is not None:
+                self._run_journal.append(
+                    PendingRunJournalEntry(
+                        type="draft_finding_state",
+                        payload=DraftFindingStateJournalPayload(
+                            draft_id=transition_state.draft_id,
+                            status=transition_state.status,
+                            reason=transition_state.reason,
+                            missing_checks=transition_state.missing_checks,
+                            evidence_refs=transition_state.evidence_refs,
+                            iteration=self._iteration,
+                        ).model_dump(mode="json"),
+                    )
+                )
+            self._record_event(
+                EventType.DECISION,
+                "draft_finding_state",
+                {
+                    "iteration": self._iteration,
+                    "draft_id": transition_state.draft_id,
+                    "status": transition_state.status,
+                    "changed": changed,
+                    "reason": transition_state.reason,
+                    "missing_checks": list(transition_state.missing_checks),
+                    "evidence_refs": list(transition_state.evidence_refs),
+                },
+            )
+            self._model_conversation.add_tool_result_for_name(
+                "update_draft_finding",
+                {
+                    "ok": True,
+                    "updated": True,
+                    "changed": changed,
+                    "draft_id": transition_state.draft_id,
+                    "status": transition_state.status,
                 },
             )
         if (
@@ -3012,6 +9415,37 @@ class AgentOrchestrator:
             origin="visible_content_recovery",
         )
         self._draft_findings_from_visible_content += 1
+
+    def _unknown_draft_evidence_refs(
+        self,
+        update: DraftFindingUpdateInput,
+        state: ContextState | None,
+    ) -> list[str]:
+        """Return draft refs that are not exact ids in delivered evidence."""
+
+        if state is None or not update.evidence_refs:
+            return []
+        available: set[str] = set()
+        for record in state.evidence_ledger:
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("lifecycle", "delivered")).strip() != "delivered":
+                continue
+            if bool(record.get("truncated", False)):
+                continue
+            artifact_id = str(record.get("artifact_id", "")).strip()
+            if artifact_id:
+                available.add(artifact_id)
+            aliases = record.get("aliases", [])
+            if isinstance(aliases, list):
+                available.update(
+                    str(alias).strip() for alias in aliases if str(alias).strip()
+                )
+        return [
+            reference
+            for reference in update.evidence_refs
+            if reference.strip() not in available
+        ]
 
     def _persist_one_draft_finding(
         self,
@@ -3034,6 +9468,26 @@ class AgentOrchestrator:
             draft_input,
             source_response_id=source_response_id,
         )
+        duplicate = self._draft_finding_store.find_duplicate(draft)
+        if duplicate is not None:
+            state = self._draft_finding_store.get_state(duplicate.id)
+            if state is not None:
+                self._draft_finding_store.add_if_new(draft)
+            self._record_event(
+                EventType.DECISION,
+                "draft_finding",
+                {
+                    "iteration": self._iteration,
+                    "draft_id": duplicate.id,
+                    "source_response_id": duplicate.source_response_id,
+                    "file": duplicate.file,
+                    "line": duplicate.line,
+                    "symbol": duplicate.symbol,
+                    "origin": origin,
+                    "duplicate": True,
+                },
+            )
+            return duplicate
         self._run_journal.append(
             PendingRunJournalEntry(
                 type="draft_finding",
@@ -3042,6 +9496,8 @@ class AgentOrchestrator:
         )
         self._draft_finding_store.add(draft)
         self._draft_findings_created += 1
+        self._iteration_state_action_applied = True
+        self._iteration_progress = True
         self._record_event(
             EventType.DECISION,
             "draft_finding",
@@ -3091,6 +9547,7 @@ class AgentOrchestrator:
             parsed_arguments = {"value": parsed_arguments}
         redacted_arguments = redact_sensitive_values(parsed_arguments)
         redacted_result = redact_sensitive_values(result.model_dump(mode="json"))
+        synthetic_runtime_action = bool(raw_call.get("synthetic_runtime_action"))
         call_id = str(raw_call.get("id", "")).strip()
         if not call_id:
             signature = _json.dumps(
@@ -3103,10 +9560,22 @@ class AgentOrchestrator:
                 f"runtime_{plan.source_response_id}_"
                 f"{hashlib.sha256(signature.encode('utf-8')).hexdigest()[:12]}"
             )
-        if str(raw_call.get("id", "")).strip():
+        if str(raw_call.get("id", "")).strip() and not synthetic_runtime_action:
+            # Provider ids are the only valid transcript join key.  Never
+            # fall back to tool name when a provider id was supplied: mixed
+            # save/revise responses would otherwise pair the wrong result.
             self._model_conversation.add_tool_result(call_id, result)
-        else:
+        elif not str(raw_call.get("id", "")).strip():
             self._model_conversation.add_tool_result_for_name(tool_name, result)
+        redacted_result["runtime_action_binding"] = {
+            "mode": (
+                "synthetic_runtime_action"
+                if synthetic_runtime_action
+                else "provider_action_id"
+            ),
+            "provider_call_id": "" if synthetic_runtime_action else call_id,
+            "ordinal": raw_call.get("provider_action_ordinal"),
+        }
         if self._run_journal is None or not plan.source_response_id:
             return
         payload = ToolResultJournalPayload(

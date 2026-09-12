@@ -1,0 +1,1988 @@
+{
+  "schema_version": "archived-v3-provider-actions-v1",
+  "provenance": "Exact model_response events and referenced evidence records copied mechanically from archived paid Haystack journals. Responses are never merged. Catalog arrays retain event order; only unrelated records are omitted. This is historical reviewer output, not new model or semantic-quality evidence.",
+  "variants": [
+    {
+      "variant_id": "A-agent-search",
+      "source_journal": "eval/outputs/finding-delivery-python-three-v3-aligned-paid-20260911/run_journals/golden_deepset-ai_haystack_pr12208_reverse_A-agent-search_47515f51-afe6-42cd-b088-f8e1e747c496_journal.jsonl",
+      "source_sha256": "4efdfe0eeecdce4655cff440f6a692fe6056fbe5958ea4caff4a4e6ac15e7516",
+      "model_responses": [
+        {
+          "schema_version": "1.0",
+          "id": "rje_dc921ac4911a4692b6ff421e8585f78f",
+          "seq": 1,
+          "type": "model_response",
+          "run_id": "47515f51-afe6-42cd-b088-f8e1e747c496",
+          "timestamp": "2026-09-10T16:41:08.194095+00:00",
+          "payload": {
+            "iteration": 0,
+            "model": "glm-5.3-flash",
+            "finish_reason": "tool_calls",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_-7271771814181725449",
+                "function": {
+                  "arguments": "{\"file_path\":\"E:\\\\PycharmProjects\\\\MergeWarden-recovered\\\\eval\\\\outputs\\\\finding-delivery-python-three-v3-aligned-paid-20260911\\\\deferred_workspaces\\\\1355b86a\\\\repo\\\\haystack\\\\components\\\\converters\\\\json.py\",\"offset\":150,\"limit\":90}",
+                  "name": "read_file"
+                },
+                "type": "function",
+                "index": 0
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 9227,
+              "completion_tokens": 138,
+              "total_tokens": 9365,
+              "reasoning_tokens": 60
+            }
+          }
+        },
+        {
+          "schema_version": "1.0",
+          "id": "rje_5382a1e8086044768dc767082cc89809",
+          "seq": 4,
+          "type": "model_response",
+          "run_id": "47515f51-afe6-42cd-b088-f8e1e747c496",
+          "timestamp": "2026-09-10T16:41:22.704880+00:00",
+          "payload": {
+            "iteration": 1,
+            "model": "glm-5.3-flash",
+            "finish_reason": "tool_calls",
+            "content": "The change replaces a safe `.get(\"file_path\", \"unknown\")` with direct `source.meta[\"file_path\"]` indexing in all three error-logging paths. If a `ByteStream` lacks `file_path` in its meta (e.g. created via `ByteStream.from_string`, as in the component's own docstring example), these \"skip and continue\" paths now raise `KeyError` instead of logging a warning — turning a per-source skip into a whole-pipeline crash inside `run()`.",
+            "tool_calls": [
+              {
+                "id": "call_-7271798511698443534",
+                "function": {
+                  "arguments": "{\"finding\":{\"anchor\": {\"file\": \"haystack/components/converters/json.py\", \"line\": 194, \"symbol_id\": \"JSONConverter._get_content_and_meta\"}, \"description\": \"Replacing source.meta.get(\\\"file_path\\\", \\\"unknown\\\") with source.meta[\\\"file_path\\\"] in the UnicodeError logging path raises KeyError when the ByteStream meta has no \\\"file_path\\\" key (e.g. a ByteStream created with ByteStream.from_string, as in the component's own docstring example). The intended per-source skip (log warning, return []) now propagates an unhandled exception out of _get_content_and_meta and aborts the entire run() call instead of skipping one bad source.\", \"evidence_refs\": [\"ev_6359e52529cdd4e5af17ea8b\", \"ev_392f27cfb76acd34732633fc\"], \"severity\": \"critical\", \"suggestion\": \"Restore the safe default, e.g. source.meta.get(\\\"file_path\\\", \\\"unknown\\\"), or use source.meta.get(\\\"file_path\\\") with a fallback in the log message.\", \"related_locations\": [{\"file\": \"haystack/components/converters/json.py\", \"line\": 207}, {\"file\": \"haystack/components/converters/json.py\", \"line\": 219}]}}",
+                  "name": "save_finding"
+                },
+                "type": "function",
+                "index": 0
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 10952,
+              "completion_tokens": 538,
+              "total_tokens": 11490,
+              "reasoning_tokens": 142
+            }
+          }
+        },
+        {
+          "schema_version": "1.0",
+          "id": "rje_4830c32fba9545b7ae5dc0cad7eb59d5",
+          "seq": 7,
+          "type": "model_response",
+          "run_id": "47515f51-afe6-42cd-b088-f8e1e747c496",
+          "timestamp": "2026-09-10T16:41:31.709170+00:00",
+          "payload": {
+            "iteration": 2,
+            "model": "glm-5.3-flash",
+            "finish_reason": "tool_calls",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_-7271774322442625090",
+                "function": {
+                  "arguments": "{\"finding\":{\"anchor\": {\"file\": \"haystack/components/converters/json.py\", \"line\": 194, \"symbol_id\": \"JSONConverter._get_content_and_meta\"}, \"description\": \"Replacing source.meta.get(\\\"file_path\\\", \\\"unknown\\\") with direct indexing source.meta[\\\"file_path\\\"] raises an unhandled KeyError for ByteStream sources without a \\\"file_path\\\" meta key (e.g. ByteStream.from_string), converting what was previously a graceful skip-with-warning into a crash inside the error handling path. The same regression applies at lines 207 and 219.\", \"evidence_refs\": [\"ev_6359e52529cdd4e5af17ea8b\", \"ev_c8ac415f76ac5e10a47d34bd\", \"ev_9e96c8f16e8770429b467864\", \"ev_bef315c2e3c9719d6eb126ab\"], \"severity\": \"warning\", \"suggestion\": \"Keep a safe fallback for the log message, e.g. source.meta.get(\\\"file_path\\\", \\\"unknown\\\"), or guard with \\\"file_path\\\" in source.meta.\", \"related_locations\": [{\"file\": \"haystack/components/converters/json.py\", \"line\": 207}, {\"file\": \"haystack/components/converters/json.py\", \"line\": 219}]}}",
+                  "name": "save_finding"
+                },
+                "type": "function",
+                "index": 0
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 7330,
+              "completion_tokens": 305,
+              "total_tokens": 7635,
+              "reasoning_tokens": 0
+            }
+          }
+        },
+        {
+          "schema_version": "1.0",
+          "id": "rje_e56c927a7d3343beafd2bbe968943d2e",
+          "seq": 9,
+          "type": "model_response",
+          "run_id": "47515f51-afe6-42cd-b088-f8e1e747c496",
+          "timestamp": "2026-09-10T16:41:40.468793+00:00",
+          "payload": {
+            "iteration": 2,
+            "model": "glm-5.3-flash",
+            "finish_reason": "tool_calls",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_-7271792361305276005",
+                "function": {
+                  "arguments": "{\"finding\":{\"anchor\": {\"end_line\": 194, \"file\": \"haystack/components/converters/json.py\", \"line\": 194, \"symbol_id\": \"JSONConverter._get_content_and_meta\"}, \"description\": \"The change replaces source.meta.get(\\\"file_path\\\", \\\"unknown\\\") with direct source.meta[\\\"file_path\\\"] in all three warning paths of _get_content_and_meta. ByteStream sources are not guaranteed to carry a \\\"file_path\\\" meta key (e.g. ByteStream.from_string(...) as shown in the component's own docstring example has no meta). If such a source fails decoding, jq filtering, or JSON parsing, the logger.warning call now raises KeyError, turning a previously tolerated skip-and-log into an unhandled exception that aborts run() instead of returning [].\", \"evidence_refs\": [\"ev_6359e52529cdd4e5af17ea8b\", \"ev_c8ac415f76ac5e10a47d34bd\", \"ev_9e96c8f16e8770429b467864\", \"ev_b09a31573d3ee1512e3a0c5d\"], \"related_locations\": [{\"end_line\": 210, \"file\": \"haystack/components/converters/json.py\", \"line\": 204}, {\"end_line\": 222, \"file\": \"haystack/components/converters/json.py\", \"line\": 216}], \"severity\": \"critical\", \"suggestion\": \"Keep a safe fallback, e.g. source.meta.get(\\\"file_path\\\", \\\"unknown\\\"), or explicitly normalize/validate the \\\"file_path\\\" meta key for every source before this method logs.\"}}",
+                  "name": "save_finding"
+                },
+                "type": "function",
+                "index": 0
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 7330,
+              "completion_tokens": 413,
+              "total_tokens": 7743,
+              "reasoning_tokens": 43
+            }
+          }
+        }
+      ],
+      "referenced_evidence_ids": [
+        "ev_392f27cfb76acd34732633fc",
+        "ev_6359e52529cdd4e5af17ea8b",
+        "ev_9e96c8f16e8770429b467864",
+        "ev_b09a31573d3ee1512e3a0c5d",
+        "ev_bef315c2e3c9719d6eb126ab",
+        "ev_c8ac415f76ac5e10a47d34bd"
+      ],
+      "referenced_catalog_events": [
+        {
+          "id": "rje_db90f94515a44ec39af24c500ccb2791",
+          "seq": 2,
+          "type": "evidence_catalog",
+          "records": [
+            {
+              "artifact_id": "4924bf174937ec6ddaf1faf5",
+              "evidence_id": "ev_b09a31573d3ee1512e3a0c5d",
+              "snapshot_id": "8b35749616eb30d3db090335",
+              "revision": "4d9082be92d11d11e82c14030073ee70c64fdb53",
+              "path": "haystack/components/converters/json.py",
+              "side": "new",
+              "start_line": 154,
+              "end_line": 233,
+              "content": "154:         Serializes the component to a dictionary.\n155: \n156:         :returns:\n157:             Dictionary with serialized data.\n158:         \"\"\"\n159:         return default_to_dict(\n160:             self,\n161:             jq_schema=self._jq_schema,\n162:             content_key=self._content_key,\n163:             extra_meta_fields=self._meta_fields,\n164:             store_full_path=self._store_full_path,\n165:         )\n166: \n167:     @classmethod\n168:     def from_dict(cls, data: dict[str, Any]) -> \"JSONConverter\":\n169:         \"\"\"\n170:         Deserializes the component from a dictionary.\n171: \n172:         :param data:\n173:             Dictionary to deserialize from.\n174:         :returns:\n175:             Deserialized component.\n176:         \"\"\"\n177:         return default_from_dict(cls, data)\n178: \n179:     def _get_content_and_meta(self, source: ByteStream) -> list[tuple[str, dict[str, Any]]]:\n180:         \"\"\"\n181:         Utility function to extract text and metadata from a JSON file.\n182: \n183:         :param source:\n184:             UTF-8 byte stream.\n185:         :returns:\n186:             Collection of text and metadata dict tuples, each corresponding\n187:             to a different document.\n188:         \"\"\"\n189:         try:\n190:             file_content = source.data.decode(\"utf-8\")\n191:         except UnicodeError as exc:\n192:             logger.warning(\n193:                 \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n194:                 source=source.meta[\"file_path\"],\n195:                 error=exc,\n196:             )\n197:             return []\n198: \n199:         meta_fields = self._meta_fields or set()\n200: \n201:         if self._compiled_filter is not None:\n202:             try:\n203:                 objects = list(self._compiled_filter.input_text(file_content))\n204:             except Exception as exc:\n205:                 logger.warning(\n206:                     \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n207:                     source=source.meta[\"file_path\"],\n208:                     error=exc,\n209:                 )\n210:                 return []\n211:         else:\n212:             # We just load the whole file as JSON if the user didn't provide a jq filter.\n213:             # We put it in a list even if it's not to ease handling it later on.\n214:             try:\n215:                 objects = [json.loads(file_content)]\n216:             except json.JSONDecodeError as exc:\n217:                 logger.warning(\n218:                     \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n219:                     source=source.meta[\"file_path\"],\n220:                     error=exc,\n221:                 )\n222:                 return []\n223: \n224:         result = []\n225:         if self._content_key is not None:\n226:             for obj in objects:\n227:                 if not isinstance(obj, dict):\n228:                     logger.warning(\"Expected a dictionary but got {obj}. Skipping it.\", obj=obj)\n229:                     continue\n230:                 if self._content_key not in obj:\n231:                     logger.warning(\n232:                         \"'{content_key}' not found in {obj}. Skipping it.\", content_key=self._content_key, obj=obj\n233:                     )",
+              "content_hash": "f9f6fe2c2de6bcf8b589541413dcae9813defca45f9a45b223faa700ec816a6c",
+              "source_type": "read_file",
+              "source_tool_call_id": "prefetch-read-file-0",
+              "delivery_request_id": "prefetch-read-file-0",
+              "lifecycle": "delivered",
+              "displayed_ranges": [
+                {
+                  "start_line": 154,
+                  "end_line": 233
+                }
+              ],
+              "displayed_line_numbers": [
+                154,
+                155,
+                156,
+                157,
+                158,
+                159,
+                160,
+                161,
+                162,
+                163,
+                164,
+                165,
+                166,
+                167,
+                168,
+                169,
+                170,
+                171,
+                172,
+                173,
+                174,
+                175,
+                176,
+                177,
+                178,
+                179,
+                180,
+                181,
+                182,
+                183,
+                184,
+                185,
+                186,
+                187,
+                188,
+                189,
+                190,
+                191,
+                192,
+                193,
+                194,
+                195,
+                196,
+                197,
+                198,
+                199,
+                200,
+                201,
+                202,
+                203,
+                204,
+                205,
+                206,
+                207,
+                208,
+                209,
+                210,
+                211,
+                212,
+                213,
+                214,
+                215,
+                216,
+                217,
+                218,
+                219,
+                220,
+                221,
+                222,
+                223,
+                224,
+                225,
+                226,
+                227,
+                228,
+                229,
+                230,
+                231,
+                232,
+                233
+              ],
+              "body_hash": "f9f6fe2c2de6bcf8b589541413dcae9813defca45f9a45b223faa700ec816a6c",
+              "truncated": false,
+              "scope": "file_read",
+              "aliases": [
+                "4924bf174937ec6ddaf1faf5"
+              ]
+            },
+            {
+              "artifact_id": "9740c38ab10503a380a90fbc",
+              "evidence_id": "ev_392f27cfb76acd34732633fc",
+              "snapshot_id": "8b35749616eb30d3db090335",
+              "revision": "4d9082be92d11d11e82c14030073ee70c64fdb53",
+              "path": "haystack/components/converters/json.py",
+              "side": "new",
+              "start_line": 1,
+              "end_line": 297,
+              "content": "# SPDX-FileCopyrightText: 2022-present deepset GmbH <info@deepset.ai>\n#\n# SPDX-License-Identifier: Apache-2.0\n\nimport json\nimport os\nfrom pathlib import Path\nfrom typing import Any, Literal\n\nfrom haystack import component, default_from_dict, default_to_dict, logging\nfrom haystack.components.converters.utils import get_bytestream_from_source, normalize_metadata\nfrom haystack.dataclasses import ByteStream, Document\nfrom haystack.lazy_imports import LazyImport\n\nlogger = logging.getLogger(__name__)\n\nwith LazyImport(\"Run 'pip install jq'\") as jq_import:\n    import jq\n\n\n@component\nclass JSONConverter:\n    \"\"\"\n    Converts one or more JSON files into a text document.\n\n    ### Usage examples\n\n    ```python\n    import json\n\n    from haystack.components.converters import JSONConverter\n    from haystack.dataclasses import ByteStream\n\n    source = ByteStream.from_string(json.dumps({\"text\": \"This is the content of my document\"}))\n\n    converter = JSONConverter(content_key=\"text\")\n    results = converter.run(sources=[source])\n    documents = results[\"documents\"]\n    print(documents[0].content)\n    # 'This is the content of my document'\n    ```\n\n    Optionally, you can also provide a `jq_schema` string to filter the JSON source files and `extra_meta_fields`\n    to extract from the filtered data:\n\n    ```python\n    import json\n\n    from haystack.components.converters import JSONConverter\n    from haystack.dataclasses import ByteStream\n\n    data = {\n        \"laureates\": [\n            {\n                \"firstname\": \"Enrico\",\n                \"surname\": \"Fermi\",\n                \"motivation\": \"for his demonstrations of the existence of new radioactive elements produced \"\n                \"by neutron irradiation, and for his related discovery of nuclear reactions brought about by\"\n                \" slow neutrons\",\n            },\n            {\n                \"firstname\": \"Rita\",\n                \"surname\": \"Levi-Montalcini\",\n                \"motivation\": \"for their discoveries of growth factors\",\n            },\n        ],\n    }\n    source = ByteStream.from_string(json.dumps(data))\n    converter = JSONConverter(\n        jq_schema=\".laureates[]\", content_key=\"motivation\", extra_meta_fields={\"firstname\", \"surname\"}\n    )\n\n    results = converter.run(sources=[source])\n    documents = results[\"documents\"]\n    print(documents[0].content)\n    # 'for his demonstrations of the existence of new radioactive elements produced by\n    # neutron irradiation, and for his related discovery of nuclear reactions brought\n    # about by slow neutrons'\n\n    print(documents[0].meta)\n    # {'firstname': 'Enrico', 'surname': 'Fermi'}\n\n    print(documents[1].content)\n    # 'for their discoveries of growth factors'\n\n    print(documents[1].meta)\n    # {'firstname': 'Rita', 'surname': 'Levi-Montalcini'}\n    ```\n\n    \"\"\"\n\n    def __init__(\n        self,\n        jq_schema: str | None = None,\n        content_key: str | None = None,\n        extra_meta_fields: set[str] | Literal[\"*\"] | None = None,\n        store_full_path: bool = False,\n    ) -> None:\n        \"\"\"\n        Creates a JSONConverter component.\n\n        An optional `jq_schema` can be provided to extract nested data in the JSON source files.\n        See the [official jq documentation](https://jqlang.github.io/jq/) for more info on the filters syntax.\n        If `jq_schema` is not set, whole JSON source files will be used to extract content.\n\n        Optionally, you can provide a `content_key` to specify which key in the extracted object must\n        be set as the document's content.\n\n        If both `jq_schema` and `content_key` are set, the component will search for the `content_key` in\n        the JSON object extracted by `jq_schema`. If the extracted data is not a JSON object, it will be skipped.\n\n        If only `jq_schema` is set, the extracted data must be a scalar value. If it's a JSON object or array,\n        it will be skipped.\n\n        If only `content_key` is set, the source JSON file must be a JSON object, else it will be skipped.\n\n        `extra_meta_fields` can either be set to a set of strings or a literal `\"*\"` string.\n        If it's a set of strings, it must specify fields in the extracted objects that must be set in\n        the extracted documents. If a field is not found, the meta value will be `None`.\n        If set to `\"*\"`, all fields that are not `content_key` found in the filtered JSON object will\n        be saved as metadata.\n\n        Initialization will fail if neither `jq_schema` nor `content_key` are set.\n\n        :param jq_schema:\n            Optional jq filter string to extract content.\n            If not specified, whole JSON object will be used to extract information.\n        :param content_key:\n            Optional key to extract document content.\n            If `jq_schema` is specified, the `content_key` will be extracted from that object.\n        :param extra_meta_fields:\n            An optional set of meta keys to extract from the content.\n            If `jq_schema` is specified, all keys will be extracted from that object.\n        :param store_full_path:\n            If True, the full path of the file is stored in the metadata of the document.\n            If False, only the file name is stored.\n        \"\"\"\n        self._compiled_filter = None\n        if jq_schema:\n            jq_import.check()\n            self._compiled_filter = jq.compile(jq_schema)\n\n        self._jq_schema = jq_schema\n        self._content_key = content_key\n        self._meta_fields = extra_meta_fields\n        self._store_full_path = store_full_path\n\n        if self._compiled_filter is None and self._content_key is None:\n            msg = \"No `jq_schema` nor `content_key` specified. Set either or both to extract data.\"\n            raise ValueError(msg)\n\n    def to_dict(self) -> dict[str, Any]:\n        \"\"\"\n        Serializes the component to a dictionary.\n\n        :returns:\n            Dictionary with serialized data.\n        \"\"\"\n        return default_to_dict(\n            self,\n            jq_schema=self._jq_schema,\n            content_key=self._content_key,\n            extra_meta_fields=self._meta_fields,\n            store_full_path=self._store_full_path,\n        )\n\n    @classmethod\n    def from_dict(cls, data: dict[str, Any]) -> \"JSONConverter\":\n        \"\"\"\n        Deserializes the component from a dictionary.\n\n        :param data:\n            Dictionary to deserialize from.\n        :returns:\n            Deserialized component.\n        \"\"\"\n        return default_from_dict(cls, data)\n\n    def _get_content_and_meta(self, source: ByteStream) -> list[tuple[str, dict[str, Any]]]:\n        \"\"\"\n        Utility function to extract text and metadata from a JSON file.\n\n        :param source:\n            UTF-8 byte stream.\n        :returns:\n            Collection of text and metadata dict tuples, each corresponding\n            to a different document.\n        \"\"\"\n        try:\n            file_content = source.data.decode(\"utf-8\")\n        except UnicodeError as exc:\n            logger.warning(\n                \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n                source=source.meta[\"file_path\"],\n                error=exc,\n            )\n            return []\n\n        meta_fields = self._meta_fields or set()\n\n        if self._compiled_filter is not None:\n            try:\n                objects = list(self._compiled_filter.input_text(file_content))\n            except Exception as exc:\n                logger.warning(\n                    \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n                    source=source.meta[\"file_path\"],\n                    error=exc,\n                )\n                return []\n        else:\n            # We just load the whole file as JSON if the user didn't provide a jq filter.\n            # We put it in a list even if it's not to ease handling it later on.\n            try:\n                objects = [json.loads(file_content)]\n            except json.JSONDecodeError as exc:\n                logger.warning(\n                    \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n                    source=source.meta[\"file_path\"],\n                    error=exc,\n                )\n                return []\n\n        result = []\n        if self._content_key is not None:\n            for obj in objects:\n                if not isinstance(obj, dict):\n                    logger.warning(\"Expected a dictionary but got {obj}. Skipping it.\", obj=obj)\n                    continue\n                if self._content_key not in obj:\n                    logger.warning(\n                        \"'{content_key}' not found in {obj}. Skipping it.\", content_key=self._content_key, obj=obj\n                    )\n                    continue\n\n                text = obj[self._content_key]\n                if isinstance(text, (dict, list)):\n                    logger.warning(\"Expected a scalar value but got {obj}. Skipping it.\", obj=obj)\n                    continue\n\n                meta = {}\n                if meta_fields == \"*\":\n                    meta = {k: v for k, v in obj.items() if k != self._content_key}\n                else:\n                    for field in meta_fields:\n                        meta[field] = obj.get(field, None)\n                result.append((text, meta))\n        else:\n            for obj in objects:\n                if isinstance(obj, (dict, list)):\n                    logger.warning(\"Expected a scalar value but got {obj}. Skipping it.\", obj=obj)\n                    continue\n                result.append((str(obj), {}))\n\n        return result\n\n    @component.output_types(documents=list[Document])\n    def run(\n        self, sources: list[str | Path | ByteStream], meta: dict[str, Any] | list[dict[str, Any]] | None = None\n    ) -> dict[str, Any]:\n        \"\"\"\n        Converts a list of JSON files to documents.\n\n        :param sources:\n            A list of file paths or ByteStream objects.\n        :param meta:\n            Optional metadata to attach to the documents.\n            This value can be either a list of dictionaries or a single dictionary.\n            If it's a single dictionary, its content is added to the metadata of all produced documents.\n            If it's a list, the length of the list must match the number of sources.\n            If `sources` contain ByteStream objects, their `meta` will be added to the output documents.\n\n        :returns:\n            A dictionary with the following keys:\n            - `documents`: A list of created documents.\n        \"\"\"\n        documents = []\n        meta_list = normalize_metadata(meta=meta, sources_count=len(sources))\n\n        for source, metadata in zip(sources, meta_list, strict=True):\n            try:\n                bytestream = get_bytestream_from_source(source)\n            except Exception as exc:\n                logger.warning(\"Could not read {source}. Skipping it. Error: {error}\", source=source, error=exc)\n                continue\n\n            data = self._get_content_and_meta(bytestream)\n\n            for text, extra_meta in data:\n                merged_metadata = {**bytestream.meta, **metadata, **extra_meta}\n\n                if not self._store_full_path and (file_path := bytestream.meta.get(\"file_path\")):\n                    merged_metadata[\"file_path\"] = os.path.basename(file_path)\n                document = Document(content=text, meta=merged_metadata)\n                documents.append(document)\n\n        return {\"documents\": documents}\n",
+              "content_hash": "f5e795bdb32c102213c6d3ddff75aec2befb5431835e1ee0d8f6f655eeb5309b",
+              "source_type": "file_context",
+              "source_tool_call_id": "",
+              "delivery_request_id": "",
+              "lifecycle": "delivered",
+              "displayed_ranges": [
+                {
+                  "start_line": 1,
+                  "end_line": 297
+                }
+              ],
+              "displayed_line_numbers": [],
+              "body_hash": "f5e795bdb32c102213c6d3ddff75aec2befb5431835e1ee0d8f6f655eeb5309b",
+              "truncated": false,
+              "scope": "prompt_file",
+              "aliases": [
+                "9740c38ab10503a380a90fbc"
+              ]
+            },
+            {
+              "artifact_id": "diff:haystack/components/converters/json.py:0:191",
+              "evidence_id": "ev_6359e52529cdd4e5af17ea8b",
+              "snapshot_id": "8b35749616eb30d3db090335",
+              "revision": "4d9082be92d11d11e82c14030073ee70c64fdb53",
+              "path": "haystack/components/converters/json.py",
+              "side": "new",
+              "start_line": 191,
+              "end_line": 197,
+              "content": "@@ -191,7 +191,7 @@ class JSONConverter:\n         except UnicodeError as exc:\n             logger.warning(\n                 \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n-                source=source.meta.get(\"file_path\", \"unknown\"),\n+                source=source.meta[\"file_path\"],\n                 error=exc,\n             )\n             return []",
+              "content_hash": "ace007cfc68a47efc646bc0020a2802ef53e53653f8f647fdc3bc621dfaecfb6",
+              "source_type": "git_diff",
+              "source_tool_call_id": "",
+              "delivery_request_id": "",
+              "lifecycle": "delivered",
+              "displayed_ranges": [
+                {
+                  "start_line": 191,
+                  "end_line": 197
+                }
+              ],
+              "displayed_line_numbers": [
+                191,
+                192,
+                193,
+                194,
+                195,
+                196,
+                197
+              ],
+              "body_hash": "ace007cfc68a47efc646bc0020a2802ef53e53653f8f647fdc3bc621dfaecfb6",
+              "truncated": false,
+              "scope": "prompt_diff",
+              "aliases": [
+                "diff:haystack/components/converters/json.py:0:191"
+              ]
+            },
+            {
+              "artifact_id": "diff:haystack/components/converters/json.py:1:204",
+              "evidence_id": "ev_c8ac415f76ac5e10a47d34bd",
+              "snapshot_id": "8b35749616eb30d3db090335",
+              "revision": "4d9082be92d11d11e82c14030073ee70c64fdb53",
+              "path": "haystack/components/converters/json.py",
+              "side": "new",
+              "start_line": 204,
+              "end_line": 210,
+              "content": "@@ -204,7 +204,7 @@ class JSONConverter:\n             except Exception as exc:\n                 logger.warning(\n                     \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n-                    source=source.meta.get(\"file_path\", \"unknown\"),\n+                    source=source.meta[\"file_path\"],\n                     error=exc,\n                 )\n                 return []",
+              "content_hash": "6b594b2e0af830078eec8642f79bf15ddb464050fc15f6e606e145dc23bed2f9",
+              "source_type": "git_diff",
+              "source_tool_call_id": "",
+              "delivery_request_id": "",
+              "lifecycle": "delivered",
+              "displayed_ranges": [
+                {
+                  "start_line": 204,
+                  "end_line": 210
+                }
+              ],
+              "displayed_line_numbers": [
+                204,
+                205,
+                206,
+                207,
+                208,
+                209,
+                210
+              ],
+              "body_hash": "6b594b2e0af830078eec8642f79bf15ddb464050fc15f6e606e145dc23bed2f9",
+              "truncated": false,
+              "scope": "prompt_diff",
+              "aliases": [
+                "diff:haystack/components/converters/json.py:1:204"
+              ]
+            },
+            {
+              "artifact_id": "diff:haystack/components/converters/json.py:2:216",
+              "evidence_id": "ev_9e96c8f16e8770429b467864",
+              "snapshot_id": "8b35749616eb30d3db090335",
+              "revision": "4d9082be92d11d11e82c14030073ee70c64fdb53",
+              "path": "haystack/components/converters/json.py",
+              "side": "new",
+              "start_line": 216,
+              "end_line": 222,
+              "content": "@@ -216,7 +216,7 @@ class JSONConverter:\n             except json.JSONDecodeError as exc:\n                 logger.warning(\n                     \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n-                    source=source.meta.get(\"file_path\", \"unknown\"),\n+                    source=source.meta[\"file_path\"],\n                     error=exc,\n                 )\n                 return []",
+              "content_hash": "89cd0f794017bd320767c6348bbfa89f1cf0c98904600ba0a9471bf3514e488d",
+              "source_type": "git_diff",
+              "source_tool_call_id": "",
+              "delivery_request_id": "",
+              "lifecycle": "delivered",
+              "displayed_ranges": [
+                {
+                  "start_line": 216,
+                  "end_line": 222
+                }
+              ],
+              "displayed_line_numbers": [
+                216,
+                217,
+                218,
+                219,
+                220,
+                221,
+                222
+              ],
+              "body_hash": "89cd0f794017bd320767c6348bbfa89f1cf0c98904600ba0a9471bf3514e488d",
+              "truncated": false,
+              "scope": "prompt_diff",
+              "aliases": [
+                "diff:haystack/components/converters/json.py:2:216"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "rje_5d71f0264cc04a2ebe9d288130cbcfbc",
+          "seq": 5,
+          "type": "evidence_catalog",
+          "records": [
+            {
+              "artifact_id": "4924bf174937ec6ddaf1faf5",
+              "evidence_id": "ev_b09a31573d3ee1512e3a0c5d",
+              "snapshot_id": "8b35749616eb30d3db090335",
+              "revision": "4d9082be92d11d11e82c14030073ee70c64fdb53",
+              "path": "haystack/components/converters/json.py",
+              "side": "new",
+              "start_line": 154,
+              "end_line": 233,
+              "content": "154:         Serializes the component to a dictionary.\n155: \n156:         :returns:\n157:             Dictionary with serialized data.\n158:         \"\"\"\n159:         return default_to_dict(\n160:             self,\n161:             jq_schema=self._jq_schema,\n162:             content_key=self._content_key,\n163:             extra_meta_fields=self._meta_fields,\n164:             store_full_path=self._store_full_path,\n165:         )\n166: \n167:     @classmethod\n168:     def from_dict(cls, data: dict[str, Any]) -> \"JSONConverter\":\n169:         \"\"\"\n170:         Deserializes the component from a dictionary.\n171: \n172:         :param data:\n173:             Dictionary to deserialize from.\n174:         :returns:\n175:             Deserialized component.\n176:         \"\"\"\n177:         return default_from_dict(cls, data)\n178: \n179:     def _get_content_and_meta(self, source: ByteStream) -> list[tuple[str, dict[str, Any]]]:\n180:         \"\"\"\n181:         Utility function to extract text and metadata from a JSON file.\n182: \n183:         :param source:\n184:             UTF-8 byte stream.\n185:         :returns:\n186:             Collection of text and metadata dict tuples, each corresponding\n187:             to a different document.\n188:         \"\"\"\n189:         try:\n190:             file_content = source.data.decode(\"utf-8\")\n191:         except UnicodeError as exc:\n192:             logger.warning(\n193:                 \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n194:                 source=source.meta[\"file_path\"],\n195:                 error=exc,\n196:             )\n197:             return []\n198: \n199:         meta_fields = self._meta_fields or set()\n200: \n201:         if self._compiled_filter is not None:\n202:             try:\n203:                 objects = list(self._compiled_filter.input_text(file_content))\n204:             except Exception as exc:\n205:                 logger.warning(\n206:                     \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n207:                     source=source.meta[\"file_path\"],\n208:                     error=exc,\n209:                 )\n210:                 return []\n211:         else:\n212:             # We just load the whole file as JSON if the user didn't provide a jq filter.\n213:             # We put it in a list even if it's not to ease handling it later on.\n214:             try:\n215:                 objects = [json.loads(file_content)]\n216:             except json.JSONDecodeError as exc:\n217:                 logger.warning(\n218:                     \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n219:                     source=source.meta[\"file_path\"],\n220:                     error=exc,\n221:                 )\n222:                 return []\n223: \n224:         result = []\n225:         if self._content_key is not None:\n226:             for obj in objects:\n227:                 if not isinstance(obj, dict):\n228:                     logger.warning(\"Expected a dictionary but got {obj}. Skipping it.\", obj=obj)\n229:                     continue\n230:                 if self._content_key not in obj:\n231:                     logger.warning(\n232:                         \"'{content_key}' not found in {obj}. Skipping it.\", content_key=self._content_key, obj=obj\n233:                     )",
+              "content_hash": "f9f6fe2c2de6bcf8b589541413dcae9813defca45f9a45b223faa700ec816a6c",
+              "source_type": "read_file",
+              "source_tool_call_id": "prefetch-read-file-0",
+              "delivery_request_id": "prefetch-read-file-0",
+              "lifecycle": "delivered",
+              "displayed_ranges": [
+                {
+                  "start_line": 154,
+                  "end_line": 233
+                }
+              ],
+              "displayed_line_numbers": [
+                154,
+                155,
+                156,
+                157,
+                158,
+                159,
+                160,
+                161,
+                162,
+                163,
+                164,
+                165,
+                166,
+                167,
+                168,
+                169,
+                170,
+                171,
+                172,
+                173,
+                174,
+                175,
+                176,
+                177,
+                178,
+                179,
+                180,
+                181,
+                182,
+                183,
+                184,
+                185,
+                186,
+                187,
+                188,
+                189,
+                190,
+                191,
+                192,
+                193,
+                194,
+                195,
+                196,
+                197,
+                198,
+                199,
+                200,
+                201,
+                202,
+                203,
+                204,
+                205,
+                206,
+                207,
+                208,
+                209,
+                210,
+                211,
+                212,
+                213,
+                214,
+                215,
+                216,
+                217,
+                218,
+                219,
+                220,
+                221,
+                222,
+                223,
+                224,
+                225,
+                226,
+                227,
+                228,
+                229,
+                230,
+                231,
+                232,
+                233
+              ],
+              "body_hash": "f9f6fe2c2de6bcf8b589541413dcae9813defca45f9a45b223faa700ec816a6c",
+              "truncated": false,
+              "scope": "file_read",
+              "aliases": [
+                "4924bf174937ec6ddaf1faf5",
+                "ev_b09a31573d3ee1512e3a0c5d"
+              ]
+            },
+            {
+              "artifact_id": "9740c38ab10503a380a90fbc",
+              "evidence_id": "ev_392f27cfb76acd34732633fc",
+              "snapshot_id": "8b35749616eb30d3db090335",
+              "revision": "4d9082be92d11d11e82c14030073ee70c64fdb53",
+              "path": "haystack/components/converters/json.py",
+              "side": "new",
+              "start_line": 1,
+              "end_line": 297,
+              "content": "# SPDX-FileCopyrightText: 2022-present deepset GmbH <info@deepset.ai>\n#\n# SPDX-License-Identifier: Apache-2.0\n\nimport json\nimport os\nfrom pathlib import Path\nfrom typing import Any, Literal\n\nfrom haystack import component, default_from_dict, default_to_dict, logging\nfrom haystack.components.converters.utils import get_bytestream_from_source, normalize_metadata\nfrom haystack.dataclasses import ByteStream, Document\nfrom haystack.lazy_imports import LazyImport\n\nlogger = logging.getLogger(__name__)\n\nwith LazyImport(\"Run 'pip install jq'\") as jq_import:\n    import jq\n\n\n@component\nclass JSONConverter:\n    \"\"\"\n    Converts one or more JSON files into a text document.\n\n    ### Usage examples\n\n    ```python\n    import json\n\n    from haystack.components.converters import JSONConverter\n    from haystack.dataclasses import ByteStream\n\n    source = ByteStream.from_string(json.dumps({\"text\": \"This is the content of my document\"}))\n\n    converter = JSONConverter(content_key=\"text\")\n    results = converter.run(sources=[source])\n    documents = results[\"documents\"]\n    print(documents[0].content)\n    # 'This is the content of my document'\n    ```\n\n    Optionally, you can also provide a `jq_schema` string to filter the JSON source files and `extra_meta_fields`\n    to extract from the filtered data:\n\n    ```python\n    import json\n\n    from haystack.components.converters import JSONConverter\n    from haystack.dataclasses import ByteStream\n\n    data = {\n        \"laureates\": [\n            {\n                \"firstname\": \"Enrico\",\n                \"surname\": \"Fermi\",\n                \"motivation\": \"for his demonstrations of the existence of new radioactive elements produced \"\n                \"by neutron irradiation, and for his related discovery of nuclear reactions brought about by\"\n                \" slow neutrons\",\n            },\n            {\n                \"firstname\": \"Rita\",\n                \"surname\": \"Levi-Montalcini\",\n                \"motivation\": \"for their discoveries of growth factors\",\n            },\n        ],\n    }\n    source = ByteStream.from_string(json.dumps(data))\n    converter = JSONConverter(\n        jq_schema=\".laureates[]\", content_key=\"motivation\", extra_meta_fields={\"firstname\", \"surname\"}\n    )\n\n    results = converter.run(sources=[source])\n    documents = results[\"documents\"]\n    print(documents[0].content)\n    # 'for his demonstrations of the existence of new radioactive elements produced by\n    # neutron irradiation, and for his related discovery of nuclear reactions brought\n    # about by slow neutrons'\n\n    print(documents[0].meta)\n    # {'firstname': 'Enrico', 'surname': 'Fermi'}\n\n    print(documents[1].content)\n    # 'for their discoveries of growth factors'\n\n    print(documents[1].meta)\n    # {'firstname': 'Rita', 'surname': 'Levi-Montalcini'}\n    ```\n\n    \"\"\"\n\n    def __init__(\n        self,\n        jq_schema: str | None = None,\n        content_key: str | None = None,\n        extra_meta_fields: set[str] | Literal[\"*\"] | None = None,\n        store_full_path: bool = False,\n    ) -> None:\n        \"\"\"\n        Creates a JSONConverter component.\n\n        An optional `jq_schema` can be provided to extract nested data in the JSON source files.\n        See the [official jq documentation](https://jqlang.github.io/jq/) for more info on the filters syntax.\n        If `jq_schema` is not set, whole JSON source files will be used to extract content.\n\n        Optionally, you can provide a `content_key` to specify which key in the extracted object must\n        be set as the document's content.\n\n        If both `jq_schema` and `content_key` are set, the component will search for the `content_key` in\n        the JSON object extracted by `jq_schema`. If the extracted data is not a JSON object, it will be skipped.\n\n        If only `jq_schema` is set, the extracted data must be a scalar value. If it's a JSON object or array,\n        it will be skipped.\n\n        If only `content_key` is set, the source JSON file must be a JSON object, else it will be skipped.\n\n        `extra_meta_fields` can either be set to a set of strings or a literal `\"*\"` string.\n        If it's a set of strings, it must specify fields in the extracted objects that must be set in\n        the extracted documents. If a field is not found, the meta value will be `None`.\n        If set to `\"*\"`, all fields that are not `content_key` found in the filtered JSON object will\n        be saved as metadata.\n\n        Initialization will fail if neither `jq_schema` nor `content_key` are set.\n\n        :param jq_schema:\n            Optional jq filter string to extract content.\n            If not specified, whole JSON object will be used to extract information.\n        :param content_key:\n            Optional key to extract document content.\n            If `jq_schema` is specified, the `content_key` will be extracted from that object.\n        :param extra_meta_fields:\n            An optional set of meta keys to extract from the content.\n            If `jq_schema` is specified, all keys will be extracted from that object.\n        :param store_full_path:\n            If True, the full path of the file is stored in the metadata of the document.\n            If False, only the file name is stored.\n        \"\"\"\n        self._compiled_filter = None\n        if jq_schema:\n            jq_import.check()\n            self._compiled_filter = jq.compile(jq_schema)\n\n        self._jq_schema = jq_schema\n        self._content_key = content_key\n        self._meta_fields = extra_meta_fields\n        self._store_full_path = store_full_path\n\n        if self._compiled_filter is None and self._content_key is None:\n            msg = \"No `jq_schema` nor `content_key` specified. Set either or both to extract data.\"\n            raise ValueError(msg)\n\n    def to_dict(self) -> dict[str, Any]:\n        \"\"\"\n        Serializes the component to a dictionary.\n\n        :returns:\n            Dictionary with serialized data.\n        \"\"\"\n        return default_to_dict(\n            self,\n            jq_schema=self._jq_schema,\n            content_key=self._content_key,\n            extra_meta_fields=self._meta_fields,\n            store_full_path=self._store_full_path,\n        )\n\n    @classmethod\n    def from_dict(cls, data: dict[str, Any]) -> \"JSONConverter\":\n        \"\"\"\n        Deserializes the component from a dictionary.\n\n        :param data:\n            Dictionary to deserialize from.\n        :returns:\n            Deserialized component.\n        \"\"\"\n        return default_from_dict(cls, data)\n\n    def _get_content_and_meta(self, source: ByteStream) -> list[tuple[str, dict[str, Any]]]:\n        \"\"\"\n        Utility function to extract text and metadata from a JSON file.\n\n        :param source:\n            UTF-8 byte stream.\n        :returns:\n            Collection of text and metadata dict tuples, each corresponding\n            to a different document.\n        \"\"\"\n        try:\n            file_content = source.data.decode(\"utf-8\")\n        except UnicodeError as exc:\n            logger.warning(\n                \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n                source=source.meta[\"file_path\"],\n                error=exc,\n            )\n            return []\n\n        meta_fields = self._meta_fields or set()\n\n        if self._compiled_filter is not None:\n            try:\n                objects = list(self._compiled_filter.input_text(file_content))\n            except Exception as exc:\n                logger.warning(\n                    \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n                    source=source.meta[\"file_path\"],\n                    error=exc,\n                )\n                return []\n        else:\n            # We just load the whole file as JSON if the user didn't provide a jq filter.\n            # We put it in a list even if it's not to ease handling it later on.\n            try:\n                objects = [json.loads(file_content)]\n            except json.JSONDecodeError as exc:\n                logger.warning(\n                    \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n                    source=source.meta[\"file_path\"],\n                    error=exc,\n                )\n                return []\n\n        result = []\n        if self._content_key is not None:\n            for obj in objects:\n                if not isinstance(obj, dict):\n                    logger.warning(\"Expected a dictionary but got {obj}. Skipping it.\", obj=obj)\n                    continue\n                if self._content_key not in obj:\n                    logger.warning(\n                        \"'{content_key}' not found in {obj}. Skipping it.\", content_key=self._content_key, obj=obj\n                    )\n                    continue\n\n                text = obj[self._content_key]\n                if isinstance(text, (dict, list)):\n                    logger.warning(\"Expected a scalar value but got {obj}. Skipping it.\", obj=obj)\n                    continue\n\n                meta = {}\n                if meta_fields == \"*\":\n                    meta = {k: v for k, v in obj.items() if k != self._content_key}\n                else:\n                    for field in meta_fields:\n                        meta[field] = obj.get(field, None)\n                result.append((text, meta))\n        else:\n            for obj in objects:\n                if isinstance(obj, (dict, list)):\n                    logger.warning(\"Expected a scalar value but got {obj}. Skipping it.\", obj=obj)\n                    continue\n                result.append((str(obj), {}))\n\n        return result\n\n    @component.output_types(documents=list[Document])\n    def run(\n        self, sources: list[str | Path | ByteStream], meta: dict[str, Any] | list[dict[str, Any]] | None = None\n    ) -> dict[str, Any]:\n        \"\"\"\n        Converts a list of JSON files to documents.\n\n        :param sources:\n            A list of file paths or ByteStream objects.\n        :param meta:\n            Optional metadata to attach to the documents.\n            This value can be either a list of dictionaries or a single dictionary.\n            If it's a single dictionary, its content is added to the metadata of all produced documents.\n            If it's a list, the length of the list must match the number of sources.\n            If `sources` contain ByteStream objects, their `meta` will be added to the output documents.\n\n        :returns:\n            A dictionary with the following keys:\n            - `documents`: A list of created documents.\n        \"\"\"\n        documents = []\n        meta_list = normalize_metadata(meta=meta, sources_count=len(sources))\n\n        for source, metadata in zip(sources, meta_list, strict=True):\n            try:\n                bytestream = get_bytestream_from_source(source)\n            except Exception as exc:\n                logger.warning(\"Could not read {source}. Skipping it. Error: {error}\", source=source, error=exc)\n                continue\n\n            data = self._get_content_and_meta(bytestream)\n\n            for text, extra_meta in data:\n                merged_metadata = {**bytestream.meta, **metadata, **extra_meta}\n\n                if not self._store_full_path and (file_path := bytestream.meta.get(\"file_path\")):\n                    merged_metadata[\"file_path\"] = os.path.basename(file_path)\n                document = Document(content=text, meta=merged_metadata)\n                documents.append(document)\n\n        return {\"documents\": documents}\n",
+              "content_hash": "f5e795bdb32c102213c6d3ddff75aec2befb5431835e1ee0d8f6f655eeb5309b",
+              "source_type": "file_context",
+              "source_tool_call_id": "",
+              "delivery_request_id": "",
+              "lifecycle": "delivered",
+              "displayed_ranges": [
+                {
+                  "start_line": 1,
+                  "end_line": 297
+                }
+              ],
+              "displayed_line_numbers": [],
+              "body_hash": "f5e795bdb32c102213c6d3ddff75aec2befb5431835e1ee0d8f6f655eeb5309b",
+              "truncated": false,
+              "scope": "prompt_file",
+              "aliases": [
+                "9740c38ab10503a380a90fbc",
+                "ev_392f27cfb76acd34732633fc"
+              ]
+            },
+            {
+              "artifact_id": "diff:haystack/components/converters/json.py:0:191",
+              "evidence_id": "ev_6359e52529cdd4e5af17ea8b",
+              "snapshot_id": "8b35749616eb30d3db090335",
+              "revision": "4d9082be92d11d11e82c14030073ee70c64fdb53",
+              "path": "haystack/components/converters/json.py",
+              "side": "new",
+              "start_line": 191,
+              "end_line": 197,
+              "content": "@@ -191,7 +191,7 @@ class JSONConverter:\n         except UnicodeError as exc:\n             logger.warning(\n                 \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n-                source=source.meta.get(\"file_path\", \"unknown\"),\n+                source=source.meta[\"file_path\"],\n                 error=exc,\n             )\n             return []",
+              "content_hash": "ace007cfc68a47efc646bc0020a2802ef53e53653f8f647fdc3bc621dfaecfb6",
+              "source_type": "git_diff",
+              "source_tool_call_id": "",
+              "delivery_request_id": "",
+              "lifecycle": "delivered",
+              "displayed_ranges": [
+                {
+                  "start_line": 191,
+                  "end_line": 197
+                }
+              ],
+              "displayed_line_numbers": [
+                191,
+                192,
+                193,
+                194,
+                195,
+                196,
+                197
+              ],
+              "body_hash": "ace007cfc68a47efc646bc0020a2802ef53e53653f8f647fdc3bc621dfaecfb6",
+              "truncated": false,
+              "scope": "prompt_diff",
+              "aliases": [
+                "diff:haystack/components/converters/json.py:0:191",
+                "ev_6359e52529cdd4e5af17ea8b"
+              ]
+            },
+            {
+              "artifact_id": "diff:haystack/components/converters/json.py:1:204",
+              "evidence_id": "ev_c8ac415f76ac5e10a47d34bd",
+              "snapshot_id": "8b35749616eb30d3db090335",
+              "revision": "4d9082be92d11d11e82c14030073ee70c64fdb53",
+              "path": "haystack/components/converters/json.py",
+              "side": "new",
+              "start_line": 204,
+              "end_line": 210,
+              "content": "@@ -204,7 +204,7 @@ class JSONConverter:\n             except Exception as exc:\n                 logger.warning(\n                     \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n-                    source=source.meta.get(\"file_path\", \"unknown\"),\n+                    source=source.meta[\"file_path\"],\n                     error=exc,\n                 )\n                 return []",
+              "content_hash": "6b594b2e0af830078eec8642f79bf15ddb464050fc15f6e606e145dc23bed2f9",
+              "source_type": "git_diff",
+              "source_tool_call_id": "",
+              "delivery_request_id": "",
+              "lifecycle": "delivered",
+              "displayed_ranges": [
+                {
+                  "start_line": 204,
+                  "end_line": 210
+                }
+              ],
+              "displayed_line_numbers": [
+                204,
+                205,
+                206,
+                207,
+                208,
+                209,
+                210
+              ],
+              "body_hash": "6b594b2e0af830078eec8642f79bf15ddb464050fc15f6e606e145dc23bed2f9",
+              "truncated": false,
+              "scope": "prompt_diff",
+              "aliases": [
+                "diff:haystack/components/converters/json.py:1:204",
+                "ev_c8ac415f76ac5e10a47d34bd"
+              ]
+            },
+            {
+              "artifact_id": "diff:haystack/components/converters/json.py:2:216",
+              "evidence_id": "ev_9e96c8f16e8770429b467864",
+              "snapshot_id": "8b35749616eb30d3db090335",
+              "revision": "4d9082be92d11d11e82c14030073ee70c64fdb53",
+              "path": "haystack/components/converters/json.py",
+              "side": "new",
+              "start_line": 216,
+              "end_line": 222,
+              "content": "@@ -216,7 +216,7 @@ class JSONConverter:\n             except json.JSONDecodeError as exc:\n                 logger.warning(\n                     \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n-                    source=source.meta.get(\"file_path\", \"unknown\"),\n+                    source=source.meta[\"file_path\"],\n                     error=exc,\n                 )\n                 return []",
+              "content_hash": "89cd0f794017bd320767c6348bbfa89f1cf0c98904600ba0a9471bf3514e488d",
+              "source_type": "git_diff",
+              "source_tool_call_id": "",
+              "delivery_request_id": "",
+              "lifecycle": "delivered",
+              "displayed_ranges": [
+                {
+                  "start_line": 216,
+                  "end_line": 222
+                }
+              ],
+              "displayed_line_numbers": [
+                216,
+                217,
+                218,
+                219,
+                220,
+                221,
+                222
+              ],
+              "body_hash": "89cd0f794017bd320767c6348bbfa89f1cf0c98904600ba0a9471bf3514e488d",
+              "truncated": false,
+              "scope": "prompt_diff",
+              "aliases": [
+                "diff:haystack/components/converters/json.py:2:216",
+                "ev_9e96c8f16e8770429b467864"
+              ]
+            },
+            {
+              "artifact_id": "88b9f99da1a2bd21be633320",
+              "evidence_id": "ev_bef315c2e3c9719d6eb126ab",
+              "snapshot_id": "8b35749616eb30d3db090335",
+              "revision": "4d9082be92d11d11e82c14030073ee70c64fdb53",
+              "path": "haystack/components/converters/json.py",
+              "side": "new",
+              "start_line": 151,
+              "end_line": 240,
+              "content": "151: \n152:     def to_dict(self) -> dict[str, Any]:\n153:         \"\"\"\n154:         Serializes the component to a dictionary.\n155: \n156:         :returns:\n157:             Dictionary with serialized data.\n158:         \"\"\"\n159:         return default_to_dict(\n160:             self,\n161:             jq_schema=self._jq_schema,\n162:             content_key=self._content_key,\n163:             extra_meta_fields=self._meta_fields,\n164:             store_full_path=self._store_full_path,\n165:         )\n166: \n167:     @classmethod\n168:     def from_dict(cls, data: dict[str, Any]) -> \"JSONConverter\":\n169:         \"\"\"\n170:         Deserializes the component from a dictionary.\n171: \n172:         :param data:\n173:             Dictionary to deserialize from.\n174:         :returns:\n175:             Deserialized component.\n176:         \"\"\"\n177:         return default_from_dict(cls, data)\n178: \n179:     def _get_content_and_meta(self, source: ByteStream) -> list[tuple[str, dict[str, Any]]]:\n180:         \"\"\"\n181:         Utility function to extract text and metadata from a JSON file.\n182: \n183:         :param source:\n184:             UTF-8 byte stream.\n185:         :returns:\n186:             Collection of text and metadata dict tuples, each corresponding\n187:             to a different document.\n188:         \"\"\"\n189:         try:\n190:             file_content = source.data.decode(\"utf-8\")\n191:         except UnicodeError as exc:\n192:             logger.warning(\n193:                 \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n194:                 source=source.meta[\"file_path\"],\n195:                 error=exc,\n196:             )\n197:             return []\n198: \n199:         meta_fields = self._meta_fields or set()\n200: \n201:         if self._compiled_filter is not None:\n202:             try:\n203:                 objects = list(self._compiled_filter.input_text(file_content))\n204:             except Exception as exc:\n205:                 logger.warning(\n206:                     \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n207:                     source=source.meta[\"file_path\"],\n208:                     error=exc,\n209:                 )\n210:                 return []\n211:         else:\n212:             # We just load the whole file as JSON if the user didn't provide a jq filter.\n213:             # We put it in a list even if it's not to ease handling it later on.\n214:             try:\n215:                 objects = [json.loads(file_content)]\n216:             except json.JSONDecodeError as exc:\n217:                 logger.warning(\n218:                     \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n219:                     source=source.meta[\"file_path\"],\n220:                     error=exc,\n221:                 )\n222:                 return []\n223: \n224:         result = []\n225:         if self._content_key is not None:\n226:             for obj in objects:\n227:                 if not isinstance(obj, dict):\n228:                     logger.warning(\"Expected a dictionary but got {obj}. Skipping it.\", obj=obj)\n229:                     continue\n230:                 if self._content_key not in obj:\n231:                     logger.warning(\n232:                         \"'{content_key}' not found in {obj}. Skipping it.\", content_key=self._content_key, obj=obj\n233:                     )\n234:                     continue\n235: \n236:                 text = obj[self._content_key]\n237:                 if isinstance(text, (dict, list)):\n238:                     logger.warning(\"Expected a scalar value but got {obj}. Skipping it.\", obj=obj)\n239:                     continue\n240: ",
+              "content_hash": "47440fbdaef0dafdea8f87b56f94135857456e12acb2d099b9dc706004582136",
+              "source_type": "read_file",
+              "source_tool_call_id": "call_-7271771814181725449",
+              "delivery_request_id": "call_-7271771814181725449",
+              "lifecycle": "delivered",
+              "displayed_ranges": [
+                {
+                  "start_line": 151,
+                  "end_line": 240
+                }
+              ],
+              "displayed_line_numbers": [
+                151,
+                152,
+                153,
+                154,
+                155,
+                156,
+                157,
+                158,
+                159,
+                160,
+                161,
+                162,
+                163,
+                164,
+                165,
+                166,
+                167,
+                168,
+                169,
+                170,
+                171,
+                172,
+                173,
+                174,
+                175,
+                176,
+                177,
+                178,
+                179,
+                180,
+                181,
+                182,
+                183,
+                184,
+                185,
+                186,
+                187,
+                188,
+                189,
+                190,
+                191,
+                192,
+                193,
+                194,
+                195,
+                196,
+                197,
+                198,
+                199,
+                200,
+                201,
+                202,
+                203,
+                204,
+                205,
+                206,
+                207,
+                208,
+                209,
+                210,
+                211,
+                212,
+                213,
+                214,
+                215,
+                216,
+                217,
+                218,
+                219,
+                220,
+                221,
+                222,
+                223,
+                224,
+                225,
+                226,
+                227,
+                228,
+                229,
+                230,
+                231,
+                232,
+                233,
+                234,
+                235,
+                236,
+                237,
+                238,
+                239,
+                240
+              ],
+              "body_hash": "47440fbdaef0dafdea8f87b56f94135857456e12acb2d099b9dc706004582136",
+              "truncated": false,
+              "scope": "file_read",
+              "aliases": [
+                "88b9f99da1a2bd21be633320",
+                "ev_bef315c2e3c9719d6eb126ab"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "variant_id": "B2-graph-hybrid-warm",
+      "source_journal": "eval/outputs/finding-delivery-python-three-v3-aligned-paid-20260911/run_journals/golden_deepset-ai_haystack_pr12208_reverse_B2-graph-hybrid-warm_3074a86b-b10e-413b-a5f1-301aa5866eaa_journal.jsonl",
+      "source_sha256": "8a37733e39a8382a2a744ddf914a8ac4f6bc4398408c72b53cd7967a0201b35d",
+      "model_responses": [
+        {
+          "schema_version": "1.0",
+          "id": "rje_9ec07254db5c45a6a0d26bee4c5c1492",
+          "seq": 1,
+          "type": "model_response",
+          "run_id": "3074a86b-b10e-413b-a5f1-301aa5866eaa",
+          "timestamp": "2026-09-10T16:40:05.074766+00:00",
+          "payload": {
+            "iteration": 0,
+            "model": "glm-5.3-flash",
+            "finish_reason": "tool_calls",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_-7271793563896115906",
+                "function": {
+                  "arguments": "{\"file_path\":\"haystack/components/converters/json.py\",\"offset\":150,\"limit\":90}",
+                  "name": "read_file"
+                },
+                "type": "function",
+                "index": 0
+              },
+              {
+                "id": "call_-7271793563896115905",
+                "function": {
+                  "arguments": "{\"pattern\":\"file_path\",\"path\":\"haystack/components/converters/utils.py\"}",
+                  "name": "grep_files"
+                },
+                "type": "function",
+                "index": 1
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 13027,
+              "completion_tokens": 162,
+              "total_tokens": 13189,
+              "reasoning_tokens": 106
+            }
+          }
+        },
+        {
+          "schema_version": "1.0",
+          "id": "rje_aeed4188e36b4357aa9dc7d9b03bd151",
+          "seq": 5,
+          "type": "model_response",
+          "run_id": "3074a86b-b10e-413b-a5f1-301aa5866eaa",
+          "timestamp": "2026-09-10T16:40:10.390995+00:00",
+          "payload": {
+            "iteration": 1,
+            "model": "glm-5.3-flash",
+            "finish_reason": "tool_calls",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_-7271802085111232920",
+                "function": {
+                  "arguments": "{\"pattern\":\"file_path\",\"path\":\"haystack/components/converters\",\"glob\":\"utils.py\"}",
+                  "name": "grep_files"
+                },
+                "type": "function",
+                "index": 0
+              },
+              {
+                "id": "call_-7271802085111232919",
+                "function": {
+                  "arguments": "{\"pattern\":\"def from_string|def from_file_path|meta\\\\[\",\"path\":\"haystack/dataclasses/byte_stream.py\"}",
+                  "name": "grep_files"
+                },
+                "type": "function",
+                "index": 1
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 15168,
+              "completion_tokens": 64,
+              "total_tokens": 15232,
+              "reasoning_tokens": 0
+            }
+          }
+        },
+        {
+          "schema_version": "1.0",
+          "id": "rje_59c496813906499bb02386ff04e73752",
+          "seq": 9,
+          "type": "model_response",
+          "run_id": "3074a86b-b10e-413b-a5f1-301aa5866eaa",
+          "timestamp": "2026-09-10T16:40:20.018035+00:00",
+          "payload": {
+            "iteration": 2,
+            "model": "glm-5.3-flash",
+            "finish_reason": "tool_calls",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_-7271795281883031857",
+                "function": {
+                  "arguments": "{\"finding\":{\"anchor\": {\"file\": \"haystack/components/converters/json.py\", \"line\": 194, \"symbol_id\": \"python|haystack/components/converters/json.py|JSONConverter._get_content_and_meta|method|179:255\"}, \"description\": \"The diff replaces source.meta.get(\\\"file_path\\\", \\\"unknown\\\") with source.meta[\\\"file_path\\\"] in all three exception handlers of _get_content_and_meta. ByteStream inputs are not guaranteed to carry a \\\"file_path\\\" meta entry (e.g. ByteStream.from_string or programmatically built streams), so a decoding/filtering/parsing failure on such a stream now raises KeyError inside the except block instead of logging a warning and skipping the source, masking the original error and aborting the whole run.\", \"evidence_refs\": [\"ev_323009a5002d48889b0020e9\", \"ev_3195495b2d1d15af6335c5d7\"], \"severity\": \"warning\", \"related_locations\": [{\"file\": \"haystack/components/converters/json.py\", \"line\": 207}, {\"file\": \"haystack/components/converters/json.py\", \"line\": 219}], \"suggestion\": \"Keep the .get(\\\"file_path\\\", \\\"unknown\\\") fallback (or use source.meta.get(\\\"file_path\\\", str(source)) ) so failure logging cannot itself raise KeyError.\"}}",
+                  "name": "save_finding"
+                },
+                "type": "function",
+                "index": 0
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 7670,
+              "completion_tokens": 308,
+              "total_tokens": 7978,
+              "reasoning_tokens": 0
+            }
+          }
+        },
+        {
+          "schema_version": "1.0",
+          "id": "rje_d2b9c8b6551f437f897143e98c608b4e",
+          "seq": 12,
+          "type": "model_response",
+          "run_id": "3074a86b-b10e-413b-a5f1-301aa5866eaa",
+          "timestamp": "2026-09-10T16:40:35.513720+00:00",
+          "payload": {
+            "iteration": 2,
+            "model": "glm-5.3-flash",
+            "finish_reason": "tool_calls",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_-7271804627731873245",
+                "function": {
+                  "arguments": "{\"finding\":{\"anchor\": {\"file\": \"haystack/components/converters/json.py\", \"line\": 194, \"end_line\": 194, \"symbol_id\": \"python|haystack/components/converters/json.py|JSONConverter._get_content_and_meta|method|179:255\"}, \"description\": \"The warning handlers changed source.meta.get(\\\"file_path\\\", \\\"unknown\\\") to source.meta[\\\"file_path\\\"]. ByteStream instances that do not carry a \\\"file_path\\\" meta entry (e.g. streams created without file metadata, where the fallback \\\"unknown\\\" previously applied) now raise KeyError while the code is already inside an exception handler. This crashes run() instead of skipping the bad document, converting the previously graceful skip-and-log behavior into a pipeline failure and masking the original error.\", \"evidence_refs\": [\"ev_323009a5002d48889b0020e9\", \"ev_010fa656ca263c19cd42af3c\", \"ev_9f6a0e11887d549c925715c7\", \"ev_27be54dc49069df6ee2eac32\", \"ev_52863cffd0dda71b1c6bda92\"], \"severity\": \"warning\", \"suggestion\": \"Restore the defaulting access, e.g. source.meta.get(\\\"file_path\\\", \\\"unknown\\\"), in all three warning calls, or otherwise guarantee that every ByteStream reaching _get_content_and_meta has a \\\"file_path\\\" meta entry.\", \"related_locations\": [{\"file\": \"haystack/components/converters/json.py\", \"line\": 207}, {\"file\": \"haystack/components/converters/json.py\", \"line\": 219}]}}",
+                  "name": "save_finding"
+                },
+                "type": "function",
+                "index": 0
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 7670,
+              "completion_tokens": 533,
+              "total_tokens": 8203,
+              "reasoning_tokens": 153
+            }
+          }
+        }
+      ],
+      "referenced_evidence_ids": [
+        "ev_010fa656ca263c19cd42af3c",
+        "ev_27be54dc49069df6ee2eac32",
+        "ev_3195495b2d1d15af6335c5d7",
+        "ev_323009a5002d48889b0020e9",
+        "ev_52863cffd0dda71b1c6bda92",
+        "ev_9f6a0e11887d549c925715c7"
+      ],
+      "referenced_catalog_events": [
+        {
+          "id": "rje_ae64b61949184ba4bfca893c48315006",
+          "seq": 2,
+          "type": "evidence_catalog",
+          "records": [
+            {
+              "artifact_id": "4924bf174937ec6ddaf1faf5",
+              "evidence_id": "ev_3195495b2d1d15af6335c5d7",
+              "snapshot_id": "95f7ba88c7b34edb2597834d",
+              "revision": "4d9082be92d11d11e82c14030073ee70c64fdb53",
+              "path": "haystack/components/converters/json.py",
+              "side": "new",
+              "start_line": 154,
+              "end_line": 233,
+              "content": "154:         Serializes the component to a dictionary.\n155: \n156:         :returns:\n157:             Dictionary with serialized data.\n158:         \"\"\"\n159:         return default_to_dict(\n160:             self,\n161:             jq_schema=self._jq_schema,\n162:             content_key=self._content_key,\n163:             extra_meta_fields=self._meta_fields,\n164:             store_full_path=self._store_full_path,\n165:         )\n166: \n167:     @classmethod\n168:     def from_dict(cls, data: dict[str, Any]) -> \"JSONConverter\":\n169:         \"\"\"\n170:         Deserializes the component from a dictionary.\n171: \n172:         :param data:\n173:             Dictionary to deserialize from.\n174:         :returns:\n175:             Deserialized component.\n176:         \"\"\"\n177:         return default_from_dict(cls, data)\n178: \n179:     def _get_content_and_meta(self, source: ByteStream) -> list[tuple[str, dict[str, Any]]]:\n180:         \"\"\"\n181:         Utility function to extract text and metadata from a JSON file.\n182: \n183:         :param source:\n184:             UTF-8 byte stream.\n185:         :returns:\n186:             Collection of text and metadata dict tuples, each corresponding\n187:             to a different document.\n188:         \"\"\"\n189:         try:\n190:             file_content = source.data.decode(\"utf-8\")\n191:         except UnicodeError as exc:\n192:             logger.warning(\n193:                 \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n194:                 source=source.meta[\"file_path\"],\n195:                 error=exc,\n196:             )\n197:             return []\n198: \n199:         meta_fields = self._meta_fields or set()\n200: \n201:         if self._compiled_filter is not None:\n202:             try:\n203:                 objects = list(self._compiled_filter.input_text(file_content))\n204:             except Exception as exc:\n205:                 logger.warning(\n206:                     \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n207:                     source=source.meta[\"file_path\"],\n208:                     error=exc,\n209:                 )\n210:                 return []\n211:         else:\n212:             # We just load the whole file as JSON if the user didn't provide a jq filter.\n213:             # We put it in a list even if it's not to ease handling it later on.\n214:             try:\n215:                 objects = [json.loads(file_content)]\n216:             except json.JSONDecodeError as exc:\n217:                 logger.warning(\n218:                     \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n219:                     source=source.meta[\"file_path\"],\n220:                     error=exc,\n221:                 )\n222:                 return []\n223: \n224:         result = []\n225:         if self._content_key is not None:\n226:             for obj in objects:\n227:                 if not isinstance(obj, dict):\n228:                     logger.warning(\"Expected a dictionary but got {obj}. Skipping it.\", obj=obj)\n229:                     continue\n230:                 if self._content_key not in obj:\n231:                     logger.warning(\n232:                         \"'{content_key}' not found in {obj}. Skipping it.\", content_key=self._content_key, obj=obj\n233:                     )",
+              "content_hash": "f9f6fe2c2de6bcf8b589541413dcae9813defca45f9a45b223faa700ec816a6c",
+              "source_type": "read_file",
+              "source_tool_call_id": "prefetch-read-file-0",
+              "delivery_request_id": "prefetch-read-file-0",
+              "lifecycle": "delivered",
+              "displayed_ranges": [
+                {
+                  "start_line": 154,
+                  "end_line": 233
+                }
+              ],
+              "displayed_line_numbers": [
+                154,
+                155,
+                156,
+                157,
+                158,
+                159,
+                160,
+                161,
+                162,
+                163,
+                164,
+                165,
+                166,
+                167,
+                168,
+                169,
+                170,
+                171,
+                172,
+                173,
+                174,
+                175,
+                176,
+                177,
+                178,
+                179,
+                180,
+                181,
+                182,
+                183,
+                184,
+                185,
+                186,
+                187,
+                188,
+                189,
+                190,
+                191,
+                192,
+                193,
+                194,
+                195,
+                196,
+                197,
+                198,
+                199,
+                200,
+                201,
+                202,
+                203,
+                204,
+                205,
+                206,
+                207,
+                208,
+                209,
+                210,
+                211,
+                212,
+                213,
+                214,
+                215,
+                216,
+                217,
+                218,
+                219,
+                220,
+                221,
+                222,
+                223,
+                224,
+                225,
+                226,
+                227,
+                228,
+                229,
+                230,
+                231,
+                232,
+                233
+              ],
+              "body_hash": "f9f6fe2c2de6bcf8b589541413dcae9813defca45f9a45b223faa700ec816a6c",
+              "truncated": false,
+              "scope": "file_read",
+              "aliases": [
+                "4924bf174937ec6ddaf1faf5"
+              ]
+            },
+            {
+              "artifact_id": "diff:haystack/components/converters/json.py:0:191",
+              "evidence_id": "ev_323009a5002d48889b0020e9",
+              "snapshot_id": "95f7ba88c7b34edb2597834d",
+              "revision": "4d9082be92d11d11e82c14030073ee70c64fdb53",
+              "path": "haystack/components/converters/json.py",
+              "side": "new",
+              "start_line": 191,
+              "end_line": 197,
+              "content": "@@ -191,7 +191,7 @@ class JSONConverter:\n         except UnicodeError as exc:\n             logger.warning(\n                 \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n-                source=source.meta.get(\"file_path\", \"unknown\"),\n+                source=source.meta[\"file_path\"],\n                 error=exc,\n             )\n             return []",
+              "content_hash": "ace007cfc68a47efc646bc0020a2802ef53e53653f8f647fdc3bc621dfaecfb6",
+              "source_type": "git_diff",
+              "source_tool_call_id": "",
+              "delivery_request_id": "",
+              "lifecycle": "delivered",
+              "displayed_ranges": [
+                {
+                  "start_line": 191,
+                  "end_line": 197
+                }
+              ],
+              "displayed_line_numbers": [
+                191,
+                192,
+                193,
+                194,
+                195,
+                196,
+                197
+              ],
+              "body_hash": "ace007cfc68a47efc646bc0020a2802ef53e53653f8f647fdc3bc621dfaecfb6",
+              "truncated": false,
+              "scope": "prompt_diff",
+              "aliases": [
+                "diff:haystack/components/converters/json.py:0:191"
+              ]
+            },
+            {
+              "artifact_id": "diff:haystack/components/converters/json.py:1:204",
+              "evidence_id": "ev_010fa656ca263c19cd42af3c",
+              "snapshot_id": "95f7ba88c7b34edb2597834d",
+              "revision": "4d9082be92d11d11e82c14030073ee70c64fdb53",
+              "path": "haystack/components/converters/json.py",
+              "side": "new",
+              "start_line": 204,
+              "end_line": 210,
+              "content": "@@ -204,7 +204,7 @@ class JSONConverter:\n             except Exception as exc:\n                 logger.warning(\n                     \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n-                    source=source.meta.get(\"file_path\", \"unknown\"),\n+                    source=source.meta[\"file_path\"],\n                     error=exc,\n                 )\n                 return []",
+              "content_hash": "6b594b2e0af830078eec8642f79bf15ddb464050fc15f6e606e145dc23bed2f9",
+              "source_type": "git_diff",
+              "source_tool_call_id": "",
+              "delivery_request_id": "",
+              "lifecycle": "delivered",
+              "displayed_ranges": [
+                {
+                  "start_line": 204,
+                  "end_line": 210
+                }
+              ],
+              "displayed_line_numbers": [
+                204,
+                205,
+                206,
+                207,
+                208,
+                209,
+                210
+              ],
+              "body_hash": "6b594b2e0af830078eec8642f79bf15ddb464050fc15f6e606e145dc23bed2f9",
+              "truncated": false,
+              "scope": "prompt_diff",
+              "aliases": [
+                "diff:haystack/components/converters/json.py:1:204"
+              ]
+            },
+            {
+              "artifact_id": "diff:haystack/components/converters/json.py:2:216",
+              "evidence_id": "ev_9f6a0e11887d549c925715c7",
+              "snapshot_id": "95f7ba88c7b34edb2597834d",
+              "revision": "4d9082be92d11d11e82c14030073ee70c64fdb53",
+              "path": "haystack/components/converters/json.py",
+              "side": "new",
+              "start_line": 216,
+              "end_line": 222,
+              "content": "@@ -216,7 +216,7 @@ class JSONConverter:\n             except json.JSONDecodeError as exc:\n                 logger.warning(\n                     \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n-                    source=source.meta.get(\"file_path\", \"unknown\"),\n+                    source=source.meta[\"file_path\"],\n                     error=exc,\n                 )\n                 return []",
+              "content_hash": "89cd0f794017bd320767c6348bbfa89f1cf0c98904600ba0a9471bf3514e488d",
+              "source_type": "git_diff",
+              "source_tool_call_id": "",
+              "delivery_request_id": "",
+              "lifecycle": "delivered",
+              "displayed_ranges": [
+                {
+                  "start_line": 216,
+                  "end_line": 222
+                }
+              ],
+              "displayed_line_numbers": [
+                216,
+                217,
+                218,
+                219,
+                220,
+                221,
+                222
+              ],
+              "body_hash": "89cd0f794017bd320767c6348bbfa89f1cf0c98904600ba0a9471bf3514e488d",
+              "truncated": false,
+              "scope": "prompt_diff",
+              "aliases": [
+                "diff:haystack/components/converters/json.py:2:216"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "rje_6cad44534ede4b7ead22d3d8131d6a10",
+          "seq": 6,
+          "type": "evidence_catalog",
+          "records": [
+            {
+              "artifact_id": "4924bf174937ec6ddaf1faf5",
+              "evidence_id": "ev_3195495b2d1d15af6335c5d7",
+              "snapshot_id": "95f7ba88c7b34edb2597834d",
+              "revision": "4d9082be92d11d11e82c14030073ee70c64fdb53",
+              "path": "haystack/components/converters/json.py",
+              "side": "new",
+              "start_line": 154,
+              "end_line": 233,
+              "content": "154:         Serializes the component to a dictionary.\n155: \n156:         :returns:\n157:             Dictionary with serialized data.\n158:         \"\"\"\n159:         return default_to_dict(\n160:             self,\n161:             jq_schema=self._jq_schema,\n162:             content_key=self._content_key,\n163:             extra_meta_fields=self._meta_fields,\n164:             store_full_path=self._store_full_path,\n165:         )\n166: \n167:     @classmethod\n168:     def from_dict(cls, data: dict[str, Any]) -> \"JSONConverter\":\n169:         \"\"\"\n170:         Deserializes the component from a dictionary.\n171: \n172:         :param data:\n173:             Dictionary to deserialize from.\n174:         :returns:\n175:             Deserialized component.\n176:         \"\"\"\n177:         return default_from_dict(cls, data)\n178: \n179:     def _get_content_and_meta(self, source: ByteStream) -> list[tuple[str, dict[str, Any]]]:\n180:         \"\"\"\n181:         Utility function to extract text and metadata from a JSON file.\n182: \n183:         :param source:\n184:             UTF-8 byte stream.\n185:         :returns:\n186:             Collection of text and metadata dict tuples, each corresponding\n187:             to a different document.\n188:         \"\"\"\n189:         try:\n190:             file_content = source.data.decode(\"utf-8\")\n191:         except UnicodeError as exc:\n192:             logger.warning(\n193:                 \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n194:                 source=source.meta[\"file_path\"],\n195:                 error=exc,\n196:             )\n197:             return []\n198: \n199:         meta_fields = self._meta_fields or set()\n200: \n201:         if self._compiled_filter is not None:\n202:             try:\n203:                 objects = list(self._compiled_filter.input_text(file_content))\n204:             except Exception as exc:\n205:                 logger.warning(\n206:                     \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n207:                     source=source.meta[\"file_path\"],\n208:                     error=exc,\n209:                 )\n210:                 return []\n211:         else:\n212:             # We just load the whole file as JSON if the user didn't provide a jq filter.\n213:             # We put it in a list even if it's not to ease handling it later on.\n214:             try:\n215:                 objects = [json.loads(file_content)]\n216:             except json.JSONDecodeError as exc:\n217:                 logger.warning(\n218:                     \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n219:                     source=source.meta[\"file_path\"],\n220:                     error=exc,\n221:                 )\n222:                 return []\n223: \n224:         result = []\n225:         if self._content_key is not None:\n226:             for obj in objects:\n227:                 if not isinstance(obj, dict):\n228:                     logger.warning(\"Expected a dictionary but got {obj}. Skipping it.\", obj=obj)\n229:                     continue\n230:                 if self._content_key not in obj:\n231:                     logger.warning(\n232:                         \"'{content_key}' not found in {obj}. Skipping it.\", content_key=self._content_key, obj=obj\n233:                     )",
+              "content_hash": "f9f6fe2c2de6bcf8b589541413dcae9813defca45f9a45b223faa700ec816a6c",
+              "source_type": "read_file",
+              "source_tool_call_id": "prefetch-read-file-0",
+              "delivery_request_id": "prefetch-read-file-0",
+              "lifecycle": "delivered",
+              "displayed_ranges": [
+                {
+                  "start_line": 154,
+                  "end_line": 233
+                }
+              ],
+              "displayed_line_numbers": [
+                154,
+                155,
+                156,
+                157,
+                158,
+                159,
+                160,
+                161,
+                162,
+                163,
+                164,
+                165,
+                166,
+                167,
+                168,
+                169,
+                170,
+                171,
+                172,
+                173,
+                174,
+                175,
+                176,
+                177,
+                178,
+                179,
+                180,
+                181,
+                182,
+                183,
+                184,
+                185,
+                186,
+                187,
+                188,
+                189,
+                190,
+                191,
+                192,
+                193,
+                194,
+                195,
+                196,
+                197,
+                198,
+                199,
+                200,
+                201,
+                202,
+                203,
+                204,
+                205,
+                206,
+                207,
+                208,
+                209,
+                210,
+                211,
+                212,
+                213,
+                214,
+                215,
+                216,
+                217,
+                218,
+                219,
+                220,
+                221,
+                222,
+                223,
+                224,
+                225,
+                226,
+                227,
+                228,
+                229,
+                230,
+                231,
+                232,
+                233
+              ],
+              "body_hash": "f9f6fe2c2de6bcf8b589541413dcae9813defca45f9a45b223faa700ec816a6c",
+              "truncated": false,
+              "scope": "file_read",
+              "aliases": [
+                "4924bf174937ec6ddaf1faf5",
+                "ev_3195495b2d1d15af6335c5d7"
+              ]
+            },
+            {
+              "artifact_id": "diff:haystack/components/converters/json.py:0:191",
+              "evidence_id": "ev_323009a5002d48889b0020e9",
+              "snapshot_id": "95f7ba88c7b34edb2597834d",
+              "revision": "4d9082be92d11d11e82c14030073ee70c64fdb53",
+              "path": "haystack/components/converters/json.py",
+              "side": "new",
+              "start_line": 191,
+              "end_line": 197,
+              "content": "@@ -191,7 +191,7 @@ class JSONConverter:\n         except UnicodeError as exc:\n             logger.warning(\n                 \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n-                source=source.meta.get(\"file_path\", \"unknown\"),\n+                source=source.meta[\"file_path\"],\n                 error=exc,\n             )\n             return []",
+              "content_hash": "ace007cfc68a47efc646bc0020a2802ef53e53653f8f647fdc3bc621dfaecfb6",
+              "source_type": "git_diff",
+              "source_tool_call_id": "",
+              "delivery_request_id": "",
+              "lifecycle": "delivered",
+              "displayed_ranges": [
+                {
+                  "start_line": 191,
+                  "end_line": 197
+                }
+              ],
+              "displayed_line_numbers": [
+                191,
+                192,
+                193,
+                194,
+                195,
+                196,
+                197
+              ],
+              "body_hash": "ace007cfc68a47efc646bc0020a2802ef53e53653f8f647fdc3bc621dfaecfb6",
+              "truncated": false,
+              "scope": "prompt_diff",
+              "aliases": [
+                "diff:haystack/components/converters/json.py:0:191",
+                "ev_323009a5002d48889b0020e9"
+              ]
+            },
+            {
+              "artifact_id": "diff:haystack/components/converters/json.py:1:204",
+              "evidence_id": "ev_010fa656ca263c19cd42af3c",
+              "snapshot_id": "95f7ba88c7b34edb2597834d",
+              "revision": "4d9082be92d11d11e82c14030073ee70c64fdb53",
+              "path": "haystack/components/converters/json.py",
+              "side": "new",
+              "start_line": 204,
+              "end_line": 210,
+              "content": "@@ -204,7 +204,7 @@ class JSONConverter:\n             except Exception as exc:\n                 logger.warning(\n                     \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n-                    source=source.meta.get(\"file_path\", \"unknown\"),\n+                    source=source.meta[\"file_path\"],\n                     error=exc,\n                 )\n                 return []",
+              "content_hash": "6b594b2e0af830078eec8642f79bf15ddb464050fc15f6e606e145dc23bed2f9",
+              "source_type": "git_diff",
+              "source_tool_call_id": "",
+              "delivery_request_id": "",
+              "lifecycle": "delivered",
+              "displayed_ranges": [
+                {
+                  "start_line": 204,
+                  "end_line": 210
+                }
+              ],
+              "displayed_line_numbers": [
+                204,
+                205,
+                206,
+                207,
+                208,
+                209,
+                210
+              ],
+              "body_hash": "6b594b2e0af830078eec8642f79bf15ddb464050fc15f6e606e145dc23bed2f9",
+              "truncated": false,
+              "scope": "prompt_diff",
+              "aliases": [
+                "diff:haystack/components/converters/json.py:1:204",
+                "ev_010fa656ca263c19cd42af3c"
+              ]
+            },
+            {
+              "artifact_id": "diff:haystack/components/converters/json.py:2:216",
+              "evidence_id": "ev_9f6a0e11887d549c925715c7",
+              "snapshot_id": "95f7ba88c7b34edb2597834d",
+              "revision": "4d9082be92d11d11e82c14030073ee70c64fdb53",
+              "path": "haystack/components/converters/json.py",
+              "side": "new",
+              "start_line": 216,
+              "end_line": 222,
+              "content": "@@ -216,7 +216,7 @@ class JSONConverter:\n             except json.JSONDecodeError as exc:\n                 logger.warning(\n                     \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n-                    source=source.meta.get(\"file_path\", \"unknown\"),\n+                    source=source.meta[\"file_path\"],\n                     error=exc,\n                 )\n                 return []",
+              "content_hash": "89cd0f794017bd320767c6348bbfa89f1cf0c98904600ba0a9471bf3514e488d",
+              "source_type": "git_diff",
+              "source_tool_call_id": "",
+              "delivery_request_id": "",
+              "lifecycle": "delivered",
+              "displayed_ranges": [
+                {
+                  "start_line": 216,
+                  "end_line": 222
+                }
+              ],
+              "displayed_line_numbers": [
+                216,
+                217,
+                218,
+                219,
+                220,
+                221,
+                222
+              ],
+              "body_hash": "89cd0f794017bd320767c6348bbfa89f1cf0c98904600ba0a9471bf3514e488d",
+              "truncated": false,
+              "scope": "prompt_diff",
+              "aliases": [
+                "diff:haystack/components/converters/json.py:2:216",
+                "ev_9f6a0e11887d549c925715c7"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "rje_e514e16e06274979a19dc0e0741dd0a0",
+          "seq": 10,
+          "type": "evidence_catalog",
+          "records": [
+            {
+              "artifact_id": "4924bf174937ec6ddaf1faf5",
+              "evidence_id": "ev_3195495b2d1d15af6335c5d7",
+              "snapshot_id": "95f7ba88c7b34edb2597834d",
+              "revision": "4d9082be92d11d11e82c14030073ee70c64fdb53",
+              "path": "haystack/components/converters/json.py",
+              "side": "new",
+              "start_line": 154,
+              "end_line": 233,
+              "content": "154:         Serializes the component to a dictionary.\n155: \n156:         :returns:\n157:             Dictionary with serialized data.\n158:         \"\"\"\n159:         return default_to_dict(\n160:             self,\n161:             jq_schema=self._jq_schema,\n162:             content_key=self._content_key,\n163:             extra_meta_fields=self._meta_fields,\n164:             store_full_path=self._store_full_path,\n165:         )\n166: \n167:     @classmethod\n168:     def from_dict(cls, data: dict[str, Any]) -> \"JSONConverter\":\n169:         \"\"\"\n170:         Deserializes the component from a dictionary.\n171: \n172:         :param data:\n173:             Dictionary to deserialize from.\n174:         :returns:\n175:             Deserialized component.\n176:         \"\"\"\n177:         return default_from_dict(cls, data)\n178: \n179:     def _get_content_and_meta(self, source: ByteStream) -> list[tuple[str, dict[str, Any]]]:\n180:         \"\"\"\n181:         Utility function to extract text and metadata from a JSON file.\n182: \n183:         :param source:\n184:             UTF-8 byte stream.\n185:         :returns:\n186:             Collection of text and metadata dict tuples, each corresponding\n187:             to a different document.\n188:         \"\"\"\n189:         try:\n190:             file_content = source.data.decode(\"utf-8\")\n191:         except UnicodeError as exc:\n192:             logger.warning(\n193:                 \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n194:                 source=source.meta[\"file_path\"],\n195:                 error=exc,\n196:             )\n197:             return []\n198: \n199:         meta_fields = self._meta_fields or set()\n200: \n201:         if self._compiled_filter is not None:\n202:             try:\n203:                 objects = list(self._compiled_filter.input_text(file_content))\n204:             except Exception as exc:\n205:                 logger.warning(\n206:                     \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n207:                     source=source.meta[\"file_path\"],\n208:                     error=exc,\n209:                 )\n210:                 return []\n211:         else:\n212:             # We just load the whole file as JSON if the user didn't provide a jq filter.\n213:             # We put it in a list even if it's not to ease handling it later on.\n214:             try:\n215:                 objects = [json.loads(file_content)]\n216:             except json.JSONDecodeError as exc:\n217:                 logger.warning(\n218:                     \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n219:                     source=source.meta[\"file_path\"],\n220:                     error=exc,\n221:                 )\n222:                 return []\n223: \n224:         result = []\n225:         if self._content_key is not None:\n226:             for obj in objects:\n227:                 if not isinstance(obj, dict):\n228:                     logger.warning(\"Expected a dictionary but got {obj}. Skipping it.\", obj=obj)\n229:                     continue\n230:                 if self._content_key not in obj:\n231:                     logger.warning(\n232:                         \"'{content_key}' not found in {obj}. Skipping it.\", content_key=self._content_key, obj=obj\n233:                     )",
+              "content_hash": "f9f6fe2c2de6bcf8b589541413dcae9813defca45f9a45b223faa700ec816a6c",
+              "source_type": "read_file",
+              "source_tool_call_id": "prefetch-read-file-0",
+              "delivery_request_id": "prefetch-read-file-0",
+              "lifecycle": "delivered",
+              "displayed_ranges": [
+                {
+                  "start_line": 154,
+                  "end_line": 233
+                }
+              ],
+              "displayed_line_numbers": [
+                154,
+                155,
+                156,
+                157,
+                158,
+                159,
+                160,
+                161,
+                162,
+                163,
+                164,
+                165,
+                166,
+                167,
+                168,
+                169,
+                170,
+                171,
+                172,
+                173,
+                174,
+                175,
+                176,
+                177,
+                178,
+                179,
+                180,
+                181,
+                182,
+                183,
+                184,
+                185,
+                186,
+                187,
+                188,
+                189,
+                190,
+                191,
+                192,
+                193,
+                194,
+                195,
+                196,
+                197,
+                198,
+                199,
+                200,
+                201,
+                202,
+                203,
+                204,
+                205,
+                206,
+                207,
+                208,
+                209,
+                210,
+                211,
+                212,
+                213,
+                214,
+                215,
+                216,
+                217,
+                218,
+                219,
+                220,
+                221,
+                222,
+                223,
+                224,
+                225,
+                226,
+                227,
+                228,
+                229,
+                230,
+                231,
+                232,
+                233
+              ],
+              "body_hash": "f9f6fe2c2de6bcf8b589541413dcae9813defca45f9a45b223faa700ec816a6c",
+              "truncated": false,
+              "scope": "file_read",
+              "aliases": [
+                "4924bf174937ec6ddaf1faf5",
+                "ev_3195495b2d1d15af6335c5d7"
+              ]
+            },
+            {
+              "artifact_id": "diff:haystack/components/converters/json.py:0:191",
+              "evidence_id": "ev_323009a5002d48889b0020e9",
+              "snapshot_id": "95f7ba88c7b34edb2597834d",
+              "revision": "4d9082be92d11d11e82c14030073ee70c64fdb53",
+              "path": "haystack/components/converters/json.py",
+              "side": "new",
+              "start_line": 191,
+              "end_line": 197,
+              "content": "@@ -191,7 +191,7 @@ class JSONConverter:\n         except UnicodeError as exc:\n             logger.warning(\n                 \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n-                source=source.meta.get(\"file_path\", \"unknown\"),\n+                source=source.meta[\"file_path\"],\n                 error=exc,\n             )\n             return []",
+              "content_hash": "ace007cfc68a47efc646bc0020a2802ef53e53653f8f647fdc3bc621dfaecfb6",
+              "source_type": "git_diff",
+              "source_tool_call_id": "",
+              "delivery_request_id": "",
+              "lifecycle": "delivered",
+              "displayed_ranges": [
+                {
+                  "start_line": 191,
+                  "end_line": 197
+                }
+              ],
+              "displayed_line_numbers": [
+                191,
+                192,
+                193,
+                194,
+                195,
+                196,
+                197
+              ],
+              "body_hash": "ace007cfc68a47efc646bc0020a2802ef53e53653f8f647fdc3bc621dfaecfb6",
+              "truncated": false,
+              "scope": "prompt_diff",
+              "aliases": [
+                "diff:haystack/components/converters/json.py:0:191",
+                "ev_323009a5002d48889b0020e9"
+              ]
+            },
+            {
+              "artifact_id": "diff:haystack/components/converters/json.py:1:204",
+              "evidence_id": "ev_010fa656ca263c19cd42af3c",
+              "snapshot_id": "95f7ba88c7b34edb2597834d",
+              "revision": "4d9082be92d11d11e82c14030073ee70c64fdb53",
+              "path": "haystack/components/converters/json.py",
+              "side": "new",
+              "start_line": 204,
+              "end_line": 210,
+              "content": "@@ -204,7 +204,7 @@ class JSONConverter:\n             except Exception as exc:\n                 logger.warning(\n                     \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n-                    source=source.meta.get(\"file_path\", \"unknown\"),\n+                    source=source.meta[\"file_path\"],\n                     error=exc,\n                 )\n                 return []",
+              "content_hash": "6b594b2e0af830078eec8642f79bf15ddb464050fc15f6e606e145dc23bed2f9",
+              "source_type": "git_diff",
+              "source_tool_call_id": "",
+              "delivery_request_id": "",
+              "lifecycle": "delivered",
+              "displayed_ranges": [
+                {
+                  "start_line": 204,
+                  "end_line": 210
+                }
+              ],
+              "displayed_line_numbers": [
+                204,
+                205,
+                206,
+                207,
+                208,
+                209,
+                210
+              ],
+              "body_hash": "6b594b2e0af830078eec8642f79bf15ddb464050fc15f6e606e145dc23bed2f9",
+              "truncated": false,
+              "scope": "prompt_diff",
+              "aliases": [
+                "diff:haystack/components/converters/json.py:1:204",
+                "ev_010fa656ca263c19cd42af3c"
+              ]
+            },
+            {
+              "artifact_id": "diff:haystack/components/converters/json.py:2:216",
+              "evidence_id": "ev_9f6a0e11887d549c925715c7",
+              "snapshot_id": "95f7ba88c7b34edb2597834d",
+              "revision": "4d9082be92d11d11e82c14030073ee70c64fdb53",
+              "path": "haystack/components/converters/json.py",
+              "side": "new",
+              "start_line": 216,
+              "end_line": 222,
+              "content": "@@ -216,7 +216,7 @@ class JSONConverter:\n             except json.JSONDecodeError as exc:\n                 logger.warning(\n                     \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n-                    source=source.meta.get(\"file_path\", \"unknown\"),\n+                    source=source.meta[\"file_path\"],\n                     error=exc,\n                 )\n                 return []",
+              "content_hash": "89cd0f794017bd320767c6348bbfa89f1cf0c98904600ba0a9471bf3514e488d",
+              "source_type": "git_diff",
+              "source_tool_call_id": "",
+              "delivery_request_id": "",
+              "lifecycle": "delivered",
+              "displayed_ranges": [
+                {
+                  "start_line": 216,
+                  "end_line": 222
+                }
+              ],
+              "displayed_line_numbers": [
+                216,
+                217,
+                218,
+                219,
+                220,
+                221,
+                222
+              ],
+              "body_hash": "89cd0f794017bd320767c6348bbfa89f1cf0c98904600ba0a9471bf3514e488d",
+              "truncated": false,
+              "scope": "prompt_diff",
+              "aliases": [
+                "diff:haystack/components/converters/json.py:2:216",
+                "ev_9f6a0e11887d549c925715c7"
+              ]
+            },
+            {
+              "artifact_id": "8cf3e5d63ff567e8cb32cd43",
+              "evidence_id": "ev_52863cffd0dda71b1c6bda92",
+              "snapshot_id": "95f7ba88c7b34edb2597834d",
+              "revision": "4d9082be92d11d11e82c14030073ee70c64fdb53",
+              "path": "haystack/components/converters/utils.py",
+              "side": "new",
+              "start_line": 26,
+              "end_line": 26,
+              "content": "        bs = ByteStream.from_file_path(Path(source), guess_mime_type=guess_mime_type)",
+              "content_hash": "211ed1531afe21c3f4cf6dbbc7cc32f409060c615817040850e833aba13306cf",
+              "source_type": "grep_files",
+              "source_tool_call_id": "call_-7271802085111232920",
+              "delivery_request_id": "call_-7271802085111232920",
+              "lifecycle": "delivered",
+              "displayed_ranges": [
+                {
+                  "start_line": 26,
+                  "end_line": 26
+                }
+              ],
+              "displayed_line_numbers": [],
+              "body_hash": "211ed1531afe21c3f4cf6dbbc7cc32f409060c615817040850e833aba13306cf",
+              "truncated": false,
+              "scope": "match",
+              "aliases": [
+                "8cf3e5d63ff567e8cb32cd43"
+              ]
+            },
+            {
+              "artifact_id": "c207413ea2e63eb3ef6b9d55",
+              "evidence_id": "ev_27be54dc49069df6ee2eac32",
+              "snapshot_id": "95f7ba88c7b34edb2597834d",
+              "revision": "4d9082be92d11d11e82c14030073ee70c64fdb53",
+              "path": "haystack/components/converters/utils.py",
+              "side": "new",
+              "start_line": 27,
+              "end_line": 27,
+              "content": "        bs.meta[\"file_path\"] = str(source)",
+              "content_hash": "4685f4fd9474a94a441ad877c0d2a864df9b50e986f379a55d1c02fce63bee86",
+              "source_type": "grep_files",
+              "source_tool_call_id": "call_-7271802085111232920",
+              "delivery_request_id": "call_-7271802085111232920",
+              "lifecycle": "delivered",
+              "displayed_ranges": [
+                {
+                  "start_line": 27,
+                  "end_line": 27
+                }
+              ],
+              "displayed_line_numbers": [],
+              "body_hash": "4685f4fd9474a94a441ad877c0d2a864df9b50e986f379a55d1c02fce63bee86",
+              "truncated": false,
+              "scope": "match",
+              "aliases": [
+                "c207413ea2e63eb3ef6b9d55"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "rje_3e469d935909457fbd21e6934079f774",
+          "seq": 13,
+          "type": "evidence_catalog",
+          "records": [
+            {
+              "artifact_id": "4924bf174937ec6ddaf1faf5",
+              "evidence_id": "ev_3195495b2d1d15af6335c5d7",
+              "snapshot_id": "95f7ba88c7b34edb2597834d",
+              "revision": "4d9082be92d11d11e82c14030073ee70c64fdb53",
+              "path": "haystack/components/converters/json.py",
+              "side": "new",
+              "start_line": 154,
+              "end_line": 233,
+              "content": "154:         Serializes the component to a dictionary.\n155: \n156:         :returns:\n157:             Dictionary with serialized data.\n158:         \"\"\"\n159:         return default_to_dict(\n160:             self,\n161:             jq_schema=self._jq_schema,\n162:             content_key=self._content_key,\n163:             extra_meta_fields=self._meta_fields,\n164:             store_full_path=self._store_full_path,\n165:         )\n166: \n167:     @classmethod\n168:     def from_dict(cls, data: dict[str, Any]) -> \"JSONConverter\":\n169:         \"\"\"\n170:         Deserializes the component from a dictionary.\n171: \n172:         :param data:\n173:             Dictionary to deserialize from.\n174:         :returns:\n175:             Deserialized component.\n176:         \"\"\"\n177:         return default_from_dict(cls, data)\n178: \n179:     def _get_content_and_meta(self, source: ByteStream) -> list[tuple[str, dict[str, Any]]]:\n180:         \"\"\"\n181:         Utility function to extract text and metadata from a JSON file.\n182: \n183:         :param source:\n184:             UTF-8 byte stream.\n185:         :returns:\n186:             Collection of text and metadata dict tuples, each corresponding\n187:             to a different document.\n188:         \"\"\"\n189:         try:\n190:             file_content = source.data.decode(\"utf-8\")\n191:         except UnicodeError as exc:\n192:             logger.warning(\n193:                 \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n194:                 source=source.meta[\"file_path\"],\n195:                 error=exc,\n196:             )\n197:             return []\n198: \n199:         meta_fields = self._meta_fields or set()\n200: \n201:         if self._compiled_filter is not None:\n202:             try:\n203:                 objects = list(self._compiled_filter.input_text(file_content))\n204:             except Exception as exc:\n205:                 logger.warning(\n206:                     \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n207:                     source=source.meta[\"file_path\"],\n208:                     error=exc,\n209:                 )\n210:                 return []\n211:         else:\n212:             # We just load the whole file as JSON if the user didn't provide a jq filter.\n213:             # We put it in a list even if it's not to ease handling it later on.\n214:             try:\n215:                 objects = [json.loads(file_content)]\n216:             except json.JSONDecodeError as exc:\n217:                 logger.warning(\n218:                     \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n219:                     source=source.meta[\"file_path\"],\n220:                     error=exc,\n221:                 )\n222:                 return []\n223: \n224:         result = []\n225:         if self._content_key is not None:\n226:             for obj in objects:\n227:                 if not isinstance(obj, dict):\n228:                     logger.warning(\"Expected a dictionary but got {obj}. Skipping it.\", obj=obj)\n229:                     continue\n230:                 if self._content_key not in obj:\n231:                     logger.warning(\n232:                         \"'{content_key}' not found in {obj}. Skipping it.\", content_key=self._content_key, obj=obj\n233:                     )",
+              "content_hash": "f9f6fe2c2de6bcf8b589541413dcae9813defca45f9a45b223faa700ec816a6c",
+              "source_type": "read_file",
+              "source_tool_call_id": "prefetch-read-file-0",
+              "delivery_request_id": "prefetch-read-file-0",
+              "lifecycle": "delivered",
+              "displayed_ranges": [
+                {
+                  "start_line": 154,
+                  "end_line": 233
+                }
+              ],
+              "displayed_line_numbers": [
+                154,
+                155,
+                156,
+                157,
+                158,
+                159,
+                160,
+                161,
+                162,
+                163,
+                164,
+                165,
+                166,
+                167,
+                168,
+                169,
+                170,
+                171,
+                172,
+                173,
+                174,
+                175,
+                176,
+                177,
+                178,
+                179,
+                180,
+                181,
+                182,
+                183,
+                184,
+                185,
+                186,
+                187,
+                188,
+                189,
+                190,
+                191,
+                192,
+                193,
+                194,
+                195,
+                196,
+                197,
+                198,
+                199,
+                200,
+                201,
+                202,
+                203,
+                204,
+                205,
+                206,
+                207,
+                208,
+                209,
+                210,
+                211,
+                212,
+                213,
+                214,
+                215,
+                216,
+                217,
+                218,
+                219,
+                220,
+                221,
+                222,
+                223,
+                224,
+                225,
+                226,
+                227,
+                228,
+                229,
+                230,
+                231,
+                232,
+                233
+              ],
+              "body_hash": "f9f6fe2c2de6bcf8b589541413dcae9813defca45f9a45b223faa700ec816a6c",
+              "truncated": false,
+              "scope": "file_read",
+              "aliases": [
+                "4924bf174937ec6ddaf1faf5",
+                "ev_3195495b2d1d15af6335c5d7"
+              ]
+            },
+            {
+              "artifact_id": "diff:haystack/components/converters/json.py:0:191",
+              "evidence_id": "ev_323009a5002d48889b0020e9",
+              "snapshot_id": "95f7ba88c7b34edb2597834d",
+              "revision": "4d9082be92d11d11e82c14030073ee70c64fdb53",
+              "path": "haystack/components/converters/json.py",
+              "side": "new",
+              "start_line": 191,
+              "end_line": 197,
+              "content": "@@ -191,7 +191,7 @@ class JSONConverter:\n         except UnicodeError as exc:\n             logger.warning(\n                 \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n-                source=source.meta.get(\"file_path\", \"unknown\"),\n+                source=source.meta[\"file_path\"],\n                 error=exc,\n             )\n             return []",
+              "content_hash": "ace007cfc68a47efc646bc0020a2802ef53e53653f8f647fdc3bc621dfaecfb6",
+              "source_type": "git_diff",
+              "source_tool_call_id": "",
+              "delivery_request_id": "",
+              "lifecycle": "delivered",
+              "displayed_ranges": [
+                {
+                  "start_line": 191,
+                  "end_line": 197
+                }
+              ],
+              "displayed_line_numbers": [
+                191,
+                192,
+                193,
+                194,
+                195,
+                196,
+                197
+              ],
+              "body_hash": "ace007cfc68a47efc646bc0020a2802ef53e53653f8f647fdc3bc621dfaecfb6",
+              "truncated": false,
+              "scope": "prompt_diff",
+              "aliases": [
+                "diff:haystack/components/converters/json.py:0:191",
+                "ev_323009a5002d48889b0020e9"
+              ]
+            },
+            {
+              "artifact_id": "diff:haystack/components/converters/json.py:1:204",
+              "evidence_id": "ev_010fa656ca263c19cd42af3c",
+              "snapshot_id": "95f7ba88c7b34edb2597834d",
+              "revision": "4d9082be92d11d11e82c14030073ee70c64fdb53",
+              "path": "haystack/components/converters/json.py",
+              "side": "new",
+              "start_line": 204,
+              "end_line": 210,
+              "content": "@@ -204,7 +204,7 @@ class JSONConverter:\n             except Exception as exc:\n                 logger.warning(\n                     \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n-                    source=source.meta.get(\"file_path\", \"unknown\"),\n+                    source=source.meta[\"file_path\"],\n                     error=exc,\n                 )\n                 return []",
+              "content_hash": "6b594b2e0af830078eec8642f79bf15ddb464050fc15f6e606e145dc23bed2f9",
+              "source_type": "git_diff",
+              "source_tool_call_id": "",
+              "delivery_request_id": "",
+              "lifecycle": "delivered",
+              "displayed_ranges": [
+                {
+                  "start_line": 204,
+                  "end_line": 210
+                }
+              ],
+              "displayed_line_numbers": [
+                204,
+                205,
+                206,
+                207,
+                208,
+                209,
+                210
+              ],
+              "body_hash": "6b594b2e0af830078eec8642f79bf15ddb464050fc15f6e606e145dc23bed2f9",
+              "truncated": false,
+              "scope": "prompt_diff",
+              "aliases": [
+                "diff:haystack/components/converters/json.py:1:204",
+                "ev_010fa656ca263c19cd42af3c"
+              ]
+            },
+            {
+              "artifact_id": "diff:haystack/components/converters/json.py:2:216",
+              "evidence_id": "ev_9f6a0e11887d549c925715c7",
+              "snapshot_id": "95f7ba88c7b34edb2597834d",
+              "revision": "4d9082be92d11d11e82c14030073ee70c64fdb53",
+              "path": "haystack/components/converters/json.py",
+              "side": "new",
+              "start_line": 216,
+              "end_line": 222,
+              "content": "@@ -216,7 +216,7 @@ class JSONConverter:\n             except json.JSONDecodeError as exc:\n                 logger.warning(\n                     \"Failed to extract text from {source}. Skipping it. Error: {error}\",\n-                    source=source.meta.get(\"file_path\", \"unknown\"),\n+                    source=source.meta[\"file_path\"],\n                     error=exc,\n                 )\n                 return []",
+              "content_hash": "89cd0f794017bd320767c6348bbfa89f1cf0c98904600ba0a9471bf3514e488d",
+              "source_type": "git_diff",
+              "source_tool_call_id": "",
+              "delivery_request_id": "",
+              "lifecycle": "delivered",
+              "displayed_ranges": [
+                {
+                  "start_line": 216,
+                  "end_line": 222
+                }
+              ],
+              "displayed_line_numbers": [
+                216,
+                217,
+                218,
+                219,
+                220,
+                221,
+                222
+              ],
+              "body_hash": "89cd0f794017bd320767c6348bbfa89f1cf0c98904600ba0a9471bf3514e488d",
+              "truncated": false,
+              "scope": "prompt_diff",
+              "aliases": [
+                "diff:haystack/components/converters/json.py:2:216",
+                "ev_9f6a0e11887d549c925715c7"
+              ]
+            },
+            {
+              "artifact_id": "8cf3e5d63ff567e8cb32cd43",
+              "evidence_id": "ev_52863cffd0dda71b1c6bda92",
+              "snapshot_id": "95f7ba88c7b34edb2597834d",
+              "revision": "4d9082be92d11d11e82c14030073ee70c64fdb53",
+              "path": "haystack/components/converters/utils.py",
+              "side": "new",
+              "start_line": 26,
+              "end_line": 26,
+              "content": "        bs = ByteStream.from_file_path(Path(source), guess_mime_type=guess_mime_type)",
+              "content_hash": "211ed1531afe21c3f4cf6dbbc7cc32f409060c615817040850e833aba13306cf",
+              "source_type": "grep_files",
+              "source_tool_call_id": "call_-7271802085111232920",
+              "delivery_request_id": "call_-7271802085111232920",
+              "lifecycle": "delivered",
+              "displayed_ranges": [
+                {
+                  "start_line": 26,
+                  "end_line": 26
+                }
+              ],
+              "displayed_line_numbers": [],
+              "body_hash": "211ed1531afe21c3f4cf6dbbc7cc32f409060c615817040850e833aba13306cf",
+              "truncated": false,
+              "scope": "match",
+              "aliases": [
+                "8cf3e5d63ff567e8cb32cd43",
+                "ev_52863cffd0dda71b1c6bda92"
+              ]
+            },
+            {
+              "artifact_id": "c207413ea2e63eb3ef6b9d55",
+              "evidence_id": "ev_27be54dc49069df6ee2eac32",
+              "snapshot_id": "95f7ba88c7b34edb2597834d",
+              "revision": "4d9082be92d11d11e82c14030073ee70c64fdb53",
+              "path": "haystack/components/converters/utils.py",
+              "side": "new",
+              "start_line": 27,
+              "end_line": 27,
+              "content": "        bs.meta[\"file_path\"] = str(source)",
+              "content_hash": "4685f4fd9474a94a441ad877c0d2a864df9b50e986f379a55d1c02fce63bee86",
+              "source_type": "grep_files",
+              "source_tool_call_id": "call_-7271802085111232920",
+              "delivery_request_id": "call_-7271802085111232920",
+              "lifecycle": "delivered",
+              "displayed_ranges": [
+                {
+                  "start_line": 27,
+                  "end_line": 27
+                }
+              ],
+              "displayed_line_numbers": [],
+              "body_hash": "4685f4fd9474a94a441ad877c0d2a864df9b50e986f379a55d1c02fce63bee86",
+              "truncated": false,
+              "scope": "match",
+              "aliases": [
+                "c207413ea2e63eb3ef6b9d55",
+                "ev_27be54dc49069df6ee2eac32"
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

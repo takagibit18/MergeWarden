@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from types import SimpleNamespace
 from typing import Any
 
@@ -29,6 +30,37 @@ from src.models.exceptions import (
     ModelTimeoutError,
 )
 from src.models.schemas import Message, ModelConfig
+
+
+def test_sdk_http_client_ignores_only_aggregate_proxy(monkeypatch) -> None:
+    seen: dict[str, str | None] = {}
+
+    class _FakeHttpClient:
+        def __init__(self, *, trust_env: bool) -> None:
+            seen["ALL_PROXY"] = os.environ.get("ALL_PROXY")
+            seen["all_proxy"] = os.environ.get("all_proxy")
+            seen["HTTP_PROXY"] = os.environ.get("HTTP_PROXY")
+            seen["HTTPS_PROXY"] = os.environ.get("HTTPS_PROXY")
+            seen["trust_env"] = str(trust_env)
+
+    monkeypatch.setenv("ALL_PROXY", "socks5://127.0.0.1:1")
+    monkeypatch.setenv("all_proxy", "socks5://127.0.0.1:1")
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example.test:8080")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example.test:8080")
+    monkeypatch.setattr("src.models.client.httpx.AsyncClient", _FakeHttpClient)
+
+    client = ModelClient._build_http_client()  # noqa: SLF001
+
+    assert isinstance(client, _FakeHttpClient)
+    assert seen == {
+        "ALL_PROXY": None,
+        "all_proxy": None,
+        "HTTP_PROXY": "http://proxy.example.test:8080",
+        "HTTPS_PROXY": "http://proxy.example.test:8080",
+        "trust_env": "True",
+    }
+    assert os.environ["ALL_PROXY"] == "socks5://127.0.0.1:1"
+    assert os.environ["all_proxy"] == "socks5://127.0.0.1:1"
 
 
 class _FakeCompletions:

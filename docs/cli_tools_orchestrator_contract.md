@@ -3,7 +3,7 @@
 > **目的**：固定 `cli.py`、`src/tools/`、`src/orchestrator/` 三层调用边界，作为实现与联调的强约束。  
 > **状态**：生效中的基线契约；违背本契约的改动必须先改文档再改代码。
 
-**相关文档**：[project_plan.md](./project_plan.md)、[architecture.md](./architecture.md)。
+**相关文档**：[长期设计记录](./design_decisions.md)、[architecture.md](./architecture.md)。
 
 ---
 

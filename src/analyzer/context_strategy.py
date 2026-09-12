@@ -238,6 +238,27 @@ class GraphHybridContextStrategy:
                 "skipped_weak_test_relation_count", 0
             ),
         }
+        # Bind every graph span to the exact repository snapshot used by the
+        # index.  These fields stay out of the reviewer projection but let the
+        # final guard reject evidence copied across revisions.
+        for index, manifest in enumerate(plan.manifests):
+            snapshot_id = str(index_result.repository_id or "")
+            revision = str(index_result.revision or "")
+            plan.manifests[index] = manifest.model_copy(
+                update={
+                    "snapshot_id": snapshot_id,
+                    "revision": revision,
+                    "included_spans": [
+                        span.model_copy(
+                            update={
+                                "snapshot_id": snapshot_id,
+                                "revision": revision,
+                            }
+                        )
+                        for span in manifest.included_spans
+                    ],
+                }
+            )
         self._emit_graph_events(index_result, graph, anchors, plan)
         return ReviewContext(
             context_mode=self.mode,

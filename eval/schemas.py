@@ -17,15 +17,60 @@ FixtureType = Literal["review", "debug"]
 EvalGraphCacheMode = Literal["disabled", "cold", "warm"]
 StructuralScope = Literal["local", "direct_cross_file", "multi_hop"]
 ReviewPatchScope = Literal["legacy", "full_pr", "partial_pr"]
-# ``semantic-v2`` is retained as the frozen baseline matcher.  New evals use
-# the strict matcher by default, while callers can explicitly select v2 when
-# replaying historical artifacts.
-EvalMatcherVersion = Literal["semantic-v2", "semantic-v3"]
+# ``semantic-v2`` and ``semantic-v3`` are retained as frozen historical
+# matchers.  ``semantic-v3-content-v1`` is the explicit adapter for the slim
+# 3.0 finding contract; keeping a distinct name prevents an old matcher from
+# silently consuming empty v3 narrative fields.
+V3_CONTENT_MATCHER_VERSION = "semantic-v3-content-v1"
+EvalMatcherVersion = Literal[
+    "semantic-v2",
+    "semantic-v3",
+    "semantic-v4",
+    "semantic-v3-content-v1",
+]
 EVAL_MATCHER_VERSION = "semantic-v2"
 LEGACY_EVAL_MATCHER_VERSION = EVAL_MATCHER_VERSION
 DEFAULT_EVAL_MATCHER_VERSION = "semantic-v3"
-EVAL_MATCHER_VERSIONS = (LEGACY_EVAL_MATCHER_VERSION, DEFAULT_EVAL_MATCHER_VERSION)
+EVAL_MATCHER_VERSIONS = (
+    LEGACY_EVAL_MATCHER_VERSION,
+    DEFAULT_EVAL_MATCHER_VERSION,
+    V3_CONTENT_MATCHER_VERSION,
+    "semantic-v4",
+)
 EvalSkillRetrievalMode = Literal["sequential", "deterministic"]
+
+# This is intentionally a small compatibility declaration, not a generic
+# version framework.  The finding contract and the matcher describe
+# different boundaries and must be selected together before a run starts.
+EVAL_MATCHER_CONTRACT_COMPATIBILITY: dict[str, frozenset[str]] = {
+    "semantic-v2": frozenset({"1.0", "2.0"}),
+    "semantic-v3": frozenset({"1.0", "2.0"}),
+    "semantic-v4": frozenset({"2.0"}),
+    V3_CONTENT_MATCHER_VERSION: frozenset({"3.0"}),
+}
+
+
+def validate_eval_matcher_contract(
+    matcher_version: str,
+    finding_contract_version: str,
+) -> None:
+    """Reject a matcher/contract pair with no declared evaluation semantics."""
+
+    matcher = str(matcher_version or "").strip()
+    contract = str(finding_contract_version or "").strip()
+    allowed_contracts = EVAL_MATCHER_CONTRACT_COMPATIBILITY.get(matcher)
+    if allowed_contracts is None:
+        supported = ", ".join(EVAL_MATCHER_VERSIONS)
+        raise ValueError(
+            f"Unsupported matcher version {matcher!r}; use {supported}"
+        )
+    if contract not in allowed_contracts:
+        allowed = ", ".join(sorted(allowed_contracts))
+        raise ValueError(
+            "Unsupported evaluation contract/matcher combination: "
+            f"finding_contract_version={contract!r}, matcher_version={matcher!r}; "
+            f"{matcher!r} supports contract version(s): {allowed}"
+        )
 
 
 class EvalVariant(BaseModel):
@@ -89,6 +134,14 @@ class ExpectedIssue(BaseModel):
     invariant_pattern: str = Field(
         default="",
         description="Optional semantic pattern for the violated invariant.",
+    )
+    trigger_pattern: str = Field(
+        default="",
+        description="Optional semantic pattern for the triggering condition.",
+    )
+    impact_pattern: str = Field(
+        default="",
+        description="Optional semantic pattern for the observable impact.",
     )
     affected_paths: list[str] = Field(
         default_factory=list,
@@ -235,6 +288,9 @@ class EvalIssueMatch(BaseModel):
     expected_index: int
     matched: bool
     matched_actual_index: int | None = None
+    location_matched: bool | None = None
+    root_cause_matched: bool | None = None
+    role_match_diagnostics: dict[str, Any] = Field(default_factory=dict)
 
 
 class StructuralIssueMetrics(BaseModel):
@@ -315,14 +371,28 @@ class ReviewProcessMetrics(BaseModel):
     tool_bearing_iterations: int = Field(default=0, ge=0)
     submit_iteration: int | None = Field(default=None, ge=0)
     natural_completion: bool = False
+    investigation_ready: bool = False
+    submission_received: bool = False
+    review_complete: bool = False
+    delivery_complete: bool = False
     iteration_guard_hit: bool = False
     pre_budget_submit_triggered: bool = False
     termination_reason: str = ""
     model_response_journal_writes: int = Field(default=0, ge=0)
     draft_findings_created: int = Field(default=0, ge=0)
+    draft_state_transition_count: int = Field(default=0, ge=0)
+    draft_status_counts: dict[str, int] = Field(default_factory=dict)
+    draft_stagnation_streak: int = Field(default=0, ge=0)
+    incomplete_reasons: list[str] = Field(default_factory=list)
     length_recoveries_attempted: int = Field(default=0, ge=0)
     length_recoveries_succeeded: int = Field(default=0, ge=0)
     length_recoveries_failed: int = Field(default=0, ge=0)
+    repair_budget_total: int = Field(default=0, ge=0)
+    repair_budget_remaining: int = Field(default=0, ge=0)
+    repair_format_attempt_count: int = Field(default=0, ge=0)
+    repair_contract_attempt_count: int = Field(default=0, ge=0)
+    repair_evidence_attempt_count: int = Field(default=0, ge=0)
+    final_submit_attempt_count: int = Field(default=0, ge=0)
     grep_calls: int = Field(default=0, ge=0)
     read_file_calls: int = Field(default=0, ge=0)
     symbol_lookup_calls: int = Field(default=0, ge=0)
@@ -368,6 +438,7 @@ class ReviewProcessMetrics(BaseModel):
         "accepted",
         "partially_rejected",
         "all_candidates_rejected",
+        "incomplete",
     ] = "no_candidates"
     integrity_failure_codes: dict[str, list[str]] = Field(default_factory=dict)
     integrity_failure_details: dict[str, list[dict[str, Any]]] = Field(
@@ -385,6 +456,26 @@ class ReviewProcessMetrics(BaseModel):
     duplicate_tool_call_count: int = Field(default=0, ge=0)
     structured_hypothesis_count: int = Field(default=0, ge=0)
     evidence_complete_count: int = Field(default=0, ge=0)
+    evidence_validated_count: int = Field(default=0, ge=0)
+    logical_candidate_count: int = Field(default=0, ge=0)
+    submitted_finding_count: int = Field(default=0, ge=0)
+    submitted_attempt_count: int = Field(default=0, ge=0)
+    no_finding_run_count: int = Field(default=0, ge=0)
+    non_risk_not_routed_count: int = Field(default=0, ge=0)
+    pre_verifier_rejected_count: int = Field(default=0, ge=0)
+    policy_passed_count: int = Field(default=0, ge=0)
+    policy_rejected_count: int = Field(default=0, ge=0)
+    risk_candidate_count: int = Field(default=0, ge=0)
+    integrity_checked_count: int = Field(default=0, ge=0)
+    integrity_verified_count: int = Field(default=0, ge=0)
+    integrity_needs_repair_count: int = Field(default=0, ge=0)
+    integrity_invalid_count: int = Field(default=0, ge=0)
+    deterministic_rejected_count: int = Field(default=0, ge=0)
+    repair_attempted_count: int = Field(default=0, ge=0)
+    repair_succeeded_count: int = Field(default=0, ge=0)
+    final_risk_finding_count: int = Field(default=0, ge=0)
+    final_published_count: int = Field(default=0, ge=0)
+    finding_run_status: str = "complete"
     candidate_context_tokens: int = Field(default=0, ge=0)
     included_graph_nodes: int = Field(default=0, ge=0)
     included_graph_paths: int = Field(default=0, ge=0)
@@ -416,6 +507,17 @@ class ReviewProcessMetrics(BaseModel):
     consolidator_accepted_cluster_count: int = Field(default=0, ge=0)
     consolidator_rejected_cluster_count: int = Field(default=0, ge=0)
     matcher_version: str = DEFAULT_EVAL_MATCHER_VERSION
+    finding_contract_version: str = "unknown"
+    reviewer_total_tokens: int | None = Field(
+        default=None,
+        ge=0,
+        description="Successful reviewer provider tokens for the measured run; null when usage is unavailable.",
+    )
+    verifier_total_tokens: int | None = Field(
+        default=None,
+        ge=0,
+        description="Successful independent semantic-verifier tokens for the measured run; null when usage is unavailable.",
+    )
     final_root_cause_count: int = Field(default=0, ge=0)
     finding_inflation_ratio: float = Field(default=0.0, ge=0.0)
     event_log_status: Literal["ok", "missing", "parse_error"] = "missing"
@@ -463,18 +565,28 @@ class EvalResult(BaseModel):
     context_mode: ReviewContextMode = "graph_hybrid"
     graph_cache_mode: EvalGraphCacheMode = "warm"
     matcher_version: str = DEFAULT_EVAL_MATCHER_VERSION
+    finding_contract_version: str = "unknown"
     skill_retrieval_mode: EvalSkillRetrievalMode = "sequential"
     skill_bank_digest: str = ""
     skill_top_k: int = Field(default=5, ge=0, le=50)
     skill_char_budget: int = Field(default=4_000, ge=64, le=100_000)
     skill_legacy_fallback_limit: int = Field(default=1, ge=0, le=50)
-    matcher_version: str = EVAL_MATCHER_VERSION
     run_id: str = Field(default="")
     schema_valid: bool = Field(default=False)
     expected_count: int = Field(default=0, ge=0)
     actual_count: int = Field(default=0, ge=0)
+    approved_finding_count: int = Field(
+        default=0,
+        ge=0,
+        description="v3 findings that passed the runtime approval binding before scoring.",
+    )
     matched_count: int = Field(default=0, ge=0)
     false_positive_count: int = Field(default=0, ge=0)
+    location_matched_count: int = Field(default=0, ge=0)
+    severity_matched_count: int = Field(default=0, ge=0)
+    root_cause_matched_count: int = Field(default=0, ge=0)
+    semantic_undetermined_count: int = Field(default=0, ge=0)
+    duplicate_actual_count: int = Field(default=0, ge=0)
     expected_root_cause_count: int | None = Field(default=None, ge=0)
     matched_root_cause_count: int | None = Field(default=None, ge=0)
     over_merge_count: int | None = Field(default=None, ge=0)
@@ -562,6 +674,7 @@ class SampledFixtureResult(BaseModel):
     context_mode: ReviewContextMode = "graph_hybrid"
     graph_cache_mode: EvalGraphCacheMode = "warm"
     matcher_version: str = DEFAULT_EVAL_MATCHER_VERSION
+    finding_contract_version: str = "unknown"
     expected_count: int = Field(default=0, ge=0)
     samples: int = Field(default=1, ge=1)
     runs: list[EvalResult] = Field(default_factory=list)
@@ -596,6 +709,15 @@ class MetricSummary(BaseModel):
         default=None, ge=0.0, le=1.0
     )
     root_cause_recall: float | None = Field(default=None, ge=0.0, le=1.0)
+    layered_expected_count: int = Field(default=0, ge=0)
+    approved_finding_count: int = Field(default=0, ge=0)
+    location_matched_count: int = Field(default=0, ge=0)
+    severity_matched_count: int = Field(default=0, ge=0)
+    root_cause_matched_count: int = Field(default=0, ge=0)
+    semantic_undetermined_count: int = Field(default=0, ge=0)
+    duplicate_actual_count: int = Field(default=0, ge=0)
+    location_match_rate: float | None = Field(default=None, ge=0.0, le=1.0)
+    root_cause_match_rate: float | None = Field(default=None, ge=0.0, le=1.0)
     over_merge_count: int = Field(default=0, ge=0)
     under_merge_count: int = Field(default=0, ge=0)
     root_cause_coverage: float = Field(default=0.0, ge=0.0, le=1.0)
@@ -813,6 +935,19 @@ def _aggregate_structural_metrics(
     def ratio(numerator: int, denominator: int) -> float | None:
         return numerator / denominator if denominator else None
 
+    layered_results = [
+        item
+        for item in results
+        if item.matcher_version in {"semantic-v4", V3_CONTENT_MATCHER_VERSION}
+    ]
+    layered_expected = sum(item.expected_count for item in layered_results)
+    layered_location_matches = sum(
+        item.location_matched_count for item in layered_results
+    )
+    layered_root_matches = sum(
+        item.root_cause_matched_count for item in layered_results
+    )
+
     local_expected = total("local_expected_count")
     direct_expected = total("direct_cross_file_expected_count")
     multi_hop_expected = total("multi_hop_expected_count")
@@ -841,6 +976,11 @@ def _aggregate_structural_metrics(
         "root_cause_recall": ratio(matched_roots, expected_roots),
         "over_merge_count": sum(item.over_merge_count or 0 for item in results),
         "under_merge_count": sum(item.under_merge_count or 0 for item in results),
+        "layered_expected_count": layered_expected,
+        "location_matched_count": layered_location_matches,
+        "root_cause_matched_count": layered_root_matches,
+        "location_match_rate": ratio(layered_location_matches, layered_expected),
+        "root_cause_match_rate": ratio(layered_root_matches, layered_expected),
     }
 
 
@@ -848,6 +988,34 @@ def _aggregate_process_metrics(
     results: list[EvalResult],
 ) -> dict[str, Any]:
     raw_issues = sum(item.process_metrics.model_raw_issue_count for item in results)
+    draft_transitions = sum(
+        item.process_metrics.draft_state_transition_count for item in results
+    )
+    draft_status_counts: dict[str, int] = {}
+    for item in results:
+        for status, count in item.process_metrics.draft_status_counts.items():
+            draft_status_counts[status] = draft_status_counts.get(status, 0) + count
+    incomplete_runs = sum(
+        item.process_metrics.finding_run_status == "incomplete" for item in results
+    )
+    repair_budget_total = sum(
+        item.process_metrics.repair_budget_total for item in results
+    )
+    repair_budget_remaining = sum(
+        item.process_metrics.repair_budget_remaining for item in results
+    )
+    repair_format_attempts = sum(
+        item.process_metrics.repair_format_attempt_count for item in results
+    )
+    repair_contract_attempts = sum(
+        item.process_metrics.repair_contract_attempt_count for item in results
+    )
+    repair_evidence_attempts = sum(
+        item.process_metrics.repair_evidence_attempt_count for item in results
+    )
+    final_submit_attempts = sum(
+        item.process_metrics.final_submit_attempt_count for item in results
+    )
     verifier_candidates = sum(
         item.process_metrics.verifier_candidate_count for item in results
     )
@@ -1015,6 +1183,15 @@ def _aggregate_process_metrics(
     )
     return {
         "model_raw_issue_count": raw_issues,
+        "draft_state_transition_count": draft_transitions,
+        "draft_status_counts": draft_status_counts,
+        "incomplete_run_count": incomplete_runs,
+        "repair_budget_total": repair_budget_total,
+        "repair_budget_remaining": repair_budget_remaining,
+        "repair_format_attempt_count": repair_format_attempts,
+        "repair_contract_attempt_count": repair_contract_attempts,
+        "repair_evidence_attempt_count": repair_evidence_attempts,
+        "final_submit_attempt_count": final_submit_attempts,
         "verifier_candidate_count": verifier_candidates,
         "verifier_accepted_count": accepted,
         "verifier_rejected_count": rejected,
@@ -1160,6 +1337,14 @@ def _aggregate_quality_metrics(results: list[EvalResult]) -> dict[str, int | flo
             final_findings / expected_roots if expected_roots else 0.0
         ),
         "final_finding_count": final_findings,
+        "approved_finding_count": sum(
+            item.approved_finding_count for item in results
+        ),
+        "severity_matched_count": sum(item.severity_matched_count for item in results),
+        "semantic_undetermined_count": sum(
+            item.semantic_undetermined_count for item in results
+        ),
+        "duplicate_actual_count": sum(item.duplicate_actual_count for item in results),
     }
 
 
@@ -1169,6 +1354,7 @@ class EvalReport(BaseModel):
     suite: str = Field(default="golden")
     variant: EvalVariant | None = None
     matcher_version: str = DEFAULT_EVAL_MATCHER_VERSION
+    finding_contract_version: str = "unknown"
     skill_bank_digest: str = ""
     generated_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
     fixture_count: int = Field(default=0, ge=0)

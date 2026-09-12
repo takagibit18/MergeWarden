@@ -98,6 +98,8 @@ class GrepTool(BaseTool):
         matched_files: set[str] = set()
 
         for file_path in candidate_paths:
+            if self._is_runtime_artifact(file_path, root):
+                continue
             try:
                 content = file_path.read_text(encoding="utf-8", errors="ignore")
             except OSError:
@@ -129,3 +131,14 @@ class GrepTool(BaseTool):
             "matched_file_count": len(matched_files),
             "truncated": truncated,
         }
+
+    @staticmethod
+    def _is_runtime_artifact(file_path: Path, root: Path) -> bool:
+        """Keep agent state and VCS internals out of source discovery."""
+
+        try:
+            relative_parts = file_path.resolve().relative_to(root.resolve()).parts
+        except ValueError:
+            return True
+        excluded = {".git", ".mergewarden"}
+        return any(part in excluded for part in relative_parts)

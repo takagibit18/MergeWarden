@@ -2,23 +2,47 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
 import re
-from typing import Any, Callable
+from pathlib import Path
+from typing import Any, Callable, Literal, cast
 
 from pydantic import ValidationError
 
 from src.analyzer.context_builder import ContextBuilder
 from src.analyzer.context_state import ContextState
+from src.analyzer.evidence_ledger import ledger_from_sources
 from src.analyzer.event_log import EventType
+from src.analyzer.finding_contract import (
+    is_model_finding_v3_payload,
+    is_model_repair_payload,
+    issue_supports,
+    ModelFinishReviewActionV3,
+    ModelFindingInputV3,
+    ModelRepairResponse,
+    ModelRepairResponseV3,
+    ModelReviseFindingActionV3,
+    ModelSaveFindingActionV3,
+    normalize_model_finding_payload,
+    validate_model_repair_payload,
+    validate_model_repair_target_payload,
+    validate_model_repair_target_v3_payload,
+)
+from src.analyzer.diff_lines import ParsedDiffHunk, parse_unified_diff_hunks
+from src.analyzer.finding_schema import normalize_repo_path
 from src.analyzer.location import normalize_location
 from src.analyzer.output_formatter import ReviewReport
 from src.analyzer.review_skills import SkillSelection
 from src.analyzer.prompts import (
     FINALIZE_REVIEW_NOTICE,
+    FINALIZE_REVIEW_NOTICE_V3,
     FINALIZE_DEBUG_NOTICE,
+    REPAIR_REVIEW_NOTICE,
+    USER_PREFIX_REVIEW,
+    USER_PREFIX_REVIEW_V3,
     build_debug_messages,
     build_debug_messages_async,
     build_review_messages,
@@ -29,15 +53,20 @@ from src.analyzer.schemas import (
     DebugRequest,
     DebugResponse,
     ReviewRequest,
+    ReviewHandoff,
+    V3ActionCallRef,
 )
 from src.analyzer.trace import TraceRecorder
 from src.config import get_settings
 from src.models.client import ModelClient
-from src.models.compat import ModelCallPolicy
+from src.models.compat import ModelCallPolicy, ModelProfile
 from src.models.conversation import ModelConversation
+from src.models.request_assembler import AssembledRequest, RequestAssembler
 from src.models.schemas import (
     DraftFinding,
     DraftFindingInput,
+    DraftFindingState,
+    DraftFindingUpdateInput,
     Message,
     ModelConfig,
     ModelResponse,
@@ -45,10 +74,17 @@ from src.models.schemas import (
 )
 from src.models.token_telemetry import estimate_tokens, serialize_json, token_component
 from src.tools.base import ToolResult, ToolSpec
+from src.analyzer.verifier_context import capture_verifier_tool_evidence
 
 logger = logging.getLogger(__name__)
 _SUBMIT_MAX_TOKENS = 4096
 _EXPLORATION_MAX_TOKENS = 12288
+
+
+class _CallTokenBudgetExceeded(RuntimeError):
+    """Raised when a provider request cannot fit its runtime token reserve."""
+
+
 _SYNTHETIC_CONTEXT_MAX_CHARS = 3600
 _FINAL_EVIDENCE_ENTRY_MAX_CHARS = 2400
 _FINAL_EVIDENCE_TOOL_NAMES = {
@@ -97,6 +133,13 @@ class InferenceEngine:
         self._trace_event_writer = trace_event_writer
         self._model_response_writer = model_response_writer
         self._conversation = conversation or ModelConversation()
+        self._last_call_budget_tokens_used = 0
+
+    @property
+    def last_call_budget_tokens_used(self) -> int:
+        """Conservative charge for provider attempts in the latest analyze call."""
+
+        return self._last_call_budget_tokens_used
 
     async def analyze(
         self,
@@ -120,10 +163,31 @@ class InferenceEngine:
         stage: str | None = None,
         skill_selection: SkillSelection | None = None,
         skill_telemetry: dict[str, Any] | None = None,
+        repair_attempt_budget: int | None = None,
+        allow_exploration: bool = False,
+        repair_mode: bool = False,
+        submit_tool_name: str | None = None,
+        contract_version: str = "2.0",
+        remaining_call_token_budget: int | None = None,
+        current_finding_handles: list[dict[str, str]] | None = None,
     ) -> tuple[AnalysisPlan, TokenUsage]:
+        self._last_call_budget_tokens_used = 0
+        remaining_call_token_budget = _optional_non_negative_int(
+            remaining_call_token_budget
+        )
         file_contents = file_contents or {}
         settings = get_settings()
-        submit_only = force_submit or near_last_iteration or stage == "submit_only"
+        if contract_version == "3.0":
+            # v3 iteration limits stop exploration at the runtime boundary; they
+            # do not turn an ordinary reviewer call into a submission ceremony.
+            # Only an explicit force/repair request may use the bounded final
+            # call. In particular, ignore the legacy near-last stage label here.
+            submit_only = repair_mode or force_submit
+        else:
+            submit_only = repair_mode or force_submit or (
+                near_last_iteration and not allow_exploration
+            ) or stage == "submit_only"
+        defer_submit = defer_submit and not submit_only
         inferred_stage = (
             "validate"
             if any(
@@ -135,9 +199,22 @@ class InferenceEngine:
             )
             else "explore"
         )
-        # A final/near-limit call is submit-only even when an older caller did
-        # not pass the newer explicit stage label.
-        call_stage = "submit_only" if submit_only else (stage or inferred_stage)
+        effective_stage = (
+            None
+            if contract_version == "3.0"
+            and not submit_only
+            and stage == "submit_only"
+            else stage
+        )
+        # A final/near-limit call is submit-only for historical contracts even
+        # when an older caller did not pass the newer explicit stage label.
+        call_stage = (
+            "repair"
+            if repair_mode
+            else "submit_only"
+            if submit_only
+            else (effective_stage or inferred_stage)
+        )
         requested_budget = (
             prompt_input_token_budget
             if prompt_input_token_budget is not None
@@ -162,13 +239,23 @@ class InferenceEngine:
         prompt_file_contents = file_contents
         prompt_project_structure = project_structure
         if submit_only and isinstance(request, ReviewRequest):
-            # Submit-only keeps evidence handoff explicit and bounded.  The full
-            # reviewer projection was already available to the previous turn;
-            # only the validated/minimal spans below are reintroduced.
+            # Submit-only keeps the handoff explicit and bounded.  The previous
+            # implementation cleared diff/manifests/files and relied on a short
+            # tool preview, which made a no-draft run lose its change evidence.
+            handoff = self._build_review_handoff(
+                state,
+                diff_text=diff_text,
+                file_contents=file_contents,
+                draft_findings=draft_findings or [],
+                tool_feedback=tool_feedback or [],
+            )
             prompt_context = state.model_copy(deep=True)
-            prompt_context.candidate_context_manifests = []
-            prompt_diff_text = ""
-            prompt_file_contents = {}
+            prompt_context.candidate_context_manifests = (
+                handoff.candidate_context_manifests
+            )
+            prompt_context.evidence_ledger = handoff.evidence_ledger
+            prompt_diff_text = handoff.changed_diff
+            prompt_file_contents = handoff.file_contents
             prompt_project_structure = ""
         if isinstance(request, ReviewRequest):
             if summary_enabled:
@@ -186,6 +273,8 @@ class InferenceEngine:
                     project_structure=prompt_project_structure,
                     telemetry_sink=context_telemetry,
                     skill_selection=skill_selection,
+                    contract_version=contract_version,
+                    repair_mode=repair_mode,
                 )
             else:
                 messages = build_review_messages(
@@ -198,6 +287,8 @@ class InferenceEngine:
                     project_structure=prompt_project_structure,
                     telemetry_sink=context_telemetry,
                     skill_selection=skill_selection,
+                    contract_version=contract_version,
+                    repair_mode=repair_mode,
                 )
         else:
             if summary_enabled:
@@ -227,6 +318,11 @@ class InferenceEngine:
                     telemetry_sink=context_telemetry,
                 )
 
+        current_handles_message = self._build_current_finding_handles_message(
+            current_finding_handles
+        )
+        if current_handles_message is not None:
+            messages.append(current_handles_message)
         if skill_telemetry is not None:
             context_telemetry["review_skills"] = dict(skill_telemetry)
 
@@ -241,12 +337,28 @@ class InferenceEngine:
                     feedback_digest_index or {},
                     draft_findings or [],
                     validator_result=validator_result,
+                    include_validator_feedback=not repair_mode,
                     candidate_context_manifests=state.candidate_context_manifests,
+                    draft_states=state.draft_findings,
+                    evidence_ledger=state.evidence_ledger,
                     token_budget=final_feedback_budget,
                 )
             )
             if final_evidence is not None:
                 messages.append(final_evidence)
+            if repair_mode:
+                # Transaction instructions are mandatory input, not optional
+                # evidence-summary entries that may disappear under its budget.
+                repair_feedback = self._build_repair_feedback_message(
+                    validator_result, token_budget=None
+                )
+                if repair_feedback is not None:
+                    messages.append(repair_feedback)
+                else:
+                    final_evidence_telemetry["context_insufficient"] = True
+                    final_evidence_telemetry["context_insufficient_reason"] = (
+                        "repair_target_context_missing"
+                    )
         else:
             window_iterations = {
                 item.get("iteration")
@@ -258,15 +370,48 @@ class InferenceEngine:
             )
             if folded is not None:
                 messages.append(folded)
+            repair_feedback = self._build_repair_feedback_message(
+                validator_result,
+                token_budget=(
+                    max(512, settings.final_submit_feedback_token_budget)
+                    if settings.final_submit_feedback_token_budget > 0
+                    else max(512, budget // 4)
+                ),
+            )
+            if repair_feedback is not None:
+                messages.append(repair_feedback)
+            if isinstance(request, ReviewRequest) and (
+                draft_findings or state.draft_findings
+            ):
+                messages.append(
+                    self._build_draft_checkpoint_message(
+                        draft_findings or [], state.draft_findings
+                    )
+                )
+            evidence_catalog_message = self._build_evidence_catalog_message(
+                state.evidence_ledger
+            )
+            if evidence_catalog_message is not None:
+                messages.append(evidence_catalog_message)
         if defer_submit:
             messages.append(
                 Message(
                     role="user",
                     content=(
-                        "Do not call submit_review yet. Submission is temporarily "
-                        "unavailable during the initial exploration stage. Use the "
-                        "available read-only tools to resolve the most important evidence "
-                        "gap. Do not assume this is the only exploration round. In later "
+                        (
+                            "Do not call finish_review yet. Submission is temporarily "
+                            "unavailable during the initial exploration stage. "
+                            if contract_version == "3.0"
+                            else "Do not call submit_review yet. Submission is temporarily "
+                            "unavailable during the initial exploration stage. Use the "
+                        )
+                        + (
+                            "Use available read-only tools and save_finding only after a "
+                            "finding is concrete. "
+                            if contract_version == "3.0"
+                            else "available read-only tools to resolve the most important evidence "
+                        )
+                        + "gap. Do not assume this is the only exploration round. In later "
                         "rounds, continue targeted investigation whenever material "
                         "evidence gaps remain."
                     ),
@@ -286,34 +431,71 @@ class InferenceEngine:
                 messages.append(failure_guidance)
         if submit_only:
             notice = (
-                FINALIZE_REVIEW_NOTICE
+                REPAIR_REVIEW_NOTICE
+                if repair_mode and isinstance(request, ReviewRequest)
+                else FINALIZE_REVIEW_NOTICE_V3
+                if contract_version == "3.0" and isinstance(request, ReviewRequest)
+                else FINALIZE_REVIEW_NOTICE
                 if isinstance(request, ReviewRequest)
                 else FINALIZE_DEBUG_NOTICE
             )
             messages.append(Message(role="user", content=notice))
-        elif near_last_iteration:
-            messages.append(
-                Message(
-                    role="user",
-                    content=(
-                        "Note: you are at the last allowed iteration. Prefer submitting now via "
-                        "submit_review/submit_debug using what you already have, unless a tool "
-                        "call is strictly necessary and has not been made with identical args."
-                    ),
+        elif near_last_iteration and not defer_submit:
+            if contract_version == "3.0":
+                messages.append(
+                    Message(
+                        role="user",
+                        content=(
+                            "Note: this is the last allowed Reviewer iteration. You may still "
+                            "use strictly necessary read-only tools and save_finding or "
+                            "revise_finding. finish_review is optional and only records the "
+                            "model's explicit request to stop; runtime closeout receives the "
+                            "current Registry contents even when no finish_review call is made. "
+                            "Do not repeat saved finding bodies."
+                        ),
+                    )
                 )
-            )
+            else:
+                messages.append(
+                    Message(
+                        role="user",
+                        content=(
+                            "Note: you are at the last allowed iteration. Prefer finishing now via "
+                            "submit_review/submit_debug using what you already have, unless a tool "
+                            "call is strictly necessary and has not been made with identical args."
+                        ),
+                    )
+                )
 
         tools = (
-            self._submit_only_tools(tool_schemas or [], request)
+            self._submit_only_tools(
+                tool_schemas or [],
+                request,
+                expected_name=(
+                    submit_tool_name
+                    or (
+                        "repair_review" if repair_mode
+                        else self._submit_tool_name(request, contract_version=contract_version)
+                    )
+                ),
+            )
             if submit_only
             else tool_schemas or []
         )
         config = None
         if submit_only:
             config = self._build_submit_config(request)
+            if contract_version == "3.0" and not repair_mode:
+                # Retain the ordinary multi-tool selection protocol rather than
+                # forcing finish_review before content can be saved.
+                config.tool_choice = "auto"
         else:
             config = self._model_client.default_config.model_copy(
-                update={"max_tokens": _EXPLORATION_MAX_TOKENS}
+                update={
+                    "max_tokens": int(
+                        getattr(settings, "exploration_max_output_tokens", _EXPLORATION_MAX_TOKENS)
+                    )
+                }
             )
         if request.model_name:
             if config is None:
@@ -322,22 +504,49 @@ class InferenceEngine:
                 )
             else:
                 config.model = request.model_name
+        config = self._with_call_token_budget(
+            config,
+            remaining_call_token_budget,
+        )
         policy = ModelCallPolicy(
             thinking="off" if submit_only else "high",
-            forced_tool=self._submit_tool_name(request) if submit_only else None,
+            forced_tool=(
+                submit_tool_name
+                or (
+                    "repair_review"
+                    if repair_mode
+                    else self._submit_tool_name(
+                        request, contract_version=contract_version
+                    )
+                )
+            )
+            if submit_only and not (contract_version == "3.0" and not repair_mode)
+            else None,
         )
         # Once deterministic validation has passed, the submit-only call is a
         # fresh, bounded handoff.  Replaying every prior assistant/tool turn
         # would re-send repeated source/tool feedback.  Legacy forced-finalize
         # callers without validator state retain the provider replay contract.
+        # v3 forced closeout remains allowed to save/revise, so it must retain
+        # any registry action handles from the canonical conversation.
         minimal_submit_only = bool(
             submit_only
-            and isinstance(validator_result, dict)
-            and validator_result.get("submit_allowed") is True
+            and (
+                repair_mode
+                or (
+                    contract_version != "3.0"
+                    and isinstance(validator_result, dict)
+                    and validator_result.get("submit_allowed") is True
+                )
+            )
         )
         conversation_messages = (
             [] if minimal_submit_only else self._conversation.messages()
         )
+        if contract_version == "3.0" and conversation_messages:
+            conversation_messages = self._preserve_v3_registry_turns(
+                conversation_messages
+            )
         conversation_history_count = len(conversation_messages)
         if submit_only:
             assert finalize_conversation_insert_at is not None
@@ -348,6 +557,80 @@ class InferenceEngine:
         else:
             conversation_history_start = len(messages)
             messages.extend(conversation_messages)
+        # Component budgets do not include the envelope and tool schema.  Fit
+        # the exact provider request after every history/context path so final
+        # submit and repair calls share one enforceable cap.
+        request_budget = (
+            settings.final_submit_request_token_budget
+            if submit_only
+            else settings.assembled_request_token_budget
+        )
+        wire_config = config
+        wire_policy = policy
+        wire_profile: ModelProfile | None = None
+        prepare_call = getattr(self._model_client, "prepare_call", None)
+        if callable(prepare_call):
+            wire_config, wire_policy, wire_profile = prepare_call(config, policy)
+        wire_config = self._with_call_token_budget(
+            wire_config,
+            remaining_call_token_budget,
+        )
+        fit_budget = self._call_fit_budget(
+            request_budget,
+            remaining_call_token_budget,
+            wire_config.max_tokens,
+        )
+        assembled_request = RequestAssembler.fit(
+            messages,
+            tools,
+            wire_config,
+            wire_policy,
+            budget=fit_budget,
+            profile=wire_profile,
+        )
+        messages = assembled_request.messages
+        conversation_history_start = min(conversation_history_start, len(messages))
+        conversation_history_count = min(
+            conversation_history_count,
+            max(0, len(messages) - conversation_history_start),
+        )
+        if submit_only:
+            context_validation = self._validate_final_submit_request_context(
+                assembled_request,
+                final_evidence_telemetry,
+                budget=request_budget,
+            )
+            context_telemetry["final_submit_context_validation"] = context_validation
+            if not context_validation["valid"]:
+                final_evidence_telemetry["context_insufficient"] = True
+                final_evidence_telemetry["context_insufficient_reason"] = str(
+                    context_validation["reason"]
+                )
+        if assembled_request.estimated_tokens > max(1, request_budget):
+            context_telemetry["assembled_request_over_budget"] = True
+            context_telemetry["assembled_request_over_budget_reason"] = (
+                "serialized_submit_request_over_budget"
+                if submit_only
+                else "assembled_request_over_budget"
+            )
+
+        call_input_estimate = max(0, int(assembled_request.estimated_tokens))
+        call_output_reserve = max(0, int(wire_config.max_tokens))
+        call_budget_required = call_input_estimate + call_output_reserve
+        context_telemetry.update(
+            {
+                "remaining_call_token_budget": remaining_call_token_budget,
+                "call_input_token_estimate": call_input_estimate,
+                "call_output_token_reserve": call_output_reserve,
+                "call_token_budget_required": call_budget_required,
+                "call_token_budget_used": self._last_call_budget_tokens_used,
+                "call_token_budget_exhausted": (
+                    remaining_call_token_budget is not None
+                    and call_budget_required > remaining_call_token_budget
+                ),
+            }
+        )
+
         self._record_context_telemetry(
             context_telemetry=context_telemetry,
             messages=messages,
@@ -365,7 +648,88 @@ class InferenceEngine:
             force_submit=submit_only,
             stage=call_stage,
             relation_graph_summary=state.relation_graph_summary,
+            assembled_request=assembled_request,
+            assembled_request_budget=fit_budget,
         )
+        if submit_only and final_evidence_telemetry.get("context_insufficient"):
+            reason = str(
+                final_evidence_telemetry.get(
+                    "context_insufficient_reason",
+                    "final_submit_context_insufficient",
+                )
+            )
+            if self._trace_event_writer is not None:
+                self._trace_event_writer(
+                    EventType.ERROR,
+                    "analyze",
+                    {
+                        "iteration": iteration,
+                        "reason": "final_submit_context_insufficient",
+                        "detail": reason,
+                        "required_catalog_ids": final_evidence_telemetry.get(
+                            "required_catalog_ids", []
+                        ),
+                        "included_catalog_ids": final_evidence_telemetry.get(
+                            "included_catalog_ids", []
+                        ),
+                    },
+                )
+            return (
+                AnalysisPlan(
+                    needs_tools=False,
+                    tool_calls=[],
+                    incomplete_reason="final_submit_context_insufficient",
+                    recovery_required=True,
+                ),
+                TokenUsage(),
+            )
+        if not submit_only and assembled_request.estimated_tokens > max(1, request_budget):
+            reason = "assembled_request_over_budget"
+            if self._trace_event_writer is not None:
+                self._trace_event_writer(
+                    EventType.ERROR,
+                    "analyze",
+                    {
+                        "iteration": iteration,
+                        "reason": reason,
+                        "assembled_request_tokens": assembled_request.estimated_tokens,
+                        "assembled_request_budget": request_budget,
+                    },
+                )
+            return (
+                AnalysisPlan(
+                    needs_tools=False,
+                    tool_calls=[],
+                    incomplete_reason=reason,
+                    recovery_required=True,
+                ),
+                TokenUsage(),
+            )
+        if (
+            remaining_call_token_budget is not None
+            and call_budget_required > remaining_call_token_budget
+        ):
+            context_telemetry["call_token_budget_exhausted"] = True
+            if self._trace_event_writer is not None:
+                self._trace_event_writer(
+                    EventType.ERROR,
+                    "analyze",
+                    {
+                        "iteration": iteration,
+                        "reason": "call_token_budget_exhausted",
+                        "call_token_budget_required": call_budget_required,
+                        "remaining_call_token_budget": remaining_call_token_budget,
+                    },
+                )
+            return (
+                AnalysisPlan(
+                    needs_tools=False,
+                    tool_calls=[],
+                    incomplete_reason="call_token_budget_exhausted",
+                    recovery_required=True,
+                ),
+                TokenUsage(),
+            )
         response = await self._chat_with_telemetry(
             messages=messages,
             config=config,
@@ -374,73 +738,143 @@ class InferenceEngine:
             iteration=iteration,
             stage=call_stage,
             force_submit=submit_only,
+            request_estimated_tokens=call_input_estimate,
+            max_output_tokens=call_output_reserve,
         )
+        if isinstance(request, ReviewRequest):
+            self._record_delivered_review_evidence(
+                state,
+                assembled_request,
+                tool_feedback or [],
+                repo_path=request.repo_path,
+            )
         response_id = self._persist_model_response(response, iteration)
         self._record_length_finish(response, iteration, config)
         plan, parse_meta = self._parse_tool_calls(
-            response.tool_calls, request, force_submit=submit_only
+            response.tool_calls,
+            request,
+            force_submit=submit_only,
+            evidence_catalog=state.evidence_ledger,
+            repair_mode=repair_mode,
+            contract_version=contract_version,
         )
         self._complete_invalid_draft_tool_calls(response.tool_calls, parse_meta)
+        format_recovery_raw_payload = parse_meta.get("format_recovery_raw_payload")
+        format_recovery_validation_error = str(
+            parse_meta.get("format_recovery_validation_error", "") or ""
+        )
+        format_recovery_input_response_id = response_id
         if plan.draft_finding_calls:
             plan.draft_finding_source_response_id = response_id
         parse_meta["tool_choice"] = self._trace_tool_choice(config)
         parse_meta["thinking_disabled"] = policy.thinking == "off"
         if (
             isinstance(request, ReviewRequest)
+            and not repair_mode
+            and contract_version != "3.0"
             and plan.draft_review is None
             and response.finish_reason != "length"
             and parse_meta.get("submit_review_seen")
             and parse_meta.get("submit_review_validation_error")
         ):
-            initial_usage = response.usage
-            (
-                repair_plan,
-                repair_response,
-                repair_meta,
-                repair_response_id,
-            ) = await self._retry_submit_review_validation_repair(
-                messages=messages,
-                request=request,
-                tool_schemas=tool_schemas or [],
-                validation_error=str(parse_meta["submit_review_validation_error"]),
-                iteration=iteration,
-                prior_history_start=conversation_history_start,
-                prior_history_count=conversation_history_count,
-                invalid_tool_calls=response.tool_calls,
-                stage=call_stage,
-            )
-            repair_response.usage.total_tokens += initial_usage.total_tokens
-            repair_response.usage.prompt_tokens += initial_usage.prompt_tokens
-            repair_response.usage.completion_tokens += initial_usage.completion_tokens
-            repair_response.usage.reasoning_tokens += initial_usage.reasoning_tokens
-            repair_response.usage_present = (
-                repair_response.usage_present or response.usage_present
-            )
-            if repair_plan.draft_review is not None:
-                repair_plan.draft_finding_calls = plan.draft_finding_calls
-                repair_plan.draft_finding_source_response_id = (
-                    plan.draft_finding_source_response_id
-                )
-                plan = repair_plan
-                response = repair_response
-                parse_meta = repair_meta
-                response_id = repair_response_id
+            repair_allowed = repair_attempt_budget is None or repair_attempt_budget > 0
+            if repair_allowed:
+                initial_usage = response.usage
+                try:
+                    (
+                        repair_plan,
+                        repair_response,
+                        repair_meta,
+                        repair_response_id,
+                        repair_assembled_request,
+                    ) = await self._retry_submit_review_validation_repair(
+                        messages=messages,
+                        request=request,
+                        tool_schemas=tool_schemas or [],
+                        validation_error=str(
+                            parse_meta["submit_review_validation_error"]
+                        ),
+                        iteration=iteration,
+                        prior_history_start=conversation_history_start,
+                        prior_history_count=conversation_history_count,
+                        invalid_tool_calls=response.tool_calls,
+                        stage=call_stage,
+                        evidence_catalog=state.evidence_ledger,
+                        contract_version=contract_version,
+                        remaining_call_token_budget=remaining_call_token_budget,
+                    )
+                except _CallTokenBudgetExceeded:
+                    parse_meta["schema_repair_skipped_budget"] = True
+                    plan.incomplete_reason = (
+                        "schema_repair_call_token_budget_exhausted"
+                    )
+                    plan.recovery_required = True
+                else:
+                    self._record_delivered_review_evidence(
+                        state,
+                        repair_assembled_request,
+                        tool_feedback or [],
+                        repo_path=request.repo_path,
+                    )
+                    repair_response.usage.total_tokens += initial_usage.total_tokens
+                    repair_response.usage.prompt_tokens += initial_usage.prompt_tokens
+                    repair_response.usage.completion_tokens += initial_usage.completion_tokens
+                    repair_response.usage.reasoning_tokens += initial_usage.reasoning_tokens
+                    repair_response.usage_present = (
+                        repair_response.usage_present or response.usage_present
+                    )
+                    plan.schema_repair_attempted_count += 1
+                    repair_plan.schema_repair_attempted_count += 1
+                    if repair_plan.draft_review is not None:
+                        repair_plan.draft_finding_calls = plan.draft_finding_calls
+                        repair_plan.draft_finding_source_response_id = (
+                            plan.draft_finding_source_response_id
+                        )
+                        plan = repair_plan
+                        response = repair_response
+                        parse_meta = repair_meta
+                        response_id = repair_response_id
+                    else:
+                        response.usage = repair_response.usage
             else:
-                response.usage = repair_response.usage
+                parse_meta["schema_repair_skipped_budget"] = True
+                plan.incomplete_reason = "schema_repair_budget_exhausted"
+                plan.recovery_required = True
         fallback_json_found = False
         fallback_parse_valid = False
         if not plan.draft_review and not plan.draft_debug:
             fallback = self._fallback_extract_json(response.content)
             if fallback:
                 fallback_json_found = True
-                parsed = self._try_parse_submit_payload_from_json(fallback, request)
+                parsed = self._try_parse_submit_payload_from_json(
+                    fallback,
+                    request,
+                    evidence_catalog=state.evidence_ledger,
+                    contract_version=contract_version,
+                )
                 if parsed:
                     fallback_parse_valid = True
                     parsed.draft_finding_calls = plan.draft_finding_calls
                     parsed.draft_finding_source_response_id = (
                         plan.draft_finding_source_response_id
                     )
+                    parsed.schema_repair_attempted_count = (
+                        plan.schema_repair_attempted_count
+                    )
                     plan = parsed
+        if isinstance(format_recovery_raw_payload, dict) and format_recovery_raw_payload:
+            recovery_seed = (
+                f"{format_recovery_input_response_id}|{iteration}|"
+                f"{format_recovery_validation_error}"
+            )
+            plan.format_recovery_id = "fr_" + hashlib.sha256(
+                recovery_seed.encode("utf-8")
+            ).hexdigest()[:20]
+            plan.format_recovery_required = True
+            plan.format_recovery_raw_payload = format_recovery_raw_payload
+            plan.format_recovery_validation_error = format_recovery_validation_error
+            plan.format_recovery_input_response_id = format_recovery_input_response_id
+            plan.format_recovery_response_id = response_id
         plan.source_response_id = response_id
         incomplete_reason = self._length_incomplete_reason(response, plan)
         plan.model_finish_reason = response.finish_reason
@@ -481,6 +915,8 @@ class InferenceEngine:
         iteration: int,
         stage: str,
         force_submit: bool,
+        request_estimated_tokens: int,
+        max_output_tokens: int,
     ) -> ModelResponse:
         """Call the provider and emit one safe event for every provider attempt."""
 
@@ -492,9 +928,17 @@ class InferenceEngine:
                 policy=policy,
                 conversation=self._conversation,
             )
-        except Exception as exc:
+        except asyncio.CancelledError as exc:
+            attempts = self._consume_provider_attempts()
+            budget_charges = self._charge_call_budget(
+                request_estimated_tokens=request_estimated_tokens,
+                max_output_tokens=max_output_tokens,
+                response=None,
+                attempts=attempts,
+                error=exc,
+            )
             self._record_provider_attempts(
-                attempts=self._consume_provider_attempts(),
+                attempts=attempts,
                 response=None,
                 error=exc,
                 iteration=iteration,
@@ -502,11 +946,40 @@ class InferenceEngine:
                 force_submit=force_submit,
                 policy=policy,
                 tool_schema_count=len(tools),
+                budget_charges=budget_charges,
+            )
+            raise
+        except Exception as exc:
+            attempts = self._consume_provider_attempts()
+            budget_charges = self._charge_call_budget(
+                request_estimated_tokens=request_estimated_tokens,
+                max_output_tokens=max_output_tokens,
+                response=None,
+                attempts=attempts,
+                error=exc,
+            )
+            self._record_provider_attempts(
+                attempts=attempts,
+                response=None,
+                error=exc,
+                iteration=iteration,
+                stage=stage,
+                force_submit=force_submit,
+                policy=policy,
+                tool_schema_count=len(tools),
+                budget_charges=budget_charges,
             )
             raise
 
+        attempts = self._consume_provider_attempts()
+        budget_charges = self._charge_call_budget(
+            request_estimated_tokens=request_estimated_tokens,
+            max_output_tokens=max_output_tokens,
+            response=response,
+            attempts=attempts,
+        )
         self._record_provider_attempts(
-            attempts=self._consume_provider_attempts(),
+            attempts=attempts,
             response=response,
             error=None,
             iteration=iteration,
@@ -514,8 +987,69 @@ class InferenceEngine:
             force_submit=force_submit,
             policy=policy,
             tool_schema_count=len(tools),
+            budget_charges=budget_charges,
         )
         return response
+
+    def _charge_call_budget(
+        self,
+        *,
+        request_estimated_tokens: int,
+        max_output_tokens: int,
+        response: ModelResponse | None,
+        attempts: list[dict[str, Any]],
+        error: BaseException | None = None,
+    ) -> list[int]:
+        """Charge each provider attempt with a conservative runtime estimate."""
+
+        input_estimate = max(0, int(request_estimated_tokens))
+        output_reserve = max(0, int(max_output_tokens))
+        if (
+            not attempts
+            and response is None
+            and getattr(error, "code", "") == "call_token_budget_exhausted"
+        ):
+            # ModelClient performs its own exact wire preflight.  It reports a
+            # zero-attempt budget rejection with this code, so no provider
+            # request was sent and no conservative charge is due.
+            return []
+        attempt_records = attempts or [{}]
+        charges: list[int] = []
+        for raw in attempt_records:
+            success = bool(raw.get("success", response is not None))
+            usage_present = bool(
+                raw.get(
+                    "usage_present",
+                    response is not None and response.usage_present,
+                )
+            )
+            attempt_input = max(
+                0,
+                int(raw.get("request_estimated_tokens", input_estimate) or input_estimate),
+            )
+            if not success or not usage_present:
+                charges.append(attempt_input + output_reserve)
+                continue
+
+            fallback_usage = response.usage if response is not None else TokenUsage()
+            completion_tokens = max(
+                0,
+                int(raw.get("completion_tokens", fallback_usage.completion_tokens) or 0),
+            )
+            reported_total = max(
+                0,
+                int(raw.get("total_tokens", fallback_usage.total_tokens) or 0),
+            )
+            charges.append(
+                max(
+                    # ``reasoning_tokens`` is provider-reported detail nested
+                    # inside completion_tokens, not an additional bucket.
+                    attempt_input + completion_tokens,
+                    reported_total,
+                )
+            )
+        self._last_call_budget_tokens_used += sum(charges)
+        return charges
 
     def _consume_provider_attempts(self) -> list[dict[str, Any]]:
         consumer = getattr(self._model_client, "consume_call_telemetry", None)
@@ -532,14 +1066,23 @@ class InferenceEngine:
         *,
         attempts: list[dict[str, Any]],
         response: ModelResponse | None,
-        error: Exception | None,
+        error: BaseException | None,
         iteration: int,
         stage: str,
         force_submit: bool,
         policy: ModelCallPolicy,
         tool_schema_count: int,
+        budget_charges: list[int] | None = None,
     ) -> None:
         if self._trace_event_writer is None:
+            return
+        if (
+            not attempts
+            and response is None
+            and getattr(error, "code", "") == "call_token_budget_exhausted"
+        ):
+            # Keep a provider preflight rejection distinct from a sent,
+            # usage-unknown attempt; there is no tool/provider call to audit.
             return
         if not attempts:
             attempts = [
@@ -567,7 +1110,7 @@ class InferenceEngine:
                     "usage_unknown": response is None,
                 }
             ]
-        for raw in attempts:
+        for attempt_index, raw in enumerate(attempts):
             success = bool(raw.get("success", response is not None))
             usage_present = bool(raw.get("usage_present", success))
             payload: dict[str, Any] = {
@@ -621,6 +1164,12 @@ class InferenceEngine:
                 "usage_unknown": bool(
                     raw.get("usage_unknown", not success and not usage_present)
                 ),
+                "budget_tokens_used": (
+                    max(0, int(budget_charges[attempt_index]))
+                    if budget_charges is not None
+                    and attempt_index < len(budget_charges)
+                    else 0
+                ),
             }
             if not success:
                 if error is not None:
@@ -649,7 +1198,10 @@ class InferenceEngine:
         prior_history_count: int,
         invalid_tool_calls: list[dict[str, Any]],
         stage: str = "submit_only",
-    ) -> tuple[AnalysisPlan, ModelResponse, dict[str, Any], str]:
+        evidence_catalog: list[dict[str, Any]] | None = None,
+        contract_version: str = "2.0",
+        remaining_call_token_budget: int | None = None,
+    ) -> tuple[AnalysisPlan, ModelResponse, dict[str, Any], str, AssembledRequest]:
         for raw_call in invalid_tool_calls:
             call_id = str(raw_call.get("id", "")).strip()
             if call_id:
@@ -678,24 +1230,70 @@ class InferenceEngine:
                 ),
             ),
         ]
-        config = self._build_submit_config(request)
+        repair_remaining_budget = self._remaining_call_token_budget(
+            remaining_call_token_budget
+        )
+        config = self._with_call_token_budget(
+            self._build_submit_config(request),
+            repair_remaining_budget,
+        )
         policy = ModelCallPolicy(thinking="off", forced_tool="submit_review")
+        repair_tools = self._submit_only_tools(tool_schemas, request)
+        wire_config = config
+        wire_policy = policy
+        wire_profile: ModelProfile | None = None
+        prepare_call = getattr(self._model_client, "prepare_call", None)
+        if callable(prepare_call):
+            wire_config, wire_policy, wire_profile = prepare_call(config, policy)
+        wire_config = self._with_call_token_budget(
+            wire_config,
+            repair_remaining_budget,
+        )
+        assembled_request = RequestAssembler.fit(
+            repair_messages,
+            repair_tools,
+            wire_config,
+            wire_policy,
+            budget=self._call_fit_budget(
+                get_settings().final_submit_request_token_budget,
+                repair_remaining_budget,
+                wire_config.max_tokens,
+            ),
+            profile=wire_profile,
+        )
+        repair_messages = assembled_request.messages
+        repair_input_estimate = max(0, int(assembled_request.estimated_tokens))
+        repair_output_reserve = max(0, int(wire_config.max_tokens))
+        repair_required = repair_input_estimate + repair_output_reserve
+        if (
+            repair_remaining_budget is not None
+            and repair_required > repair_remaining_budget
+        ):
+            raise _CallTokenBudgetExceeded(
+                "schema_repair_call_token_budget_exhausted"
+            )
         response = await self._chat_with_telemetry(
             messages=repair_messages,
             config=config,
-            tools=self._submit_only_tools(tool_schemas, request),
+            tools=repair_tools,
             policy=policy,
             iteration=iteration,
             stage=stage,
             force_submit=True,
+            request_estimated_tokens=repair_input_estimate,
+            max_output_tokens=repair_output_reserve,
         )
         response_id = self._persist_model_response(response, iteration)
         plan, parse_meta = self._parse_tool_calls(
-            response.tool_calls, request, force_submit=True
+            response.tool_calls,
+            request,
+            force_submit=True,
+            evidence_catalog=evidence_catalog,
+            contract_version=contract_version,
         )
         parse_meta["tool_choice"] = self._trace_tool_choice(config)
         parse_meta["thinking_disabled"] = True
-        return plan, response, parse_meta, response_id
+        return plan, response, parse_meta, response_id, assembled_request
 
     def _persist_model_response(self, response: ModelResponse, iteration: int) -> str:
         """Persist a provider response before parsing, fallback, or validation."""
@@ -707,29 +1305,43 @@ class InferenceEngine:
     def _build_submit_config(
         self, request: ReviewRequest | DebugRequest
     ) -> ModelConfig:
+        settings = get_settings()
         return self._model_client.default_config.model_copy(
             update={
-                "max_tokens": _SUBMIT_MAX_TOKENS,
+                "max_tokens": int(
+                    getattr(settings, "submit_max_output_tokens", _SUBMIT_MAX_TOKENS)
+                ),
             }
         )
 
     @staticmethod
-    def _submit_tool_name(request: ReviewRequest | DebugRequest) -> str:
+    def _submit_tool_name(
+        request: ReviewRequest | DebugRequest, *, contract_version: str = "2.0"
+    ) -> str:
+        if isinstance(request, ReviewRequest) and contract_version == "3.0":
+            return "finish_review"
         return "submit_review" if isinstance(request, ReviewRequest) else "submit_debug"
 
     @staticmethod
     def _submit_only_tools(
         tool_schemas: list[dict[str, Any]],
         request: ReviewRequest | DebugRequest,
+        *,
+        expected_name: str | None = None,
     ) -> list[dict[str, Any]]:
-        expected = (
+        expected = expected_name or (
             "submit_review" if isinstance(request, ReviewRequest) else "submit_debug"
+        )
+        allowed = (
+            {"save_finding", "revise_finding", "finish_review"}
+            if expected == "finish_review"
+            else {expected}
         )
         return [
             tool
             for tool in tool_schemas
             if isinstance(tool.get("function"), dict)
-            and tool["function"].get("name") == expected
+            and tool["function"].get("name") in allowed
         ]
 
     @staticmethod
@@ -738,16 +1350,64 @@ class InferenceEngine:
             return None
         return config.tool_choice
 
+    @staticmethod
+    def _with_call_token_budget(
+        config: ModelConfig,
+        remaining_tokens: int | None,
+    ) -> ModelConfig:
+        """Set C's runtime-only provider reserve when that field is available."""
+
+        fields = getattr(config.__class__, "model_fields", {})
+        if "call_token_budget" not in fields:
+            return config
+        return config.model_copy(
+            update={"call_token_budget": remaining_tokens},
+        )
+
+    @staticmethod
+    def _call_fit_budget(
+        request_budget: int,
+        remaining_tokens: int | None,
+        max_output_tokens: int,
+    ) -> int:
+        if remaining_tokens is None:
+            return max(1, int(request_budget))
+        input_budget = max(1, int(remaining_tokens) - max(0, int(max_output_tokens)))
+        return max(1, min(int(request_budget), input_budget))
+
+    def _remaining_call_token_budget(
+        self,
+        remaining_tokens: int | None,
+    ) -> int | None:
+        if remaining_tokens is None:
+            return None
+        return max(0, int(remaining_tokens) - self._last_call_budget_tokens_used)
+
     def _parse_tool_calls(
         self,
         raw_calls: list[dict[str, Any]],
         request: ReviewRequest | DebugRequest,
         *,
         force_submit: bool = False,
+        evidence_catalog: list[dict[str, Any]] | None = None,
+        repair_mode: bool = False,
+        contract_version: str = "2.0",
     ) -> tuple[AnalysisPlan, dict[str, Any]]:
         tool_calls: list[dict[str, Any]] = []
         draft_finding_calls: list[DraftFindingInput] = []
+        draft_finding_updates: list[DraftFindingUpdateInput] = []
+        v3_save_findings: list[ModelSaveFindingActionV3] = []
+        v3_revise_findings: list[ModelReviseFindingActionV3] = []
+        v3_finish_review: ModelFinishReviewActionV3 | None = None
+        v3_action_call_refs: list[V3ActionCallRef] = []
+        v3_action_indexes: dict[str, int] = {
+            "save_finding": 0,
+            "revise_finding": 0,
+            "finish_review": 0,
+        }
+        seen_raw_provider_call_ids: set[str] = set()
         draft_review: ReviewReport | None = None
+        repair_response: ModelRepairResponse | ModelRepairResponseV3 | None = None
         draft_debug: DebugResponse | None = None
         parse_meta: dict[str, Any] = {
             "submit_review_seen": False,
@@ -755,13 +1415,56 @@ class InferenceEngine:
             "submit_review_validation_error": "",
             "submit_review_arguments_normalized": False,
             "submit_debug_validation_error": "",
+            "repair_review_seen": False,
+            "repair_review_validation_error": "",
             "draft_finding_validation_errors": [],
+            "draft_finding_update_validation_errors": [],
             "valid_draft_call_ids": [],
+            "valid_draft_update_call_ids": [],
             "location_warnings": [],
             "force_submit_discarded_count": 0,
+            "format_recovery_raw_payload": {},
+            "format_recovery_validation_error": "",
         }
 
-        for raw in raw_calls:
+        def add_v3_action_call_ref(
+            name: str,
+            raw_call_index: int,
+            raw: dict[str, Any],
+            *,
+            action_index: int | None = None,
+            validation_error: str = "",
+        ) -> None:
+            function_block = raw.get("function", {})
+            raw_arguments = (
+                function_block.get("arguments")
+                if isinstance(function_block, dict)
+                else None
+            )
+            v3_action_call_refs.append(
+                V3ActionCallRef(
+                    name=cast(
+                        Literal["save_finding", "revise_finding", "finish_review"],
+                        name,
+                    ),
+                    provider_call_id=str(raw.get("id", "")).strip(),
+                    raw_arguments=raw_arguments,
+                    raw_call_index=raw_call_index,
+                    action_index=action_index,
+                    validation_error=validation_error,
+                )
+            )
+
+        for raw_call_index, raw in enumerate(raw_calls):
+            raw_provider_call_id = (
+                str(raw.get("id", "")).strip() if isinstance(raw, dict) else ""
+            )
+            duplicate_raw_provider_call_id = bool(
+                raw_provider_call_id
+                and raw_provider_call_id in seen_raw_provider_call_ids
+            )
+            if raw_provider_call_id:
+                seen_raw_provider_call_ids.add(raw_provider_call_id)
             function_block = raw.get("function") if isinstance(raw, dict) else None
             if not isinstance(function_block, dict):
                 continue
@@ -800,8 +1503,133 @@ class InferenceEngine:
                     parse_meta["draft_finding_validation_errors"].append(str(exc))
                     logger.warning("Invalid draft finding ignored: %s", exc)
                 continue
+            if name == "update_draft_finding":
+                if force_submit or not isinstance(request, ReviewRequest):
+                    parse_meta["force_submit_discarded_count"] += int(force_submit)
+                    continue
+                if argument_error or not isinstance(payload, dict):
+                    error = argument_error or (
+                        "Invalid update_draft_finding arguments type: "
+                        f"{type(payload).__name__}"
+                    )
+                    parse_meta["draft_finding_update_validation_errors"].append(error)
+                    continue
+                try:
+                    draft_finding_updates.append(
+                        DraftFindingUpdateInput.model_validate(payload)
+                    )
+                    parse_meta["valid_draft_update_call_ids"].append(
+                        str(raw.get("id", "")).strip()
+                    )
+                except ValidationError as exc:
+                    parse_meta["draft_finding_update_validation_errors"].append(
+                        str(exc)
+                    )
+                continue
+            if contract_version == "3.0" and name in {
+                "save_finding",
+                "revise_finding",
+                "finish_review",
+            }:
+                if repair_mode:
+                    parse_meta["force_submit_discarded_count"] += 1
+                    add_v3_action_call_ref(
+                        name,
+                        raw_call_index,
+                        raw,
+                        validation_error=(
+                            "v3 registry actions are not allowed inside an active repair transaction"
+                        ),
+                    )
+                    continue
+                if argument_error or not isinstance(payload, dict):
+                    validation_error = argument_error or (
+                        f"Invalid {name} arguments type: {type(payload).__name__}"
+                    )
+                    parse_meta.setdefault("v3_action_validation_errors", []).append(
+                        validation_error
+                    )
+                    add_v3_action_call_ref(
+                        name,
+                        raw_call_index,
+                        raw,
+                        validation_error=validation_error,
+                    )
+                    continue
+                try:
+                    validated_action: Any
+                    if name == "save_finding":
+                        validated_action = ModelSaveFindingActionV3.model_validate(
+                            payload
+                        )
+                    elif name == "revise_finding":
+                        validated_action = ModelReviseFindingActionV3.model_validate(
+                            payload
+                        )
+                    else:
+                        if v3_finish_review is not None:
+                            raise ValueError(
+                                "only one finish_review action is accepted per response"
+                            )
+                        validated_action = ModelFinishReviewActionV3.model_validate(
+                            payload
+                        )
+                    if duplicate_raw_provider_call_id:
+                        raise ValueError(
+                            "duplicate provider call id for v3 action; association is ambiguous"
+                        )
+                    action_index = v3_action_indexes[name]
+                    v3_action_indexes[name] += 1
+                    if name == "save_finding":
+                        v3_save_findings.append(validated_action)
+                    elif name == "revise_finding":
+                        v3_revise_findings.append(validated_action)
+                    else:
+                        v3_finish_review = validated_action
+                    add_v3_action_call_ref(
+                        name,
+                        raw_call_index,
+                        raw,
+                        action_index=action_index,
+                    )
+                except ValidationError as exc:
+                    validation_error = f"{name}: {exc}"
+                    parse_meta.setdefault("v3_action_validation_errors", []).append(
+                        validation_error
+                    )
+                    add_v3_action_call_ref(
+                        name,
+                        raw_call_index,
+                        raw,
+                        validation_error=validation_error,
+                    )
+                except ValueError as exc:
+                    validation_error = f"{name}: {exc}"
+                    parse_meta.setdefault("v3_action_validation_errors", []).append(
+                        validation_error
+                    )
+                    add_v3_action_call_ref(
+                        name,
+                        raw_call_index,
+                        raw,
+                        validation_error=validation_error,
+                    )
+                continue
             if name == "submit_review":
                 parse_meta["submit_review_seen"] = True
+                if repair_mode:
+                    parse_meta["repair_review_validation_error"] = (
+                        "repair transaction requires the dedicated repair_review tool; "
+                        "full submit_review payloads are forbidden"
+                    )
+                    continue
+                if contract_version == "3.0":
+                    parse_meta["submit_review_validation_error"] = (
+                        "submit_review is not supported for finding contract 3.0; "
+                        "use save_finding or revise_finding for Registry changes; "
+                        "finish_review is optional and only records an active model stop"
+                    )
+                    continue
                 if argument_error or not isinstance(payload, dict):
                     error = (
                         argument_error
@@ -817,21 +1645,80 @@ class InferenceEngine:
                     parse_meta["submit_review_arguments_normalized"]
                     or arguments_normalized
                 )
-                payload_error = self._validate_submit_review_payload(payload)
+                payload_error = self._validate_submit_review_payload(
+                    payload,
+                    contract_version=contract_version,
+                )
                 if payload_error:
                     logger.warning(
                         "Invalid submit_review payload ignored: %s", payload_error
                     )
                     parse_meta["submit_review_validation_error"] = payload_error
+                    if not any(
+                        is_model_repair_payload(item)
+                        for item in payload.get("issues", [])
+                        if isinstance(item, dict)
+                    ):
+                        parse_meta["format_recovery_raw_payload"] = payload
+                        parse_meta["format_recovery_validation_error"] = payload_error
                     continue
-                normalized_payload, warnings = self._normalize_review_payload(payload)
+                normalized_payload, warnings = self._normalize_review_payload(
+                    payload,
+                    evidence_catalog=evidence_catalog,
+                    contract_version=contract_version,
+                )
                 parse_meta["location_warnings"] = warnings
                 try:
-                    draft_review = ReviewReport.model_validate(normalized_payload)
-                except ValidationError as exc:
+                    draft_review = self._normalize_structured_report(
+                        ReviewReport.model_validate(normalized_payload),
+                        contract_version=contract_version,
+                    )
+                except (ValidationError, ValueError) as exc:
                     logger.warning("Invalid submit_review payload ignored: %s", exc)
                     parse_meta["submit_review_validation_error"] = str(exc)
+                    if not any(
+                        is_model_repair_payload(item)
+                        for item in payload.get("issues", [])
+                        if isinstance(item, dict)
+                    ):
+                        parse_meta["format_recovery_raw_payload"] = payload
+                        parse_meta["format_recovery_validation_error"] = str(exc)
                     continue
+                continue
+            if name == "repair_review":
+                parse_meta["repair_review_seen"] = True
+                if argument_error or not isinstance(payload, dict):
+                    error = argument_error or (
+                        "Invalid repair_review arguments type: "
+                        f"{type(payload).__name__}"
+                    )
+                    parse_meta["repair_review_validation_error"] = error
+                    continue
+                if not repair_mode:
+                    parse_meta["repair_review_validation_error"] = (
+                        "repair_review is only valid inside an active repair transaction"
+                    )
+                    continue
+                try:
+                    repairs = payload.get("repairs")
+                    if not isinstance(repairs, list):
+                        raise ValueError("repair_review requires a repairs list")
+                    for index, item in enumerate(repairs):
+                        error = (
+                            validate_model_repair_target_v3_payload(item)
+                            if contract_version == "3.0"
+                            else validate_model_repair_target_payload(item)
+                        )
+                        if error:
+                            raise ValueError(f"repairs[{index}]: {error}")
+                    repair_response = (
+                        ModelRepairResponseV3.model_validate(payload)
+                        if contract_version == "3.0"
+                        else ModelRepairResponse.model_validate(payload)
+                    )
+                except (ValidationError, ValueError) as exc:
+                    parse_meta["repair_review_validation_error"] = str(exc)
+                    logger.warning("Invalid repair_review payload ignored: %s", exc)
                 continue
             if name == "submit_debug":
                 parse_meta["submit_debug_seen"] = True
@@ -870,7 +1757,13 @@ class InferenceEngine:
                     needs_tools=bool(tool_calls),
                     tool_calls=tool_calls,
                     draft_finding_calls=draft_finding_calls,
+                    draft_finding_updates=draft_finding_updates,
+                    v3_save_findings=v3_save_findings,
+                    v3_revise_findings=v3_revise_findings,
+                    v3_finish_review=v3_finish_review,
+                    v3_action_call_refs=v3_action_call_refs,
                     draft_review=draft_review,
+                    repair_response=repair_response,
                 ),
                 parse_meta,
             )
@@ -879,6 +1772,7 @@ class InferenceEngine:
                 needs_tools=bool(tool_calls),
                 tool_calls=tool_calls,
                 draft_debug=draft_debug,
+                repair_response=repair_response,
             ),
             parse_meta,
         )
@@ -891,14 +1785,18 @@ class InferenceEngine:
         """Satisfy rejected pseudo-calls so provider replay remains complete."""
 
         valid_ids = set(parse_meta.get("valid_draft_call_ids", []))
+        valid_update_ids = set(parse_meta.get("valid_draft_update_call_ids", []))
         for raw in raw_calls:
             function = raw.get("function") if isinstance(raw, dict) else None
             if not isinstance(function, dict):
                 continue
-            if function.get("name") != "record_draft_finding":
+            if function.get("name") not in {
+                "record_draft_finding",
+                "update_draft_finding",
+            }:
                 continue
             call_id = str(raw.get("id", "")).strip()
-            if not call_id or call_id in valid_ids:
+            if not call_id or call_id in valid_ids or call_id in valid_update_ids:
                 continue
             self._conversation.add_tool_result(
                 call_id,
@@ -921,20 +1819,37 @@ class InferenceEngine:
             return json.loads(arguments, strict=False)
 
     def _try_parse_submit_payload_from_json(
-        self, payload: dict[str, Any], request: ReviewRequest | DebugRequest
+        self,
+        payload: dict[str, Any],
+        request: ReviewRequest | DebugRequest,
+        *,
+        evidence_catalog: list[dict[str, Any]] | None = None,
+        contract_version: str = "2.0",
     ) -> AnalysisPlan | None:
         if isinstance(request, ReviewRequest):
-            payload_error = self._validate_submit_review_payload(payload)
+            if contract_version == "3.0":
+                return None
+            payload_error = self._validate_submit_review_payload(
+                payload,
+                contract_version=contract_version,
+            )
             if payload_error:
                 logger.warning("Invalid fallback review JSON ignored: %s", payload_error)
                 return None
-            normalized_payload, _ = self._normalize_review_payload(payload)
+            normalized_payload, _ = self._normalize_review_payload(
+                payload,
+                evidence_catalog=evidence_catalog,
+                contract_version=contract_version,
+            )
             try:
-                report = ReviewReport.model_validate(normalized_payload)
+                report = self._normalize_structured_report(
+                    ReviewReport.model_validate(normalized_payload),
+                    contract_version=contract_version,
+                )
                 return AnalysisPlan(
                     needs_tools=False, tool_calls=[], draft_review=report
                 )
-            except ValidationError as exc:
+            except (ValidationError, ValueError) as exc:
                 logger.warning("Invalid fallback review JSON ignored: %s", exc)
                 return None
         try:
@@ -950,6 +1865,28 @@ class InferenceEngine:
             )
         except ValidationError:
             return None
+
+    @staticmethod
+    def _normalize_structured_report(
+        report: ReviewReport,
+        *,
+        contract_version: str = "2.0",
+    ) -> ReviewReport:
+        """Populate canonical support envelopes from compatible role arrays."""
+
+        if report.schema_version != contract_version:
+            raise ValueError(
+                "review report contract/version mismatch: "
+                f"report={report.schema_version!r}, context={contract_version!r}"
+            )
+        for issue in report.issues:
+            if (
+                issue.is_structured_hypothesis
+                and not issue.is_v3_finding
+                and not issue.supports
+            ):
+                issue.supports = issue_supports(issue)
+        return report
 
     @staticmethod
     def _fallback_extract_json(content: str) -> dict[str, Any] | None:
@@ -989,7 +1926,11 @@ class InferenceEngine:
         return nested, True
 
     @staticmethod
-    def _validate_submit_review_payload(payload: dict[str, Any]) -> str:
+    def _validate_submit_review_payload(
+        payload: dict[str, Any],
+        *,
+        contract_version: str = "2.0",
+    ) -> str:
         summary = payload.get("summary")
         if isinstance(summary, str) and _DSML_ISSUES_PARAMETER_PATTERN.search(summary):
             return "Invalid submit_review payload: DSML parameter leak for issues in summary"
@@ -1001,7 +1942,41 @@ class InferenceEngine:
                 f"got {type(payload['issues']).__name__}"
             )
         for index, issue in enumerate(payload["issues"]):
-            if isinstance(issue, dict) and "confidence" not in issue:
+            if is_model_repair_payload(issue):
+                repair_error = validate_model_repair_payload(issue)
+                if repair_error:
+                    return (
+                        "Invalid submit_review repair issue at "
+                        f"issues[{index}]: {repair_error}"
+                    )
+            if isinstance(issue, dict) and is_model_finding_v3_payload(issue):
+                if contract_version != "3.0":
+                    return (
+                        "Invalid submit_review payload: v3 finding requires "
+                        "finding contract version '3.0'"
+                    )
+                try:
+                    ModelFindingInputV3.model_validate(issue)
+                except ValidationError as exc:
+                    return (
+                        "Invalid submit_review 3.0 finding at "
+                        f"issues[{index}]: {exc}"
+                    )
+                continue
+            if (
+                isinstance(issue, dict)
+                and "confidence" not in issue
+                and not (
+                    str(issue.get("target_candidate_id", "")).strip()
+                    and str(issue.get("repair_status", "")).strip()
+                    in {"unchanged", "incomplete", "deferred", "repaired"}
+                    and (
+                        "repair_patch" in issue
+                        or str(issue.get("repair_status", "")).strip()
+                        != "repaired"
+                    )
+                )
+            ):
                 return (
                     "Invalid submit_review payload: "
                     f"issues[{index}] missing required confidence"
@@ -1020,10 +1995,25 @@ class InferenceEngine:
     @staticmethod
     def _normalize_review_payload(
         payload: Any,
+        *,
+        evidence_catalog: list[dict[str, Any]] | None = None,
+        contract_version: str = "2.0",
     ) -> tuple[dict[str, Any], list[dict[str, str]]]:
         if not isinstance(payload, dict):
             return {}, []
         normalized = dict(payload)
+        declared_version = str(normalized.get("schema_version", "") or "").strip()
+        if declared_version and declared_version != contract_version:
+            return normalized, [
+                {
+                    "location": "",
+                    "warning": (
+                        "review report schema_version does not match the active "
+                        f"finding contract: {declared_version!r} != {contract_version!r}"
+                    ),
+                }
+            ]
+        normalized["schema_version"] = contract_version
         issues = normalized.get("issues")
         if not isinstance(issues, list):
             return normalized, []
@@ -1033,7 +2023,10 @@ class InferenceEngine:
             if not isinstance(issue, dict):
                 normalized_issues.append(issue)
                 continue
-            issue_dict = dict(issue)
+            issue_dict = normalize_model_finding_payload(
+                issue,
+                evidence_catalog=evidence_catalog,
+            )
             raw_severity = str(issue_dict.get("severity", "")).strip().lower()
             mapped = InferenceEngine._normalize_severity(raw_severity)
             if mapped:
@@ -1071,6 +2064,152 @@ class InferenceEngine:
             "nits": "style",
         }
         return mapping.get(value, value)
+
+    @staticmethod
+    def _build_draft_checkpoint_message(
+        drafts: list[DraftFinding],
+        states: list[DraftFindingState],
+    ) -> Message:
+        """Return the short next-round checkpoint for unresolved hypotheses."""
+
+        states_by_id = {item.draft_id: item for item in states}
+        lines = [
+            "draft_checkpoint:",
+            "Draft recordings are state checkpoints, never completion. Review each "
+            "hypothesis and choose one targeted next action; do not repeat a read "
+            "unless it can answer a stated missing check.",
+        ]
+        for draft in drafts:
+            checkpoint = states_by_id.get(
+                draft.id,
+                DraftFindingState(draft_id=draft.id),
+            )
+            lines.append(
+                f"- {draft.id} status={checkpoint.status} "
+                f"hypothesis={draft.claim} at {draft.file}"
+                + (f":{draft.line}" if draft.line is not None else "")
+            )
+            if checkpoint.reason:
+                lines.append(f"  reason: {checkpoint.reason}")
+            if checkpoint.missing_checks:
+                lines.append(
+                    "  missing_checks: " + "; ".join(checkpoint.missing_checks)
+                )
+            elif checkpoint.status == "pending":
+                lines.append(
+                    "  missing_checks: inspect the cited implementation and its "
+                    "relevant caller or contract, then confirm or disprove the claim"
+                )
+            if checkpoint.evidence_refs:
+                lines.append(
+                    "  selected_evidence_refs: "
+                    + ", ".join(checkpoint.evidence_refs)
+                )
+        return Message(role="user", content="\n".join(lines))
+
+    @staticmethod
+    def _build_evidence_catalog_message(
+        evidence_ledger: list[dict[str, Any]],
+    ) -> Message | None:
+        """Expose exact delivered evidence ids without exposing unobserved spans."""
+
+        records = [
+            item
+            for item in evidence_ledger
+            if isinstance(item, dict)
+            and str(item.get("lifecycle", "delivered")).strip() == "delivered"
+            and not bool(item.get("truncated", False))
+        ]
+        if not records:
+            return None
+        lines = [
+            "delivered_evidence_catalog:",
+            "Select supports.evidence_refs only from these exact ids. Unknown, "
+            "stale, or out-of-scope ids will be rejected; do not guess a nearest span.",
+        ]
+        # Do not hide a relevant delivered span behind an arbitrary first-40
+        # cutoff.  Final-submit context performs relevance ranking and atomic
+        # budget accounting; exploration still exposes the complete catalog so
+        # the model can select an exact id without nearest-span guessing.
+        for record in records:
+            evidence_id = str(record.get("evidence_id", "")).strip()
+            artifact_id = str(record.get("artifact_id", "")).strip()
+            path = str(record.get("path", record.get("file", ""))).strip()
+            start = record.get("start_line", record.get("line", ""))
+            end = record.get("end_line", start)
+            source = str(
+                record.get("source_type", record.get("retrieval_source", ""))
+            ).strip()
+            snapshot = str(record.get("snapshot_id", "")).strip()
+            revision = str(record.get("revision", "")).strip()
+            if not evidence_id or not path:
+                continue
+            range_text = f"{path}:{start}"
+            if end not in (None, "", start):
+                range_text += f"-{end}"
+            lines.append(
+                f"- evidence_id={evidence_id} location={range_text} source={source} "
+                f"snapshot={snapshot} revision={revision}"
+                + (f" aliases={artifact_id}" if artifact_id and artifact_id != evidence_id else "")
+            )
+        return Message(role="user", content="\n".join(lines))
+
+    @staticmethod
+    def _build_current_finding_handles_message(
+        handles: list[dict[str, str]] | None,
+    ) -> Message | None:
+        """Build the runtime-only current Registry directory for the model.
+
+        The directory is deliberately separate from the provider conversation:
+        it exposes only opaque handles and short display labels, never finding
+        bodies, versions, candidate ids, or evidence semantics.  ``anchor`` is
+        copied as display text and is not parsed or used for authorization.
+        """
+
+        if not handles:
+            return None
+        entries: list[dict[str, str]] = []
+        seen_handles: set[str] = set()
+        for raw in handles:
+            if not isinstance(raw, dict):
+                continue
+            opaque_handle = str(raw.get("opaque_handle", "") or "").strip()
+            if not opaque_handle or opaque_handle in seen_handles:
+                continue
+            seen_handles.add(opaque_handle)
+            entries.append(
+                {
+                    "opaque_handle": opaque_handle,
+                    "anchor": str(raw.get("anchor", "") or "").strip()[:256],
+                    "description_short": str(
+                        raw.get("description_short", "") or ""
+                    ).strip()[:240],
+                }
+            )
+        if not entries:
+            return None
+        return Message(
+            role="user",
+            content=(
+                "runtime_current_finding_handles (runtime directory only; "
+                "anchor is display text):\n"
+                + serialize_json(entries)
+            ),
+            preserve_on_trim=True,
+        )
+
+    @staticmethod
+    def _preserve_v3_registry_turns(messages: list[Message]) -> list[Message]:
+        """Return the canonical v3 transcript unchanged.
+
+        The runtime directory carries the current opaque handles separately;
+        this helper name remains for compatibility with callers that used the
+        earlier preservation hint.  Conversation history must retain original
+        provider calls/results so the assembler can trim complete turns without
+        rewriting finding arguments or silently dropping ordinary tool feedback.
+        """
+
+        return messages
 
     @classmethod
     def _build_tool_feedback_messages(
@@ -1117,6 +2256,9 @@ class InferenceEngine:
                             + serialize_json(
                                 {
                                     "tool": function_block.get("name", "unknown"),
+                                    "tool_call_id": str(
+                                        raw_tool_call.get("id", "")
+                                    ).strip(),
                                     "arguments": function_block.get("arguments", "{}"),
                                     "result": result_payload,
                                 }
@@ -1158,7 +2300,7 @@ class InferenceEngine:
         return compacted
 
     @staticmethod
-    def _empty_final_evidence_telemetry(token_budget: int) -> dict[str, int]:
+    def _empty_final_evidence_telemetry(token_budget: int) -> dict[str, Any]:
         return {
             "token_budget": max(0, token_budget),
             "available_draft_finding_count": 0,
@@ -1169,6 +2311,22 @@ class InferenceEngine:
             "included_concern_count": 0,
             "validator_result_included": 0,
             "manifest_span_count": 0,
+            "available_catalog_count": 0,
+            "exposed_catalog_count": 0,
+            "historical_ledger_count": 0,
+            "included_catalog_count": 0,
+            "required_catalog_count": 0,
+            "required_catalog_missing_count": 0,
+            "required_catalog_ids": [],
+            "candidate_evidence_dependencies": {},
+            "unresolved_required_catalog_refs": [],
+            "included_catalog_ids": [],
+            "omitted_catalog_ids": [],
+            "catalog_token_count": 0,
+            "graph_token_count": 0,
+            "source_evidence_token_count": 0,
+            "context_insufficient": False,
+            "context_insufficient_reason": "",
             "included_count": 0,
             "deduplicated_count": 0,
             "truncated_count": 0,
@@ -1183,10 +2341,13 @@ class InferenceEngine:
         draft_findings: list[DraftFinding],
         *,
         validator_result: dict[str, Any] | None = None,
+        include_validator_feedback: bool = True,
         candidate_context_manifests: list[dict[str, Any]] | None = None,
+        draft_states: list[DraftFindingState] | None = None,
+        evidence_ledger: list[dict[str, Any]] | None = None,
         token_budget: int,
-    ) -> tuple[Message | None, dict[str, int]]:
-        """Build a bounded, deduplicated evidence handoff for submit-only calls."""
+    ) -> tuple[Message | None, dict[str, Any]]:
+        """Build a bounded, atomic, citation-first submit-only evidence handoff."""
 
         telemetry = cls._empty_final_evidence_telemetry(token_budget)
         candidates: list[tuple[str, str]] = []
@@ -1194,6 +2355,14 @@ class InferenceEngine:
 
         for draft in draft_findings:
             telemetry["available_draft_finding_count"] += 1
+            checkpoint = next(
+                (
+                    item
+                    for item in (draft_states or [])
+                    if item.draft_id == draft.id
+                ),
+                DraftFindingState(draft_id=draft.id),
+            )
             location = draft.file
             if draft.line is not None:
                 location += f":{draft.line}"
@@ -1202,18 +2371,37 @@ class InferenceEngine:
             candidates.append(
                 (
                     "draft",
-                    f"- {draft.id}: {location}\n  claim: {draft.claim}",
+                    f"- {draft.id}: {location}\n  status: {checkpoint.status}\n"
+                    f"  claim: {draft.claim}"
+                    + (
+                        f"\n  reason: {checkpoint.reason}"
+                        if checkpoint.reason
+                        else ""
+                    )
+                    + (
+                        "\n  missing_checks: "
+                        + "; ".join(checkpoint.missing_checks)
+                        if checkpoint.missing_checks
+                        else ""
+                    ),
                 )
             )
 
-        if validator_result:
+        if validator_result and include_validator_feedback:
+            repair_feedback = cls._build_repair_feedback_message(
+                validator_result,
+                token_budget=max(1, token_budget),
+            )
+            validator_text = (
+                repair_feedback.content
+                if repair_feedback is not None
+                else "validator_result="
+                + serialize_json(cls._compact_validator_result(validator_result))
+            )
             candidates.append(
                 (
                     "validator",
-                    "- validator_result: "
-                    + cls._json_preview(
-                        cls._compact_validator_result(validator_result), 1800
-                    ),
+                    validator_text,
                 )
             )
 
@@ -1283,8 +2471,232 @@ class InferenceEngine:
                 )
             )
 
+        delivered_catalog = [
+            record
+            for record in (evidence_ledger or [])
+            if isinstance(record, dict)
+            and str(record.get("lifecycle", "delivered")).strip() == "delivered"
+            and not bool(record.get("truncated", False))
+        ]
+        telemetry["historical_ledger_count"] = len(evidence_ledger or [])
+
+        # The model may cite only these delivered records. Exact refs are hard
+        # dependencies; same-file records are merely optional background. The
+        # old path-based rule made every record in the draft file a required
+        # dependency, which inflated the final handoff and was equivalent to
+        # nearest-evidence filling.
+        draft_paths = {
+            normalize_repo_path(draft.file) for draft in draft_findings if draft.file
+        }
+        selected_refs = {
+            str(reference).strip()
+            for state in (draft_states or [])
+            for reference in state.evidence_refs
+            if str(reference).strip()
+        }
+        gap_paths: set[str] = set()
+        gap_refs: set[str] = set()
+        candidate_dependencies: dict[str, set[str]] = {}
+        for state in draft_states or []:
+            refs = {
+                str(reference).strip()
+                for reference in state.evidence_refs
+                if str(reference).strip()
+            }
+            if refs:
+                candidate_dependencies.setdefault(state.draft_id, set()).update(refs)
+
+        def collect_gap_values(value: Any, candidate_id: str = "") -> None:
+            if isinstance(value, dict):
+                local_candidate_id = str(
+                    value.get("candidate_id")
+                    or value.get("target_candidate_id")
+                    or value.get("draft_id")
+                    or candidate_id
+                ).strip()
+                reference = str(
+                    value.get("reference_id") or value.get("artifact_id") or ""
+                ).strip()
+                if reference:
+                    gap_refs.add(reference)
+                    if local_candidate_id:
+                        candidate_dependencies.setdefault(
+                            local_candidate_id, set()
+                        ).add(reference)
+                location = str(value.get("location", "")).strip()
+                if location:
+                    gap_paths.add(normalize_location(location).path or "")
+                raw_file = str(value.get("file", "")).strip()
+                if raw_file:
+                    gap_paths.add(normalize_repo_path(raw_file))
+                for item in value.values():
+                    collect_gap_values(item, local_candidate_id)
+            elif isinstance(value, list):
+                for item in value:
+                    collect_gap_values(item, candidate_id)
+
+        collect_gap_values(validator_result or {})
+        exact_refs = selected_refs | gap_refs
+
+        catalog_candidates: list[tuple[int, bool, bool, dict[str, Any], str]] = []
+        reference_to_evidence: dict[str, str] = {}
+        for record in delivered_catalog:
+            # Older in-process callers may hand this helper a pre-ledger
+            # artifact record. Treat its exact artifact id as a compatibility
+            # alias only; live ledgers always supply the generated evidence_id.
+            evidence_id = str(
+                record.get("evidence_id") or record.get("artifact_id") or ""
+            ).strip()
+            artifact_id = str(record.get("artifact_id", "")).strip()
+            path = str(record.get("path", record.get("file", ""))).strip()
+            start = record.get("start_line", record.get("line", ""))
+            end = record.get("end_line", start)
+            if not evidence_id or not path:
+                continue
+            aliases = {
+                str(item).strip()
+                for item in record.get("aliases", [])
+                if str(item).strip()
+            }
+            ids = {evidence_id, artifact_id, *aliases}
+            normalized_path = normalize_repo_path(path)
+            for reference_id in ids:
+                reference_to_evidence[reference_id] = evidence_id
+            exact_ref = bool(ids & exact_refs)
+            path_ref = normalized_path in draft_paths or normalized_path in gap_paths
+            # Lower score is higher priority. Only an explicit id/reference is
+            # required; a same-file record is optional context and never a
+            # substitute for an unresolved or missing exact reference.
+            score = 0 if exact_ref else 1 if path_ref else 2
+            catalog_candidates.append((score, exact_ref, path_ref, record, evidence_id))
+
+        catalog_candidates.sort(
+            key=lambda item: (item[0], item[3].get("source_type", ""), item[4])
+        )
+        telemetry["available_catalog_count"] = len(catalog_candidates)
+        required_catalog_ids: list[str] = []
+        for score, exact_ref, path_ref, record, evidence_id in catalog_candidates:
+            if exact_ref:
+                required_catalog_ids.append(evidence_id)
+            if exact_ref:
+                path = str(record.get("path", record.get("file", ""))).strip()
+                start = record.get("start_line", record.get("line", ""))
+                end = record.get("end_line", start)
+                location = f"{path}:{start}"
+                if end not in (None, "", start):
+                    location += f"-{end}"
+                alias_labels = [
+                    str(item).strip()
+                    for item in record.get("aliases", [])
+                    if str(item).strip() and str(item).strip() != evidence_id
+                ]
+                body = str(record.get("content", "") or "").replace("\n", "\\n")
+                if len(body) > 720:
+                    body = body[:700].rstrip() + "...[body preview]"
+                candidates.append(
+                    (
+                        "catalog_required",
+                        f"- evidence_catalog evidence_id={evidence_id}"
+                        + (f" aliases={','.join(alias_labels)}" if alias_labels else "")
+                        + f" location={location} "
+                        f"source={record.get('source_type', '')} "
+                        f"snapshot={record.get('snapshot_id', '')} "
+                        f"revision={record.get('revision', '')}"
+                        + (f" content={body}" if body else ""),
+                    )
+                )
+            elif path_ref:
+                path = str(record.get("path", record.get("file", ""))).strip()
+                start = record.get("start_line", record.get("line", ""))
+                end = record.get("end_line", start)
+                location = f"{path}:{start}"
+                if end not in (None, "", start):
+                    location += f"-{end}"
+                candidates.append(
+                    (
+                        "catalog_optional",
+                        f"- optional_evidence_catalog evidence_id={evidence_id} "
+                        f"location={location} source={record.get('source_type', '')} "
+                        f"snapshot={record.get('snapshot_id', '')} "
+                        f"revision={record.get('revision', '')}",
+                    )
+                )
+
+        # If no candidate path is known, expose the catalog as optional choices
+        # only. This lets the model select an exact id without turning any
+        # nearby record into a hidden dependency.
+        if not draft_paths and not gap_paths:
+            for _, exact_ref, _, record, evidence_id in catalog_candidates:
+                if exact_ref:
+                    continue
+                path = str(record.get("path", record.get("file", ""))).strip()
+                start = record.get("start_line", record.get("line", ""))
+                end = record.get("end_line", start)
+                location = f"{path}:{start}"
+                if end not in (None, "", start):
+                    location += f"-{end}"
+                candidates.append(
+                    (
+                        "catalog_optional",
+                        f"- optional_evidence_catalog evidence_id={evidence_id} "
+                        f"location={location} source={record.get('source_type', '')} "
+                        f"snapshot={record.get('snapshot_id', '')} "
+                        f"revision={record.get('revision', '')}",
+                    )
+                )
+        telemetry["required_catalog_ids"] = required_catalog_ids
+        telemetry["required_catalog_count"] = len(required_catalog_ids)
+        telemetry["candidate_evidence_dependencies"] = {
+            candidate_id: sorted(refs)
+            for candidate_id, refs in sorted(candidate_dependencies.items())
+            if refs
+        }
+        telemetry["unresolved_required_catalog_refs"] = sorted(
+            reference for reference in exact_refs if reference not in reference_to_evidence
+        )
+        unresolved_refs = telemetry["unresolved_required_catalog_refs"]
+        if unresolved_refs:
+            candidates.append(
+                (
+                    "validator",
+                    "- unresolved_required_evidence_refs="
+                    + ",".join(unresolved_refs)
+                    + " action=select a delivered exact catalog id or keep the "
+                    "candidate unresolved; never substitute by path",
+                )
+            )
+
+        # Citation choices are hard handoff dependencies. Put them ahead of
+        # ordinary draft/graph/tool summaries so a bounded request cannot
+        # spend its entire budget on explanatory context and force the model
+        # to invent an evidence reference.
+        priority = {
+            "catalog_required": 0,
+            "draft": 1,
+            "validator": 2,
+            "manifest": 3,
+            "tool": 4,
+            "catalog_optional": 5,
+        }
+        candidates.sort(key=lambda item: priority.get(item[0], 99))
+        telemetry["exposed_catalog_count"] = sum(
+            kind in {"catalog_optional", "catalog_required"} for kind, _ in candidates
+        )
+
         if token_budget <= 0 or not candidates:
             telemetry["truncated_count"] = len(candidates)
+            if required_catalog_ids:
+                telemetry["required_catalog_missing_count"] = len(
+                    required_catalog_ids
+                )
+                telemetry["omitted_catalog_ids"] = [
+                    {"id": item, "reason": "final_submit_feedback_budget_zero"}
+                    for item in required_catalog_ids
+                ]
+                telemetry["context_insufficient"] = True
+                telemetry["context_insufficient_reason"] = (
+                    "required_delivered_catalog_entries_do_not_fit"
+                )
             return None, telemetry
 
         builder = ContextBuilder()
@@ -1299,23 +2711,49 @@ class InferenceEngine:
             lines.append("Known draft findings:")
         if builder.estimate_tokens("\n".join(lines)) > token_budget:
             telemetry["truncated_count"] = len(candidates)
+            if required_catalog_ids:
+                telemetry["required_catalog_missing_count"] = len(
+                    required_catalog_ids
+                )
+                telemetry["omitted_catalog_ids"] = [
+                    {"id": item, "reason": "summary_header_does_not_fit"}
+                    for item in required_catalog_ids
+                ]
+                telemetry["context_insufficient"] = True
+                telemetry["context_insufficient_reason"] = (
+                    "required_delivered_catalog_entries_do_not_fit"
+                )
             return None, telemetry
 
         full_included = 0
+        omitted = 0
         for kind, candidate in candidates:
             proposed = "\n".join([*lines, candidate])
-            shortened = False
             if builder.estimate_tokens(proposed) <= token_budget:
                 lines.append(candidate)
                 full_included += 1
             else:
-                current_tokens = builder.estimate_tokens("\n".join(lines))
-                remaining = max(0, token_budget - current_tokens)
-                fitted = cls._truncate_text_to_tokens(candidate, remaining, builder)
-                if not fitted:
-                    break
-                lines.append(fitted)
-                shortened = True
+                # Entries are atomic: never cut an id/location/body line in
+                # half. A required catalog item becoming unavailable is an
+                # explicit handoff failure, not a successful partial submit.
+                omitted += 1
+                if kind == "catalog_required":
+                    telemetry["required_catalog_missing_count"] += 1
+                if kind in {"catalog_optional", "catalog_required"}:
+                    omitted_id = (
+                        candidate.split(" evidence_id=", 1)[-1].split(" ", 1)[0]
+                    )
+                    telemetry["omitted_catalog_ids"].append(
+                        {
+                            "id": omitted_id,
+                            "reason": (
+                                "required_entry_does_not_fit"
+                                if kind == "catalog_required"
+                                else "optional_entry_does_not_fit"
+                            ),
+                        }
+                    )
+                continue
             telemetry["included_count"] += 1
             if kind == "draft":
                 telemetry["included_draft_finding_count"] += 1
@@ -1325,15 +2763,34 @@ class InferenceEngine:
                 telemetry["validator_result_included"] += 1
             elif kind == "manifest":
                 telemetry["manifest_span_count"] += 1
-            else:
-                telemetry["included_concern_count"] += 1
-            if shortened:
-                break
-
-        telemetry["truncated_count"] = len(candidates) - full_included
+            elif kind in {"catalog_optional", "catalog_required"}:
+                # Catalog entries are identity hints; the full tool-result
+                # counters remain reserved for observed tool payloads.
+                telemetry["included_catalog_count"] += 1
+                evidence_id = (
+                    candidate.split(" evidence_id=", 1)[-1].split(" ", 1)[0]
+                )
+                telemetry["included_catalog_ids"].append(evidence_id)
+            entry_tokens = builder.estimate_tokens(candidate)
+            if kind in {"catalog_optional", "catalog_required"}:
+                telemetry["catalog_token_count"] += entry_tokens
+            elif kind == "manifest":
+                telemetry["graph_token_count"] += entry_tokens
+            elif kind == "tool":
+                telemetry["source_evidence_token_count"] += entry_tokens
+        telemetry["truncated_count"] = max(omitted, len(candidates) - full_included)
+        missing_required = set(required_catalog_ids) - set(
+            telemetry["included_catalog_ids"]
+        )
+        if missing_required:
+            telemetry["required_catalog_missing_count"] = len(missing_required)
+            telemetry["context_insufficient"] = True
+            telemetry["context_insufficient_reason"] = (
+                "required_delivered_catalog_entries_do_not_fit"
+            )
         content = "\n".join(lines)
         telemetry["estimated_tokens"] = builder.estimate_tokens(content)
-        return Message(role="user", content=content), telemetry
+        return Message(role="user", content=content, preserve_on_trim=True), telemetry
 
     @staticmethod
     def _compact_validator_result(result: dict[str, Any]) -> dict[str, Any]:
@@ -1347,7 +2804,9 @@ class InferenceEngine:
             "submit_allowed",
             "effective_issue_count",
             "unresolved_evidence_gaps",
+            "rejected_candidates",
             "policy_warnings",
+            "repair_instruction",
         ):
             if key in result:
                 compact[key] = result[key]
@@ -1369,6 +2828,204 @@ class InferenceEngine:
                 if isinstance(item, dict)
             ]
         return compact
+
+    @classmethod
+    def _build_repair_feedback_message(
+        cls,
+        result: dict[str, Any] | None,
+        *,
+        token_budget: int | None = None,
+    ) -> Message | None:
+        """Return atomic candidate repair protocols for exploration turns.
+
+        A repair protocol is never JSON-previewed or character-truncated.  If
+        the feedback budget cannot carry every target, complete protocols are
+        selected in order and the remaining target ids are explicitly deferred;
+        the runtime keeps their original findings unchanged.
+        """
+
+        if not isinstance(result, dict):
+            return None
+        gap_items = result.get("unresolved_evidence_gaps")
+        rejected_items = result.get("rejected_candidates")
+        actionable = bool(gap_items) or bool(rejected_items)
+        if not actionable and result.get("validator_passed") is True:
+            return None
+        if not isinstance(gap_items, list) and not isinstance(rejected_items, list):
+            return None
+        raw_items = [
+            item
+            for source in (gap_items, rejected_items)
+            if isinstance(source, list)
+            for item in source
+            if isinstance(item, dict)
+        ]
+        if not raw_items:
+            return None
+
+        opaque_handle_items = [
+            item
+            for item in raw_items
+            if str(item.get("target_handle", "") or "").strip()
+        ]
+        if opaque_handle_items:
+            opaque_protocols: list[tuple[str, str]] = []
+            seen_handles: set[str] = set()
+            for item in opaque_handle_items:
+                handle = str(item.get("target_handle", "") or "").strip()
+                if not handle or handle in seen_handles:
+                    continue
+                seen_handles.add(handle)
+                gaps = item.get("gaps", [])
+                action_lines = [
+                    str(gap.get("required_action", "")).strip()
+                    for gap in gaps
+                    if isinstance(gap, dict)
+                    and str(gap.get("required_action", "")).strip()
+                ]
+                action = " ".join(dict.fromkeys(action_lines)) or (
+                    "Preserve the runtime-owned finding if this target cannot be repaired."
+                )
+                protocol = "\n".join(
+                    [
+                        "opaque_repair_target:",
+                        f"target_handle={handle}",
+                        f"status={str(item.get('status', '')).strip()}",
+                        "candidate_content="
+                        + serialize_json(item.get("candidate_content", {})),
+                        "gaps=" + serialize_json(gaps),
+                        "required_action=" + action,
+                    ]
+                )
+                opaque_protocols.append((handle, protocol))
+            if not opaque_protocols:
+                return None
+            prefix = (
+                "repair_review_feedback (this is not completion): address only the "
+                "listed opaque target_handle values, then call repair_review. Each "
+                "item must include repair_status. For repaired, include only the "
+                "semantic fields that changed under repair_patch; omitted fields "
+                "inherit the runtime-owned candidate. Use delete_fields for an "
+                "explicit deletion and never use null to mean omission. Do not "
+                "emit candidate ids, finding ids, content versions, snapshots, "
+                "hashes, or a full finding object.\n"
+            )
+            builder = ContextBuilder()
+            opaque_selected: list[str] = []
+            opaque_deferred: list[str] = []
+            limit = None if token_budget is None else max(1, int(token_budget))
+            for handle, protocol in opaque_protocols:
+                proposed = prefix + "\n".join([*opaque_selected, protocol])
+                if opaque_selected and limit is not None and builder.estimate_tokens(proposed) > limit:
+                    opaque_deferred.append(handle)
+                    continue
+                opaque_selected.append(protocol)
+            if opaque_deferred:
+                opaque_selected.append(
+                    "deferred_target_handles=" + ",".join(opaque_deferred) + "\n"
+                    "These targets were not included in this model-facing repair "
+                    "message; the runtime preserves their original findings."
+                )
+            return Message(
+                role="user",
+                content=prefix + "\n".join(opaque_selected),
+                preserve_on_trim=True,
+            )
+
+        if not any(
+            str(item.get("target_candidate_id") or item.get("candidate_id") or "").strip()
+            for item in raw_items
+        ):
+            return Message(
+                role="user",
+                content=(
+                    "initial_submission_feedback (this is not a repair transaction): "
+                    "the runtime has not registered a candidate identity yet. "
+                    "Complete the initial submit_review using the semantic fields and "
+                    "delivered evidence catalog. Do not invent a candidate id, finding "
+                    "id, content version, Graph id, draft id, hash, or repository "
+                    "revision; target_candidate_id and candidate_content_version are "
+                    "not active until the runtime returns an exact repair transaction.\n"
+                    + serialize_json({"gaps": raw_items})
+                ),
+                preserve_on_trim=True,
+            )
+
+        protocols: list[tuple[str, str]] = []
+        seen_targets: set[str] = set()
+        for index, item in enumerate(raw_items):
+            target = str(
+                item.get("target_candidate_id") or item.get("candidate_id") or ""
+            ).strip()
+            if not target:
+                continue
+            dedupe_target = target
+            if dedupe_target in seen_targets:
+                continue
+            seen_targets.add(dedupe_target)
+            display_target = dedupe_target
+            original_finding = item.get("original_contents", {})
+            gaps = item.get("gaps", [])
+            action_lines = [
+                str(gap.get("required_action", "")).strip()
+                for gap in gaps
+                if isinstance(gap, dict) and str(gap.get("required_action", "")).strip()
+            ]
+            action = " ".join(dict.fromkeys(action_lines)) or (
+                "Preserve the original finding if this target cannot be repaired."
+            )
+            protocol = "\n".join(
+                [
+                    "candidate_repair_protocol:",
+                    f"target_candidate_id={display_target}",
+                    f"current_finding_id={str(item.get('current_finding_id', '')).strip()}",
+                    f"candidate_content_version={str(item.get('candidate_content_version', item.get('content_hash', ''))).strip()}",
+                    f"integrity_status={str(item.get('status', '')).strip()}",
+                    "original_finding=" + serialize_json(original_finding),
+                    "gaps=" + serialize_json(gaps),
+                    "required_action=" + action,
+                ]
+            )
+            protocols.append((display_target, protocol))
+
+        if not protocols:
+            return None
+        prefix = (
+            "candidate_repair_feedback (this is not completion): address only the "
+            "listed exact runtime targets, then submit again. Each returned issue "
+            "must carry the exact target_candidate_id, candidate_content_version, "
+            "and repair_status. Prefer a repair_patch containing only changed "
+            "semantic fields; do not rewrite the full finding to add one trigger, "
+            "support role, or evidence reference. Use repair_status=repaired only "
+            "after the same canonical integrity rules can pass; otherwise return "
+            "the target with unchanged, incomplete, or deferred plus a reason. "
+            "Never guess an evidence id, path, snapshot, hash, or range.\n"
+        )
+        builder = ContextBuilder()
+        selected: list[str] = []
+        deferred: list[str] = []
+        limit = None if token_budget is None else max(1, int(token_budget))
+        for target, protocol in protocols:
+            proposed = prefix + "\n".join([*selected, protocol])
+            if selected and limit is not None and builder.estimate_tokens(proposed) > limit:
+                deferred.append(target)
+                continue
+            # Keep one complete candidate protocol even when it alone exceeds
+            # the advisory feedback slice; RequestAssembler will then make the
+            # whole request incomplete rather than cutting this protocol.
+            selected.append(protocol)
+        if deferred:
+            selected.append(
+                "deferred_target_candidate_ids=" + ",".join(deferred) + "\n"
+                "These targets were not included in this repair transaction; "
+                "the runtime preserves their original findings and does not count "
+                "them as repaired."
+            )
+        return Message(
+            role="user",
+            content=prefix + "\n".join(selected),
+            preserve_on_trim=True,
+        )
 
     @staticmethod
     def _manifest_evidence_for_drafts(
@@ -1426,6 +3083,141 @@ class InferenceEngine:
                     + serialize_json(selected)
                 )
         return output
+
+    @staticmethod
+    def _build_review_handoff(
+        state: ContextState,
+        *,
+        diff_text: str,
+        file_contents: dict[str, str],
+        draft_findings: list[DraftFinding],
+        tool_feedback: list[dict[str, Any]],
+    ) -> ReviewHandoff:
+        """Preserve the smallest useful change facts for final submission.
+
+        The handoff is deliberately source-first: changed hunks and visible
+        manifest spans survive even when no draft pseudo-call was recorded.
+        Full historical tool messages remain in the separate bounded digest.
+        """
+
+        changed_diff, diff_gaps = InferenceEngine._complete_diff_handoff(
+            diff_text, char_limit=14_000
+        )
+        selected_files: dict[str, str] = {}
+        draft_paths = {
+            item.file.replace("\\", "/").lstrip("./") for item in draft_findings
+        }
+        changed_paths = {
+            str(manifest.get("changed_anchor", {}).get("file", ""))
+            .replace("\\", "/")
+            .lstrip("./")
+            for manifest in state.candidate_context_manifests
+            if isinstance(manifest.get("changed_anchor"), dict)
+        }
+        wanted = draft_paths | {item for item in changed_paths if item}
+        covered_paths = {
+            str(span.get("file", span.get("path", "")))
+            .replace("\\", "/")
+            .lstrip("./")
+            for manifest in state.candidate_context_manifests
+            for span in manifest.get("included_spans", [])
+            if isinstance(span, dict) and str(span.get("content", "") or "")
+        }
+        for path, content in file_contents.items():
+            normalized = path.replace("\\", "/").lstrip("./")
+            if (not wanted or normalized in wanted) and normalized not in covered_paths:
+                selected_files[normalized] = InferenceEngine._truncate_text_to_chars(
+                    content, 8_000
+                )
+            if len(selected_files) >= 8:
+                break
+        gaps: list[str] = list(diff_gaps)
+        if not changed_diff and not selected_files:
+            gaps.append("changed_source_not_available_in_submit_handoff")
+        if not draft_findings:
+            gaps.append("no_draft_finding_recorded")
+        manifests = [dict(item) for item in state.candidate_context_manifests]
+        if not changed_diff and not state.evidence_ledger and not draft_findings:
+            manifests = []
+        return ReviewHandoff(
+            changed_diff=changed_diff,
+            file_contents=selected_files,
+            candidate_context_manifests=manifests,
+            evidence_ledger=list(state.evidence_ledger),
+            evidence_gaps=gaps,
+            has_draft_findings=bool(draft_findings),
+        )
+
+    @staticmethod
+    def _complete_diff_handoff(
+        diff_text: str,
+        *,
+        char_limit: int,
+    ) -> tuple[str, list[str]]:
+        """Return only complete unified-diff hunks for a bounded handoff."""
+
+        if not diff_text or "@@" not in diff_text:
+            return "", []
+        parsed = parse_unified_diff_hunks(diff_text)
+        if not parsed:
+            return "", ["changed_diff_unparseable"]
+
+        def hunk_is_complete(hunk: ParsedDiffHunk) -> bool:
+            old_seen = 0
+            new_seen = 0
+            for line in hunk.lines:
+                if line.startswith("\\"):
+                    continue
+                if line.startswith("+") and not line.startswith("+++"):
+                    new_seen += 1
+                elif line.startswith("-") and not line.startswith("---"):
+                    old_seen += 1
+                else:
+                    old_seen += 1
+                    new_seen += 1
+            return old_seen == hunk.old_count and new_seen == hunk.new_count
+
+        if len(diff_text) <= char_limit and all(
+            hunk_is_complete(hunk)
+            for hunks in parsed.values()
+            for hunk in hunks
+        ):
+            return diff_text, []
+
+        chunks: list[str] = []
+        gaps: list[str] = []
+        used = 0
+        for path, hunks in parsed.items():
+            for index, hunk in enumerate(hunks):
+                if not hunk_is_complete(hunk):
+                    gaps.append(f"changed_hunk_incomplete:{path}:{index}")
+                    continue
+                chunk = "\n".join(
+                    [
+                        f"diff --git a/{path} b/{path}",
+                        f"--- a/{path}",
+                        f"+++ b/{path}",
+                        hunk.header,
+                        *hunk.lines,
+                    ]
+                )
+                extra = len(chunk) + (1 if chunks else 0)
+                if used + extra > char_limit:
+                    gaps.append(f"changed_hunk_omitted:{path}:{index}")
+                    continue
+                chunks.append(chunk)
+                used += extra
+        if not chunks:
+            gaps.append("changed_source_not_available_in_submit_handoff")
+        elif len(diff_text) > char_limit:
+            gaps.append("changed_diff_bounded_to_complete_hunks")
+        return "\n".join(chunks), list(dict.fromkeys(gaps))
+
+    @staticmethod
+    def _truncate_text_to_chars(text: str, limit: int) -> str:
+        if len(text) <= limit:
+            return text
+        return text[: max(0, limit - 40)].rstrip() + "\n...[handoff truncated]"
 
     @staticmethod
     def _tool_result_payload(result: Any) -> dict[str, Any]:
@@ -1610,6 +3402,14 @@ class InferenceEngine:
                 "draft_finding_validation_errors": parse_meta.get(
                     "draft_finding_validation_errors", []
                 ),
+                "draft_finding_update_count": len(plan.draft_finding_updates),
+                "draft_finding_update_validation_errors": parse_meta.get(
+                    "draft_finding_update_validation_errors", []
+                ),
+                "valid_draft_call_ids": parse_meta.get("valid_draft_call_ids", []),
+                "valid_draft_update_call_ids": parse_meta.get(
+                    "valid_draft_update_call_ids", []
+                ),
                 "submit_review_seen": bool(parse_meta.get("submit_review_seen")),
                 "submit_debug_seen": bool(parse_meta.get("submit_debug_seen")),
                 "submit_review_validation_error": self._trace_recorder.build_text_preview(
@@ -1639,6 +3439,10 @@ class InferenceEngine:
                 "force_submit_discarded_count": parse_meta.get(
                     "force_submit_discarded_count", 0
                 ),
+                "schema_repair_attempted_count": plan.schema_repair_attempted_count,
+                "schema_repair_skipped_budget": bool(
+                    parse_meta.get("schema_repair_skipped_budget")
+                ),
             },
         )
 
@@ -1657,10 +3461,12 @@ class InferenceEngine:
         prompt_input_token_budget: int,
         base_context_token_budget: int,
         final_submit_feedback_token_budget: int,
-        final_evidence_telemetry: dict[str, int],
+        final_evidence_telemetry: dict[str, Any],
         force_submit: bool,
         stage: str = "explore",
         relation_graph_summary: dict[str, Any] | None = None,
+        assembled_request: AssembledRequest | None = None,
+        assembled_request_budget: int | None = None,
     ) -> None:
         if self._trace_event_writer is None:
             return
@@ -1687,20 +3493,38 @@ class InferenceEngine:
             for role in role_counts
         }
         tool_shapes = [self._tool_schema_shape(item, builder) for item in tools]
-        wire_messages = [self._safe_wire_message(item) for item in messages]
-        assembled_request_text = serialize_json(
-            {
-                "model": config.model,
-                "messages": wire_messages,
-                "temperature": config.temperature,
-                "max_tokens": config.max_tokens,
-                "top_p": config.top_p,
-                "tools": tools,
-                "tool_choice": config.tool_choice,
-                "extra_body": config.extra_body,
-                "thinking": policy.thinking,
-                "forced_tool": policy.forced_tool,
-            }
+        assembled_request_text = (
+            assembled_request.serialized_payload
+            if assembled_request is not None
+            and assembled_request.serialized_payload
+            else serialize_json(
+                {
+                    "model": config.model,
+                    "messages": [self._safe_wire_message(item) for item in messages],
+                    "temperature": config.temperature,
+                    "max_tokens": config.max_tokens,
+                    "top_p": config.top_p,
+                    "tools": tools,
+                    "tool_choice": config.tool_choice,
+                    "extra_body": config.extra_body,
+                    "thinking": policy.thinking,
+                    "forced_tool": policy.forced_tool,
+                }
+            )
+        )
+        try:
+            decoded_request = json.loads(assembled_request_text)
+        except json.JSONDecodeError:
+            decoded_request = {}
+        decoded_messages = (
+            decoded_request.get("messages")
+            if isinstance(decoded_request, dict)
+            else None
+        )
+        wire_messages = (
+            decoded_messages
+            if isinstance(decoded_messages, list)
+            else [self._safe_wire_message(item) for item in messages]
         )
         assembled_request_chars = len(assembled_request_text)
         assembled_request_tokens = estimate_tokens(assembled_request_text)
@@ -1738,6 +3562,23 @@ class InferenceEngine:
                 "estimated_tool_schema_tokens": tool_schema_tokens,
                 "estimated_prompt_tokens": message_tokens + tool_schema_tokens,
                 "assembled_request_estimated_tokens": assembled_request_tokens,
+                "assembled_request_token_budget": assembled_request_budget,
+                "assembled_request_within_budget": (
+                    assembled_request is None
+                    or assembled_request.estimated_tokens
+                    <= int(assembled_request_budget or 0)
+                ),
+                "assembled_request_trimmed": bool(
+                    assembled_request and assembled_request.trimmed
+                ),
+                "assembled_request_dropped_message_count": int(
+                    assembled_request.dropped_message_count
+                    if assembled_request is not None
+                    else 0
+                ),
+                "assembled_request_hash": (
+                    assembled_request.request_hash if assembled_request else ""
+                ),
                 "component_token_sum": component_token_sum,
                 "assembled_envelope_overhead_tokens": max(
                     0, assembled_request_tokens - component_token_sum
@@ -1754,6 +3595,12 @@ class InferenceEngine:
                 "assembled_request_chars": assembled_request_chars,
                 "component_records": component_records,
                 "max_output_tokens": config.max_tokens,
+                "effective_stage_output_token_budget": config.max_tokens,
+                "effective_stage_output_token_budgets": {
+                    "explore": get_settings().exploration_max_output_tokens,
+                    "validate": get_settings().exploration_max_output_tokens,
+                    "submit_only": get_settings().submit_max_output_tokens,
+                },
                 "thinking": policy.thinking,
                 "stage": stage,
                 "forced_tool": policy.forced_tool or "none",
@@ -1764,6 +3611,467 @@ class InferenceEngine:
                 **context_telemetry,
             },
         )
+
+    @staticmethod
+    def _validate_final_submit_request_context(
+        assembled_request: AssembledRequest,
+        telemetry: dict[str, Any],
+        *,
+        budget: int,
+    ) -> dict[str, Any]:
+        """Validate the exact serialized request, not the pre-fit message list."""
+
+        serialized = assembled_request.serialized_payload or ""
+        required = [
+            str(item).strip()
+            for item in telemetry.get("required_catalog_ids", [])
+            if str(item).strip()
+        ]
+        missing = [
+            item
+            for item in required
+            if re.search(
+                rf"(?<![A-Za-z0-9_])(?:evidence_)?id={re.escape(item)}(?![A-Za-z0-9_])",
+                serialized,
+            )
+            is None
+        ]
+        if missing:
+            return {
+                "valid": False,
+                "reason": "required_delivered_catalog_entries_missing_from_serialized_request",
+                "missing_catalog_ids": missing,
+                "serialized_request_within_budget": assembled_request.estimated_tokens
+                <= max(1, budget),
+            }
+        if assembled_request.estimated_tokens > max(1, budget):
+            return {
+                "valid": False,
+                "reason": "serialized_submit_request_over_budget",
+                "missing_catalog_ids": [],
+                "serialized_request_within_budget": False,
+            }
+        return {
+            "valid": True,
+            "reason": "",
+            "missing_catalog_ids": [],
+            "serialized_request_within_budget": True,
+        }
+
+    @classmethod
+    def _record_delivered_review_evidence(
+        cls,
+        state: ContextState,
+        assembled_request: AssembledRequest,
+        tool_feedback: list[dict[str, Any]],
+        *,
+        repo_path: str,
+    ) -> None:
+        """Register only source bodies present in the successful wire request.
+
+        Prompt construction and graph planning happen before the final request
+        cap is applied.  Reading the post-assembly payload here prevents a
+        selected-but-dropped source span, a summary replacement, or an invalid
+        shortened JSON body from becoming verifier evidence by implication.
+        """
+
+        try:
+            wire_payload = json.loads(assembled_request.serialized_payload)
+        except (TypeError, json.JSONDecodeError):
+            return
+        if not isinstance(wire_payload, dict):
+            return
+        raw_messages = wire_payload.get("messages")
+        if not isinstance(raw_messages, list):
+            return
+        review_payload = cls._extract_review_payload(raw_messages)
+        if review_payload is None:
+            return
+
+        actual_files: dict[str, str] = {}
+        raw_files = review_payload.get("files")
+        summarized = {
+            str(item).strip()
+            for item in review_payload.get("summarized", [])
+            if isinstance(item, str)
+        }
+        if isinstance(raw_files, dict):
+            for raw_path, raw_content in raw_files.items():
+                if not isinstance(raw_content, str) or not raw_content:
+                    continue
+                path = normalize_repo_path(str(raw_path))
+                if not path or f"file:{path}" in summarized:
+                    continue
+                if cls._contains_request_shortening_marker(raw_content):
+                    continue
+                actual_files[path] = raw_content
+
+        raw_diff = review_payload.get("diff_text")
+        if not isinstance(raw_diff, str) or not raw_diff:
+            raw_diff = review_payload.get("diff_loaded")
+        actual_diff = (
+            raw_diff
+            if isinstance(raw_diff, str)
+            and raw_diff
+            and not any(
+                item.startswith("diff_hunk_") for item in summarized
+            )
+            and "[SUMMARIZED]" not in raw_diff
+            and not cls._contains_request_shortening_marker(raw_diff)
+            else ""
+        )
+
+        delivered_manifests = cls._delivered_manifest_sources(
+            review_payload.get("candidate_context_manifests"),
+            state.candidate_context_manifests,
+            snapshot_id=state.evidence_snapshot_id,
+            revision=state.evidence_revision,
+        )
+        try:
+            workspace_root = Path(repo_path).resolve()
+        except (OSError, ValueError):
+            workspace_root = None
+        captured_tools = capture_verifier_tool_evidence(
+            tool_feedback,
+            workspace_root,
+            snapshot_id=state.evidence_snapshot_id,
+            revision=state.evidence_revision,
+        )
+        delivered_tools = cls._delivered_tool_evidence(
+            captured_tools,
+            raw_messages,
+            workspace_root=workspace_root,
+        )
+        state.evidence_ledger = ledger_from_sources(
+            tool_evidence=delivered_tools,
+            context_manifests=delivered_manifests,
+            diff_text=actual_diff,
+            file_contents=actual_files,
+            existing_payload=state.evidence_ledger,
+            snapshot_id=state.evidence_snapshot_id,
+            revision=state.evidence_revision,
+        ).to_payload()
+
+    @staticmethod
+    def _extract_review_payload(
+        raw_messages: list[Any],
+    ) -> dict[str, Any] | None:
+        """Decode the unshortened reviewer JSON from a wire message list."""
+
+        for raw_message in raw_messages:
+            if not isinstance(raw_message, dict):
+                continue
+            if raw_message.get("role") != "user":
+                continue
+            content = raw_message.get("content")
+            if not isinstance(content, str):
+                continue
+            prefix = (
+                USER_PREFIX_REVIEW_V3
+                if content.startswith(USER_PREFIX_REVIEW_V3)
+                else USER_PREFIX_REVIEW
+                if content.startswith(USER_PREFIX_REVIEW)
+                else ""
+            )
+            if not prefix:
+                continue
+            try:
+                payload = json.loads(content[len(prefix) :])
+            except (TypeError, json.JSONDecodeError):
+                return None
+            return payload if isinstance(payload, dict) else None
+        return None
+
+    @staticmethod
+    def _contains_request_shortening_marker(value: str) -> bool:
+        """Identify bodies that the request assembler explicitly shortened."""
+
+        return any(
+            marker in value
+            for marker in (
+                "...[handoff truncated]",
+                "[request context shortened; retrieve missing evidence]",
+            )
+        )
+
+    @classmethod
+    def _delivered_manifest_sources(
+        cls,
+        raw_manifests: Any,
+        source_manifests: list[dict[str, Any]],
+        *,
+        snapshot_id: str,
+        revision: str,
+    ) -> list[dict[str, Any]]:
+        """Restore system identity only for body-bearing spans in the payload."""
+
+        if not isinstance(raw_manifests, list):
+            return []
+        sources_by_id = {
+            str(item.get("candidate_id", "")).strip(): item
+            for item in source_manifests
+            if isinstance(item, dict) and str(item.get("candidate_id", "")).strip()
+        }
+        delivered: list[dict[str, Any]] = []
+        for raw_manifest in raw_manifests:
+            if not isinstance(raw_manifest, dict):
+                continue
+            candidate_id = str(raw_manifest.get("candidate_id", "")).strip()
+            source_manifest = sources_by_id.get(candidate_id)
+            if source_manifest is None:
+                continue
+            source_spans = [
+                span
+                for span in source_manifest.get("included_spans", [])
+                if isinstance(span, dict)
+            ]
+            source_by_id = {
+                str(span.get("span_id", "")).strip(): span
+                for span in source_spans
+                if str(span.get("span_id", "")).strip()
+            }
+            source_by_location: dict[
+                tuple[str, int, int], list[dict[str, Any]]
+            ] = {}
+            for span in source_spans:
+                span_key = cls._manifest_span_key(span)
+                if span_key is not None:
+                    source_by_location.setdefault(span_key, []).append(span)
+            retained_spans: list[dict[str, Any]] = []
+            raw_spans = raw_manifest.get("included_spans")
+            if not isinstance(raw_spans, list):
+                continue
+            for raw_span in raw_spans:
+                if not isinstance(raw_span, dict):
+                    continue
+                raw_content = str(raw_span.get("content", "") or "")
+                if not raw_content or cls._contains_request_shortening_marker(
+                    raw_content
+                ):
+                    continue
+                span_id = str(raw_span.get("span_id", "")).strip()
+                source_span = source_by_id.get(span_id)
+                if source_span is None:
+                    raw_key = cls._manifest_span_key(raw_span)
+                    location_matches = (
+                        source_by_location.get(raw_key, [])
+                        if raw_key is not None
+                        else []
+                    )
+                    source_span = (
+                        location_matches[0]
+                        if len(location_matches) == 1
+                        else None
+                    )
+                if source_span is None:
+                    continue
+                if cls._manifest_span_key(raw_span) != cls._manifest_span_key(
+                    source_span
+                ):
+                    continue
+                if raw_content != str(source_span.get("content", "") or ""):
+                    continue
+                source_key = cls._manifest_span_key(source_span)
+                if source_key is None:
+                    continue
+                source_path, source_start, source_end = source_key
+                trusted_snapshot = str(
+                    source_span.get("snapshot_id")
+                    or source_manifest.get("snapshot_id")
+                    or snapshot_id
+                )
+                trusted_revision = str(
+                    source_span.get("revision")
+                    or source_manifest.get("revision")
+                    or revision
+                )
+                enriched = {
+                    "span_id": str(
+                        source_span.get("span_id")
+                        or f"{candidate_id}:{source_path}:{source_start}"
+                    ),
+                    "file": source_path,
+                    "start_line": source_start,
+                    "end_line": source_end,
+                    "content": raw_content,
+                    "context_hash": str(source_span.get("context_hash", "") or ""),
+                    "retrieval_source": str(
+                        source_span.get("retrieval_source")
+                        or source_manifest.get("retrieval_source")
+                        or "context_manifest"
+                    ),
+                    "symbol_id": str(source_span.get("symbol_id", "") or ""),
+                    "snapshot_id": trusted_snapshot,
+                    "revision": trusted_revision,
+                    "side": str(
+                        source_span.get("side")
+                        or source_manifest.get("side")
+                        or "new"
+                    ),
+                    "truncated": bool(source_span.get("truncated", False)),
+                    "lifecycle": "delivered",
+                }
+                retained_spans.append(enriched)
+            if not retained_spans:
+                continue
+            enriched_manifest = dict(raw_manifest)
+            enriched_manifest["snapshot_id"] = str(
+                source_manifest.get("snapshot_id") or snapshot_id
+            )
+            enriched_manifest["revision"] = str(
+                source_manifest.get("revision") or revision
+            )
+            enriched_manifest["included_spans"] = retained_spans
+            delivered.append(enriched_manifest)
+        return delivered
+
+    @staticmethod
+    def _manifest_span_key(span: dict[str, Any]) -> tuple[str, int, int] | None:
+        path = normalize_repo_path(str(span.get("file", span.get("path", ""))))
+        start = _optional_non_negative_int(span.get("start_line", span.get("line")))
+        end = _optional_non_negative_int(
+            span.get("end_line", span.get("line", start))
+        )
+        if start is None or end is None:
+            return None
+        if not path or start < 1 or end < start:
+            return None
+        return path, start, end
+
+    @staticmethod
+    def _delivered_tool_evidence(
+        captured: list[dict[str, Any]],
+        raw_messages: list[Any],
+        *,
+        workspace_root: Path | None = None,
+    ) -> list[dict[str, Any]]:
+        """Keep tool observations whose result is present in this wire request."""
+
+        tool_message_data: dict[str, dict[str, Any]] = {}
+        for message in raw_messages:
+            if not isinstance(message, dict) or message.get("role") != "tool":
+                continue
+            call_id = str(message.get("tool_call_id", "")).strip()
+            content = message.get("content")
+            if not call_id or not isinstance(content, str):
+                continue
+            try:
+                payload = json.loads(content)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict) or not bool(payload.get("ok")):
+                continue
+            data = payload.get("data")
+            if isinstance(data, dict):
+                tool_message_data[call_id] = data
+        synthetic_results: dict[str, dict[str, Any]] = {}
+        marker = "prefetched_tool_context:"
+        for message in raw_messages:
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if not isinstance(content, str):
+                continue
+            marker_index = content.find(marker)
+            if marker_index < 0:
+                continue
+            try:
+                payload = json.loads(content[marker_index + len(marker) :].strip())
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            call_id = str(payload.get("tool_call_id", "")).strip()
+            result = payload.get("result")
+            if call_id and isinstance(result, dict):
+                synthetic_results[call_id] = result
+
+        delivered: list[dict[str, Any]] = []
+        for entry in captured:
+            call_id = str(entry.get("tool_call_id", "")).strip()
+            wire_data = tool_message_data.get(call_id)
+            if wire_data is not None and InferenceEngine._same_tool_data(
+                entry.get("data"),
+                wire_data,
+                workspace_root=workspace_root,
+            ):
+                delivered.append(entry)
+                continue
+            synthetic = synthetic_results.get(call_id)
+            if synthetic is None:
+                continue
+            data = synthetic.get("data")
+            if not isinstance(data, dict) or not bool(synthetic.get("ok", True)):
+                continue
+            projected = dict(entry)
+            projected["data"] = data
+            delivered.append(projected)
+        return delivered
+
+    @staticmethod
+    def _same_tool_data(
+        captured: Any,
+        delivered: Any,
+        *,
+        workspace_root: Path | None,
+    ) -> bool:
+        """Require the full tool result body, allowing only path normalization."""
+
+        return serialize_json(
+            InferenceEngine._normalize_wire_paths(
+                captured,
+                workspace_root,
+            )
+        ) == serialize_json(
+            InferenceEngine._normalize_wire_paths(
+                delivered,
+                workspace_root,
+            )
+        )
+
+    @staticmethod
+    def _normalize_wire_paths(
+        value: Any,
+        workspace_root: Path | None,
+        *,
+        key: str = "",
+    ) -> Any:
+        """Mirror verifier-context path normalization for wire comparisons."""
+
+        if isinstance(value, dict):
+            return {
+                str(item_key): InferenceEngine._normalize_wire_paths(
+                    item,
+                    workspace_root,
+                    key=str(item_key),
+                )
+                for item_key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [
+                InferenceEngine._normalize_wire_paths(
+                    item,
+                    workspace_root,
+                    key=key,
+                )
+                for item in value
+            ]
+        if isinstance(value, str) and key in {"file_path", "path"}:
+            raw = value.strip()
+            if workspace_root is not None and raw:
+                try:
+                    root = workspace_root.resolve()
+                    path = Path(raw)
+                    resolved = (
+                        path.resolve()
+                        if path.is_absolute()
+                        else (root / path).resolve()
+                    )
+                    raw = resolved.relative_to(root).as_posix()
+                except (OSError, ValueError):
+                    pass
+            return normalize_repo_path(raw)
+        return value
 
     @staticmethod
     def _safe_wire_message(message: Message) -> dict[str, Any]:

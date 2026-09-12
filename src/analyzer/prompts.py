@@ -45,17 +45,21 @@ REVIEW_SEVERITY_CALIBRATION_GUIDANCE = (
 
 SYSTEM_PROMPT_REVIEW = (
     "You are a senior code reviewer. Analyze the provided diff/files and return structured, "
-    "actionable findings. The final answer must be submitted via the submit_review tool. "
+    "actionable findings. Initial/final findings are submitted via submit_review; an "
+    "active runtime repair transaction uses the separate repair_review tool. "
     "Use only these severity values: critical, warning, info, style. "
-    "Each issue is a structured finding hypothesis using schema_version 2.0. Include the legacy "
-    "severity, location, evidence, suggestion, and confidence fields plus finding_id, primary_anchor, "
-    "related_locations, observed_behavior, causal_mechanism, violated_invariant, repair_intent, "
-    "trigger, impact, cause_evidence, contract_evidence, trigger_evidence, impact_evidence, and "
-    "context_manifest_id. Never invent or emit root_cause_id; only the later consolidator assigns it. "
-    "Location must be canonical: path[:line[-end_line]], using repo-relative forward-slash paths. "
-    "Do not use free-form natural language for location. Location and primary_anchor identify the "
-    "clearest display site and may point to unchanged code when that is where the symptom occurs; "
-    "they must agree. Every warning or critical finding must identify at least one concrete "
+    "Each issue is a structured finding hypothesis. The current model-input contract "
+    "requires severity, one primary_anchor, evidence, suggestion, and confidence; "
+    "provide semantic observed_behavior, causal_mechanism, violated_invariant, trigger, "
+    "impact, repair_intent, and one supports envelope per role when they are known. "
+    "Choose supports.evidence_refs only from the exact delivered evidence catalog. "
+    "The program creates schema_version 2.0, candidate identity, location, and all "
+    "snapshot/revision/hash/provenance fields. Never invent or emit root_cause_id; only "
+    "the later consolidator assigns it. The primary_anchor is the one location authority; "
+    "the program deterministically derives the compatible path[:line[-end_line]] location. "
+    "Do not use free-form natural language for the anchor. The anchor may point to unchanged "
+    "code when that is where the symptom occurs, while the finding still needs a concrete "
+    "changed-code anchor for a warning or critical finding. Every warning or critical finding must identify at least one concrete "
     "changed-code anchor, while supporting evidence may come from unchanged code when the "
     "reviewer actually observed it. "
     "Concrete bugs, regressions, compatibility breaks, incorrect results, data loss, or "
@@ -82,10 +86,11 @@ SYSTEM_PROMPT_REVIEW = (
     "same module, function, call chain, graph community, or use similar wording. "
     "Do not promote consequences of a hypothetical fix into a separate issue; keep them "
     "inside the suggestion unless the current diff already creates that independent risk. "
-    "Evidence may cite only code present in the supplied candidate_context_manifests or later successful "
-    "tool results. For each role, identify the repository-relative file/span and state what that code "
-    "proves. Candidate identity, retrieval source, manifest id, and context hash are system-owned and "
-    "will be bound from the runtime context; do not invent provenance metadata. "
+    "Evidence may cite only code present in the supplied candidate context manifests or later successful "
+    "tool results. For each role, state what the selected code proves; the same artifact may support "
+    "multiple roles only with a distinct role-specific statement. Candidate identity, retrieval source, "
+    "manifest id, snapshot, revision, artifact id, and context hash are system-owned and will be bound "
+    "from the runtime context; do not invent provenance metadata. "
     "A graph edge is navigation context, not proof of runtime identity; exploratory/low-confidence edges "
     "cannot alone support a warning. When you need a changed hunk plus surrounding source, prefer get_changed_context. "
     "When you need symbol definitions, references, field initialization, or constructor "
@@ -98,6 +103,8 @@ SYSTEM_PROMPT_REVIEW = (
     "line/symbol plus the claim only. A draft is an investigation hypothesis, not a final "
     "finding; continue gathering evidence and still finish with submit_review. You may "
     "record a draft and request a read/search tool in the same response. "
+    "A draft checkpoint does not end investigation. In the next round, inspect the stated missing "
+    "check or explicitly mark the draft evidence_sufficient, disproved, or incomplete with a reason. "
     "Before submitting warning or critical findings, if tool rounds remain, call "
     "validate_review_draft on candidate findings; treat its result as policy feedback, "
     "not as a replacement for submit_review. "
@@ -108,7 +115,7 @@ SYSTEM_PROMPT_REVIEW = (
 
 _MANIFEST_SCHEMA_REQUIREMENT = "and context_manifest_id. Never invent or emit root_cause_id; only the later consolidator assigns it. "
 _GRAPH_EVIDENCE_REQUIREMENT = (
-    "Evidence may cite only code present in the supplied candidate_context_manifests or later successful "
+    "Evidence may cite only code present in the supplied candidate context manifests or later successful "
     "tool results. For each role, identify the repository-relative file/span and state what that code "
     "proves. Candidate identity, retrieval source, manifest id, and context hash are system-owned and "
     "will be bound from the runtime context; do not invent provenance metadata. "
@@ -125,7 +132,8 @@ COMMON_REVIEW_PROMPT = SYSTEM_PROMPT_REVIEW.replace(
 AGENT_SEARCH_POLICY = (
     "Context policy: agent_search. No graph or candidate context manifest exists for this run. "
     "Evidence may come from the supplied diff or successful read-only tool calls. "
-    "For each evidence role, record the repository-relative file, line/span, and a concrete statement. "
+    "For each evidence role, select an exact delivered evidence id and write a concrete statement "
+    "explaining what that source proves; the runtime derives its file and range. "
     "The runtime binds candidate_id and retrieval_source; leave manifest-only fields empty and never "
     "invent graph provenance, context_manifest_id, or context_hash. If evidence is insufficient, "
     "continue a targeted read/grep/symbol "
@@ -142,7 +150,7 @@ GRAPH_CONTEXT_POLICY = (
     "Before requesting read or grep tools, use exact visible manifest spans when they already cover the question. "
     "Do not re-read or grep solely to rediscover the same file/span; use tools only for a specific evidence gap "
     "that the supplied diff and manifests do not cover. "
-    "Cite the exact visible file/span and what it proves; the runtime binds its real diff, read, symbol, "
+    "Select the exact delivered evidence id for the visible file/span and state what it proves; the runtime binds its real diff, read, symbol, "
     "or manifest provenance, including canonical context_manifest_id and context_hash. Successful "
     "read-only tool results outside a "
     "manifest remain valid independent tool provenance. Low-confidence or exploratory "
@@ -169,7 +177,15 @@ def review_system_prompt(
     *,
     skill_context: str | None = None,
     skill_loader: ReviewSkillLoader | None = None,
+    contract_version: str = "2.0",
 ) -> str:
+    if contract_version == "3.0":
+        skills = (
+            skill_context
+            if skill_context is not None
+            else (skill_loader or ReviewSkillLoader()).render()
+        )
+        return SYSTEM_PROMPT_REVIEW_V3 + ("\n\n" + skills if skills else "")
     common, policy = review_prompt_parts(context_mode)
     skills = (
         skill_context
@@ -202,6 +218,8 @@ USER_PREFIX_REVIEW = (
     "a suspicion exists, the next assistant action must include that draft call before further "
     "private analysis of the suspicion. "
     "validate_review_draft before final warning/critical submit_review when another tool round is available. "
+    "A recorded draft is not a submission. Continue to a targeted exploration action or update its "
+    "state with a reason; do not treat the mere presence of a draft as permission to finish. "
     "Do not return plain-text-only final answers. "
     + REVIEW_SEVERITY_CALIBRATION_GUIDANCE
     + "\n"
@@ -244,6 +262,64 @@ FINALIZE_REVIEW_NOTICE = (
     "an empty issues list is acceptable with an honest summary. "
     + REVIEW_SEVERITY_CALIBRATION_GUIDANCE
 )
+
+USER_PREFIX_REVIEW_V3 = (
+    "Review the supplied diff and delivered evidence. Save each supported finding "
+    "with save_finding using only anchor, description, evidence_refs, severity, "
+    "and optional suggestion/related_locations. Select evidence_refs exactly from "
+    "the delivered catalog; never invent ids or locations. Use revise_finding only "
+    "with the opaque handle returned by the runtime. finish_review is optional: use it "
+    "only when you actively request an immediate stop, with a concise summary and no "
+    "finding body. Runtime closeout can hand off the current Registry contents without "
+    "a finish_review action, so do not repeat saved finding bodies. Do not emit "
+    "confidence, role evidence, reviewer ids, versions, or other runtime metadata. "
+    "Group by independent defect mechanism, not changed-hunk count: one mechanism is one "
+    "finding. If the same causal mechanism and repair class span locations, keep one "
+    "primary anchor with brief related_locations. Keep causes separate: same file/function "
+    "or similar wording alone is not enough to merge, and uncertain cases stay separate. "
+    "For extra evidence/location in an existing finding, revise its current opaque handle "
+    "and explicitly retain prior evidence_refs/related_locations because arrays replace, "
+    "not append. Save only independent defects; do not investigate or finish solely to "
+    "organize findings. "
+    "If there is no supported finding, use an honest empty-result summary when stopping.\n"
+)
+
+USER_PREFIX_REPAIR_REVIEW_V3 = (
+    "Use the supplied evidence and active repair targets to make only the requested "
+    "finding corrections. Submit minimal patches through repair_review; preserve "
+    "unmentioned fields. If a target cannot be repaired from this material, return "
+    "an honest incomplete, unchanged, or deferred disposition.\n"
+)
+
+SYSTEM_PROMPT_REVIEW_V3 = (
+    "You are a senior code reviewer using MergeWarden finding contract 3.0. "
+    "Inspect the change and the delivered evidence for concrete behavioral or "
+    "contract problems. A finding has one changed-code anchor, one concise "
+    "description, exact evidence references, a severity, and optional remediation "
+    "details. Separate independent causes. The runtime will bind and semantically "
+    "verify saved candidates at closeout, and separately audit whether the model "
+    "actively requested finish; Registry handoff is not proof of model finish."
+)
+FINALIZE_REVIEW_NOTICE_V3 = (
+    "FINAL CALL / RUNTIME CLOSEOUT HANDOFF — use only save_finding, revise_finding, "
+    "and finish_review. Save a newly supported finding or revise an existing one when "
+    "a final saved action is needed. finish_review is optional and only records the "
+    "model's explicit request to stop; it is not required for Registry handoff or "
+    "success. The runtime will close out the current Registry contents after this "
+    "call. Do not repeat saved finding bodies, call submit_review, or request further "
+    "investigation. If none are supported, use an honest empty-result summary when "
+    "stopping."
+)
+REPAIR_REVIEW_NOTICE = (
+    "RUNTIME REPAIR CALL — this is a bounded patch transaction, not a new review. "
+    "You MUST call repair_review as your FIRST and ONLY action. Do not call submit_review, "
+    "do not return summary/issues, and do not emit prose before the tool call. Address "
+    "only the opaque target_handle values in the active transaction. For repaired targets, "
+    "return a non-empty repair_patch containing only changed semantic fields; omitted fields "
+    "are preserved by the runtime. Return unchanged, incomplete, or deferred with a reason "
+    "when the target cannot be repaired. Never emit candidate ids, finding ids, content "
+    "versions, snapshots, hashes, or guessed paths."
+)
 FINALIZE_DEBUG_NOTICE = (
     "FINAL CALL — this is your last opportunity to respond. You MUST call submit_debug "
     "as your FIRST and ONLY action. Do NOT output any reasoning, analysis, or prose text "
@@ -264,6 +340,8 @@ def build_review_messages(
     telemetry_sink: dict[str, Any] | None = None,
     skill_selection: SkillSelection | None = None,
     skill_loader: ReviewSkillLoader | None = None,
+    contract_version: str = "2.0",
+    repair_mode: bool = False,
 ) -> list[Message]:
     """Build review-mode messages with optional priority truncation of payload parts."""
     cb = context_builder or ContextBuilder()
@@ -291,11 +369,16 @@ def build_review_messages(
                 context.context_mode,
                 skill_context=(skill_selection.context if skill_selection else None),
                 skill_loader=skill_loader,
+                contract_version=contract_version,
             ),
         ),
         Message(
             role="user",
-            content=USER_PREFIX_REVIEW + serialize_json(payload),
+            content=(
+                (USER_PREFIX_REPAIR_REVIEW_V3 if repair_mode and contract_version == "3.0"
+                 else USER_PREFIX_REVIEW_V3 if contract_version == "3.0" else USER_PREFIX_REVIEW)
+                + serialize_json(payload)
+            ),
         ),
     ]
 
@@ -305,7 +388,11 @@ def _is_graph_context_part(part: ContextPart) -> bool:
 
 
 def _graph_budget(prompt_token_budget: int | None) -> int | None:
-    configured = get_settings().relation_graph_reviewer_context_token_budget
+    settings = get_settings()
+    configured = min(
+        settings.relation_graph_reviewer_context_token_budget,
+        settings.relation_graph_reviewer_context_token_max_budget,
+    )
     if prompt_token_budget is None:
         return configured
     # Keep a bounded Graph reservation while leaving room for diff and source.
@@ -382,6 +469,8 @@ async def build_review_messages_async(
     telemetry_sink: dict[str, Any] | None = None,
     skill_selection: SkillSelection | None = None,
     skill_loader: ReviewSkillLoader | None = None,
+    contract_version: str = "2.0",
+    repair_mode: bool = False,
 ) -> list[Message]:
     """Build review-mode messages with optional second-layer summary compaction."""
     cb = context_builder or ContextBuilder()
@@ -399,7 +488,7 @@ async def build_review_messages_async(
     elif summary_enabled and compressor_model_client is not None:
         selected, _ = await cb.truncate_with_summary(
             non_graph_parts,
-            _non_graph_budget(prompt_token_budget),
+            _non_graph_budget(prompt_token_budget) or 0,
             compressor=ContextCompressor(compressor_model_client),
             model_name=summary_model_name,
             max_summary_tokens=summary_max_tokens_per_part,
@@ -425,11 +514,16 @@ async def build_review_messages_async(
                 context.context_mode,
                 skill_context=(skill_selection.context if skill_selection else None),
                 skill_loader=skill_loader,
+                contract_version=contract_version,
             ),
         ),
         Message(
             role="user",
-            content=USER_PREFIX_REVIEW + serialize_json(payload),
+            content=(
+                (USER_PREFIX_REPAIR_REVIEW_V3 if repair_mode and contract_version == "3.0"
+                 else USER_PREFIX_REVIEW_V3 if contract_version == "3.0" else USER_PREFIX_REVIEW)
+                + serialize_json(payload)
+            ),
         ),
     ]
 

@@ -37,6 +37,22 @@ class ToolResult(BaseModel):
     ok: bool = Field(default=True)
     data: Any = Field(default=None)
     error: str | None = Field(default=None)
+    error_type: str = Field(
+        default="",
+        description="Stable tool failure type when ok is false.",
+    )
+    failure_class: str = Field(
+        default="",
+        description="Parameter/path/permission/timeout/execution classification.",
+    )
+    recoverable: bool = Field(
+        default=False,
+        description=(
+            "Whether the model may correct the call and continue without ending "
+            "the run."
+        ),
+    )
+    recommended_next_step: str = Field(default="")
 
 
 class BaseTool(ABC):

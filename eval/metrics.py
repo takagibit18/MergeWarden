@@ -5,11 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from eval.schemas import (
-    DEFAULT_EVAL_MATCHER_VERSION,
+    EVAL_MATCHER_VERSIONS,
     EvalReport,
     EvalResult,
     MetricSummary,
     SampledFixtureResult,
+    validate_eval_matcher_contract,
 )
 
 
@@ -33,19 +34,59 @@ def build_eval_report(
     """Build suite-level report with aggregated metrics."""
     sampled = sampled_results or []
     metrics = build_metric_summary(results, sampled_results=sampled)
+    sampled_runs = [run for item in sampled for run in item.runs]
     versions = {
         item.matcher_version
         for item in results
-    } | {item.matcher_version for item in sampled}
-    matcher_version = (
-        next(iter(versions))
-        if len(versions) == 1
-        else ("mixed" if versions else DEFAULT_EVAL_MATCHER_VERSION)
-    )
+    } | {item.matcher_version for item in sampled} | {
+        item.matcher_version for item in sampled_runs
+    }
+    if len(versions) > 1:
+        raise ValueError(
+            "Cannot build an evaluation report from mixed matcher versions: "
+            f"{sorted(versions)}"
+        )
+    matcher_version = next(iter(versions), "unknown")
+    recognized_contracts = {"1.0", "2.0", "3.0"}
+    contract_values = [
+        item.finding_contract_version
+        for item in results
+    ] + [
+        item.finding_contract_version for item in sampled
+    ] + [item.finding_contract_version for item in sampled_runs]
+    contracts = {
+        str(value).strip()
+        for value in contract_values
+        if str(value).strip() in recognized_contracts
+    }
+    unspecified_contracts = {
+        str(value).strip() or "unknown"
+        for value in contract_values
+        if str(value).strip() not in recognized_contracts
+    }
+    if len(contracts) > 1:
+        raise ValueError(
+            "Cannot build an evaluation report from mixed finding contract versions: "
+            f"{sorted(contracts)}"
+        )
+    if contracts and unspecified_contracts:
+        raise ValueError(
+            "Cannot build an evaluation report with unspecified and explicit "
+            "finding contract versions together: "
+            f"{sorted(unspecified_contracts)}"
+        )
+    contract_version = next(iter(contracts), "unknown")
+    if matcher_version != "unknown" and contract_version != "unknown":
+        if matcher_version not in EVAL_MATCHER_VERSIONS:
+            raise ValueError(
+                f"Unsupported matcher version in eval report: {matcher_version!r}"
+            )
+        validate_eval_matcher_contract(matcher_version, contract_version)
     return EvalReport(
         suite=suite,
         fixture_count=len(results),
         matcher_version=matcher_version,
+        finding_contract_version=contract_version,
         metrics=metrics,
         results=results,
         sampled_results=sampled,

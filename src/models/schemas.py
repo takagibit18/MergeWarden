@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ModelConfig(BaseModel):
@@ -16,6 +16,12 @@ class ModelConfig(BaseModel):
     )
     max_tokens: int = Field(
         default=2048, ge=1, le=128000, description="Maximum response tokens"
+    )
+    call_token_budget: int | None = Field(
+        default=None,
+        ge=0,
+        exclude=True,
+        description="Runtime-only token allowance for this logical model call",
     )
     top_p: float = Field(default=1.0, ge=0.0, le=1.0, description="Nucleus sampling")
     timeout: float = Field(
@@ -45,6 +51,11 @@ class Message(BaseModel):
     thinking: str | None = Field(
         default=None,
         description="Canonical transient thinking retained only by the model layer",
+    )
+    preserve_on_trim: bool = Field(
+        default=False,
+        exclude=True,
+        description="Internal assembly hint for atomic final evidence handoffs.",
     )
 
 
@@ -107,6 +118,72 @@ class DraftFindingInput(BaseModel):
         min_length=1,
         description="Optional suspect symbol",
     )
+
+
+DraftFindingStatus = Literal[
+    "pending",
+    "evidence_sufficient",
+    "disproved",
+    "incomplete",
+]
+
+
+class DraftFindingUpdateInput(BaseModel):
+    """Model-controlled transition for an existing draft hypothesis.
+
+    The model may state what happened to a hypothesis, but it cannot provide
+    runtime identity or provenance.  The orchestrator validates the id and
+    records the transition separately from the legacy draft payload.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    draft_id: str = Field(..., min_length=1, description="Runtime draft id")
+    status: DraftFindingStatus = Field(
+        ..., description="New investigation state for the draft"
+    )
+    reason: str = Field(
+        default="",
+        description="Why the hypothesis is supported, disproved, or incomplete",
+    )
+    missing_checks: list[str] = Field(
+        default_factory=list,
+        description="Evidence checks that remain necessary when status is pending",
+    )
+    evidence_refs: list[str] = Field(
+        default_factory=list,
+        description="Optional exact evidence artifact ids selected from the catalog",
+    )
+
+    @model_validator(mode="after")
+    def _terminal_states_need_reason(self) -> "DraftFindingUpdateInput":
+        if self.status in {"evidence_sufficient", "disproved", "incomplete"} and not self.reason.strip():
+            raise ValueError(f"status={self.status} requires a non-empty reason")
+        return self
+
+
+class DraftFindingState(BaseModel):
+    """Explicit investigation checkpoint for one durable draft hypothesis."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    draft_id: str = Field(..., min_length=1)
+    status: DraftFindingStatus = "pending"
+    reason: str = ""
+    missing_checks: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+    updated_iteration: int = Field(default=0, ge=0)
+    repeat_count: int = Field(
+        default=0,
+        ge=0,
+        description="Duplicate state-action observations after the first recording",
+    )
+
+    @model_validator(mode="after")
+    def _terminal_states_need_reason(self) -> "DraftFindingState":
+        if self.status in {"evidence_sufficient", "disproved", "incomplete"} and not self.reason.strip():
+            raise ValueError(f"status={self.status} requires a non-empty reason")
+        return self
 
 
 class DraftFinding(BaseModel):

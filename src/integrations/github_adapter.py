@@ -101,10 +101,12 @@ def fingerprint_issue(issue: ReviewIssue) -> str:
     )
     line = str(parsed.line or "")
     parts = [
+        issue.schema_version,
         path.strip().lower(),
         line,
         issue.severity.value,
-        _normalize_text(issue.evidence),
+        _normalize_text(issue.description if issue.is_v3_finding else issue.evidence),
+        ",".join(sorted(issue.evidence_refs)) if issue.is_v3_finding else "",
         _normalize_text(issue.suggestion),
     ]
     if issue.root_cause_id:
@@ -142,6 +144,17 @@ def _inline_line_for_location(
 
 
 def _comment_body(issue: ReviewIssue) -> str:
+    if issue.is_v3_finding:
+        body = (
+            f"**{issue.severity.value.upper()}**\n\n"
+            f"{issue.description}\n\n"
+            f"Evidence refs: {', '.join(issue.evidence_refs)}"
+        )
+        if issue.suggestion:
+            body += f"\n\nSuggestion: {issue.suggestion}"
+        if issue.root_cause_id:
+            body += f"\n\nRoot cause: `{issue.root_cause_id}`"
+        return body
     body = (
         f"**{issue.severity.value.upper()}** confidence={issue.confidence:.2f}\n\n"
         f"Evidence: {issue.evidence}\n\nSuggestion: {issue.suggestion}"

@@ -84,7 +84,7 @@ eval/
 
 - **素材来源**：自动发现小型活跃开源仓库，并筛选已合并 bugfix PR 或被维护者指出问题的 closed/unmerged PR 候选
 - **缺陷来源**：PR diff、可信 review 证据与 LLM 辅助标注 expected issues；正式黄金集必须人工复核
-- **固定输入**：当前 fixture 包含 diff / 相关文件片段 / 错误日志（可选）；长期健壮形态见 [golden_fixture_snapshot_plan.md](../docs/golden_fixture_snapshot_plan.md)，目标是 PR diff + repo snapshot
+- **固定输入**：当前 fixture 包含 diff / 相关文件片段 / 错误日志（可选）；快照与范围契约见 [Golden fixture 契约](../docs/golden_fixture_contract.md)，运行形态为 PR diff + repo snapshot
 - **期望行为**：
   - 检出类：输出命中目标问题类别
   - 结构类：结构化输出通过 JSON Schema 校验

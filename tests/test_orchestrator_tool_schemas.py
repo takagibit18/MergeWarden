@@ -121,6 +121,53 @@ def test_submit_review_issue_requires_explicit_confidence() -> None:
         assert field in required
 
 
+def test_model_submit_schema_separates_initial_and_repair_identity() -> None:
+    initial = next(
+        schema
+        for schema in build_submit_tool_schemas(model_input=True)
+        if schema["function"]["name"] == "submit_review"
+    )["function"]["parameters"]["properties"]["issues"]["items"]
+    repair = next(
+        schema
+        for schema in build_submit_tool_schemas(model_input=True, repair=True)
+        if schema["function"]["name"] == "submit_review"
+    )["function"]["parameters"]["properties"]["issues"]["items"]
+
+    assert "target_candidate_id" not in initial["properties"]
+    assert "repair_status" not in initial["properties"]
+    assert "target_candidate_id" in repair["properties"]
+    assert "repair_status" in repair["properties"]
+    assert {"target_candidate_id", "repair_status"}.issubset(
+        repair["required"]
+    )
+
+
+def test_repair_schema_allows_field_level_patch_or_disposition_only() -> None:
+    initial = next(
+        schema
+        for schema in build_submit_tool_schemas(model_input=True)
+        if schema["function"]["name"] == "submit_review"
+    )["function"]["parameters"]["properties"]["issues"]["items"]
+    repair = next(
+        schema
+        for schema in build_submit_tool_schemas(model_input=True, repair=True)
+        if schema["function"]["name"] == "submit_review"
+    )["function"]["parameters"]["properties"]["issues"]["items"]
+
+    assert "repair_patch" not in initial["properties"]
+    assert "finding_id" not in initial["properties"]
+    assert "repair_patch" in repair["properties"]
+    assert "repair_reason" in repair["properties"]
+    patch_properties = repair["properties"]["repair_patch"]["anyOf"][0]["properties"]
+    assert {"trigger", "supports", "observed_behavior"}.issubset(patch_properties)
+    assert repair["properties"]["repair_status"]["enum"] == [
+        "repaired",
+        "unchanged",
+        "incomplete",
+        "deferred",
+    ]
+
+
 def test_build_tool_schemas_from_default_registry_is_complete() -> None:
     schemas = build_tool_schemas(create_default_registry().list_specs())
 

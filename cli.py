@@ -94,16 +94,21 @@ def _render_review_response(response: ReviewResponse, verbose: bool) -> None:
         for index, issue in enumerate(triage.optimization_suggestions, start=1):
             _render_review_issue(issue, index)
     if verbose:
-        click.echo(response.model_dump_json(indent=2))
+        click.echo(json.dumps(response.contract_payload(), indent=2, ensure_ascii=False))
 
 
 def _render_review_issue(issue: ReviewIssue, index: int) -> None:
     """Render one review issue in a compact human-readable form."""
-    click.echo(
-        f"{index}. [{issue.severity.value}] {issue.location} "
-        f"(confidence={issue.confidence:.2f})"
-    )
-    click.echo(f"   Evidence: {issue.evidence}")
+    if issue.is_v3_finding:
+        click.echo(f"{index}. [{issue.severity.value}] {issue.location}")
+        click.echo(f"   Description: {issue.description}")
+        click.echo(f"   Evidence refs: {', '.join(issue.evidence_refs)}")
+    else:
+        click.echo(
+            f"{index}. [{issue.severity.value}] {issue.location} "
+            f"(confidence={issue.confidence:.2f})"
+        )
+        click.echo(f"   Evidence: {issue.evidence}")
     click.echo(f"   Suggested fix: {issue.suggestion}")
     if issue.root_cause_id:
         click.echo(f"   Root cause: {issue.root_cause_id}")
@@ -186,7 +191,9 @@ def review(
     response = _run_async_command(orchestrator.run_review(request), "review")
     if output_json:
         Path(output_json).write_text(
-            response.model_dump_json(indent=2) + "\n", encoding="utf-8"
+            json.dumps(response.contract_payload(), indent=2, ensure_ascii=False)
+            + "\n",
+            encoding="utf-8",
         )
         click.echo(f"Review response saved to: {Path(output_json).as_posix()}")
     if summary_json:

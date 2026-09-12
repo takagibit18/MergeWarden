@@ -9,7 +9,7 @@ from typing import Any
 try:
     import tiktoken as _tiktoken
 except Exception:  # noqa: BLE001
-    _tiktoken = None
+    _tiktoken = None  # type: ignore[assignment]
 
 
 TOKENIZER_NAME = "cl100k_base"

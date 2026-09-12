@@ -22,7 +22,10 @@ from pydantic import (
 from src.analyzer.context_mode import ReviewContextMode
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(_REPO_ROOT / ".env", override=True)
+# Keep repository defaults convenient for local use, but let an explicit
+# process environment override them.  Evaluation launches use this boundary
+# to select the zhipu profile without mutating the historical `.env` file.
+load_dotenv(_REPO_ROOT / ".env", override=False)
 
 _base_url_adapter = TypeAdapter(AnyHttpUrl)
 PermissionMode = Literal["default", "plan"]
@@ -273,6 +276,58 @@ class Settings(BaseModel):
         le=128000,
         description="Maximum completion tokens for a non-finalize model call.",
     )
+    exploration_max_output_tokens: int = Field(
+        default_factory=lambda: int(
+            os.getenv("EXPLORATION_MAX_OUTPUT_TOKENS", "12288")
+        ),
+        ge=1,
+        le=128000,
+        description="Effective completion-token cap for exploration/validation calls.",
+    )
+    submit_max_output_tokens: int = Field(
+        default_factory=lambda: int(
+            os.getenv("SUBMIT_MAX_OUTPUT_TOKENS", "4096")
+        ),
+        ge=1,
+        le=128000,
+        description="Effective completion-token cap for submit and repair calls.",
+    )
+    finding_contract_version: Literal["2.0", "3.0"] = Field(
+        default_factory=lambda: cast(
+            Literal["2.0", "3.0"],
+            os.getenv("FINDING_CONTRACT_VERSION", "2.0").strip(),
+        ),
+        description=(
+            "Active model-facing finding contract. 2.0 is an explicit legacy "
+            "compatibility mode; 3.0 is the slim contract."
+        ),
+    )
+    semantic_verifier_batch_size: int = Field(
+        default_factory=lambda: int(os.getenv("SEMANTIC_VERIFIER_BATCH_SIZE", "8")),
+        ge=1,
+        le=64,
+    )
+    semantic_verifier_max_model_calls: int = Field(
+        default_factory=lambda: int(
+            os.getenv("SEMANTIC_VERIFIER_MAX_MODEL_CALLS", "2")
+        ),
+        ge=0,
+        le=8,
+    )
+    semantic_verifier_max_investigation_calls: int = Field(
+        default_factory=lambda: int(
+            os.getenv("SEMANTIC_VERIFIER_MAX_INVESTIGATION_CALLS", "1")
+        ),
+        ge=0,
+        le=1,
+    )
+    semantic_verifier_max_investigation_tool_calls: int = Field(
+        default_factory=lambda: int(
+            os.getenv("SEMANTIC_VERIFIER_MAX_INVESTIGATION_TOOL_CALLS", "2")
+        ),
+        ge=0,
+        le=2,
+    )
     model_request_timeout_seconds: float = Field(
         default_factory=lambda: float(os.getenv("MODEL_REQUEST_TIMEOUT_SECONDS", "90")),
         gt=0.0,
@@ -368,14 +423,46 @@ class Settings(BaseModel):
     )
     relation_graph_reviewer_context_token_budget: int = Field(
         default_factory=lambda: int(
-            os.getenv("RELATION_GRAPH_REVIEWER_CONTEXT_TOKEN_BUDGET", "900")
+            os.getenv("RELATION_GRAPH_REVIEWER_CONTEXT_TOKEN_BUDGET", "4000")
         ),
         ge=128,
         le=16000,
         description=(
-            "Independent serialized Graph reviewer projection budget; source-span "
-            "selection uses relation_graph_max_context_tokens."
+            "Initial global serialized Graph reviewer projection budget; source-span "
+            "selection uses relation_graph_max_context_tokens. Increase only for an "
+            "explicit evidence gap, up to the runtime's 6000-token ceiling."
         ),
+    )
+    final_submit_request_token_budget: int = Field(
+        default_factory=lambda: int(
+            os.getenv("FINAL_SUBMIT_REQUEST_TOKEN_BUDGET", "8000")
+        ),
+        ge=512,
+        description=(
+            "Hard cap for the complete serialized submit/repair request, including "
+            "messages and the submit tool schema."
+        ),
+    )
+    assembled_request_token_budget: int = Field(
+        default_factory=lambda: int(
+            os.getenv("ASSEMBLED_REQUEST_TOKEN_BUDGET", "36000")
+        ),
+        ge=512,
+        description="Hard cap for one non-final serialized provider request.",
+    )
+    review_repair_max_attempts: int = Field(
+        default_factory=lambda: int(os.getenv("REVIEW_REPAIR_MAX_ATTEMPTS", "1")),
+        ge=0,
+        le=3,
+        description="Shared bounded repair attempts across schema and integrity gaps.",
+    )
+    relation_graph_reviewer_context_token_max_budget: int = Field(
+        default_factory=lambda: int(
+            os.getenv("RELATION_GRAPH_REVIEWER_CONTEXT_TOKEN_MAX_BUDGET", "6000")
+        ),
+        ge=128,
+        le=16000,
+        description="Hard ceiling for explicit Graph evidence-gap expansion.",
     )
     relation_graph_max_paths_per_prefix: int = Field(
         default_factory=lambda: int(
@@ -437,6 +524,25 @@ class Settings(BaseModel):
         ge=1,
         le=1000,
         description="Maximum successfully dispatched tool calls in one agent run.",
+    )
+    agent_max_recoverable_tool_errors: int = Field(
+        default_factory=lambda: int(
+            os.getenv("AGENT_MAX_RECOVERABLE_TOOL_ERRORS", "3")
+        ),
+        ge=1,
+        le=20,
+        description="Bound repeated correctable tool failures before they become blocking.",
+    )
+    draft_stagnation_max_rounds: int = Field(
+        default_factory=lambda: int(
+            os.getenv("DRAFT_STAGNATION_MAX_ROUNDS", "2")
+        ),
+        ge=1,
+        le=10,
+        description=(
+            "Bounded consecutive rounds allowed for an unchanged draft without "
+            "new evidence, state transition, or valid submission."
+        ),
     )
     pre_budget_submit_token_ratio: float = Field(
         default_factory=lambda: float(

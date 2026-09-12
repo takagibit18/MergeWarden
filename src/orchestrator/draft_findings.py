@@ -5,7 +5,13 @@ from __future__ import annotations
 import re
 from uuid import uuid4
 
-from src.models.schemas import DraftFinding, DraftFindingInput
+from src.models.schemas import (
+    DraftFinding,
+    DraftFindingInput,
+    DraftFindingState,
+    DraftFindingStatus,
+    DraftFindingUpdateInput,
+)
 
 _VISIBLE_DRAFT_PATTERN = re.compile(
     r"(?im)^[ \t]*(?:[-*]\s*)?(?:finding\s*:\s*)?"
@@ -37,6 +43,7 @@ class DraftFindingStore:
 
     def __init__(self) -> None:
         self._items: dict[str, DraftFinding] = {}
+        self._states: dict[str, DraftFindingState] = {}
 
     @staticmethod
     def bind(
@@ -59,6 +66,47 @@ class DraftFindingStore:
         """Add a previously runtime-bound draft, replacing only the same id."""
 
         self._items[draft.id] = draft
+        self._states.setdefault(
+            draft.id,
+            DraftFindingState(draft_id=draft.id),
+        )
+
+    def add_if_new(self, draft: DraftFinding) -> tuple[DraftFinding, bool]:
+        """Add a bound draft unless the same hypothesis already exists.
+
+        Duplicate state actions are observable through ``repeat_count`` but do
+        not create a second runtime identity or a second journal finding.
+        """
+
+        duplicate = self.find_duplicate(draft)
+        if duplicate is not None:
+            state = self._states[duplicate.id]
+            self._states[duplicate.id] = state.model_copy(
+                update={"repeat_count": state.repeat_count + 1}
+            )
+            return duplicate, False
+        self.add(draft)
+        return draft, True
+
+    def find_duplicate(self, draft: DraftFinding) -> DraftFinding | None:
+        """Find an exact normalized hypothesis already in this run."""
+
+        fingerprint = self.fingerprint(draft)
+        return next(
+            (item for item in self._items.values() if self.fingerprint(item) == fingerprint),
+            None,
+        )
+
+    @staticmethod
+    def fingerprint(draft: DraftFinding | DraftFindingInput) -> tuple[object, ...]:
+        """Return the stable identity used for duplicate draft detection."""
+
+        return (
+            draft.file.replace("\\", "/").lstrip("./").strip().lower(),
+            draft.line,
+            (draft.symbol or "").strip().lower(),
+            " ".join(draft.claim.split()).strip().lower(),
+        )
 
     def all(self) -> list[DraftFinding]:
         """Return drafts in creation order."""
@@ -69,6 +117,77 @@ class DraftFindingStore:
         """Return one draft by id."""
 
         return self._items.get(draft_id)
+
+    def get_state(self, draft_id: str) -> DraftFindingState | None:
+        """Return the explicit investigation state for one draft."""
+
+        return self._states.get(draft_id)
+
+    def states(self) -> list[DraftFindingState]:
+        """Return checkpoint states in draft creation order."""
+
+        return [self._states[item.id] for item in self._items.values()]
+
+    def update(
+        self,
+        update: DraftFindingUpdateInput,
+        *,
+        iteration: int = 0,
+    ) -> tuple[DraftFindingState, bool] | None:
+        """Apply one model-requested state transition, if its id is trusted."""
+
+        current = self._states.get(update.draft_id)
+        if current is None:
+            return None
+        changed = any(
+            (
+                current.status != update.status,
+                current.reason != update.reason,
+                current.missing_checks != update.missing_checks,
+                current.evidence_refs != update.evidence_refs,
+            )
+        )
+        next_state = DraftFindingState(
+            draft_id=current.draft_id,
+            status=update.status,
+            reason=update.reason,
+            missing_checks=list(update.missing_checks),
+            evidence_refs=list(update.evidence_refs),
+            updated_iteration=max(0, iteration),
+            repeat_count=current.repeat_count + (0 if changed else 1),
+        )
+        self._states[update.draft_id] = next_state
+        return next_state, changed
+
+    def has_pending(self) -> bool:
+        """Return whether any hypothesis still needs investigation."""
+
+        return any(state.status == "pending" for state in self._states.values())
+
+    def has_incomplete(self) -> bool:
+        """Return whether a hypothesis was explicitly left incomplete."""
+
+        return any(state.status == "incomplete" for state in self._states.values())
+
+    def has_evidence_sufficient(self) -> bool:
+        """Return whether at least one hypothesis is ready for final submission."""
+
+        return any(
+            state.status == "evidence_sufficient" for state in self._states.values()
+        )
+
+    def status_counts(self) -> dict[DraftFindingStatus, int]:
+        """Summarize checkpoint states for telemetry and final context."""
+
+        counts: dict[DraftFindingStatus, int] = {
+            "pending": 0,
+            "evidence_sufficient": 0,
+            "disproved": 0,
+            "incomplete": 0,
+        }
+        for state in self._states.values():
+            counts[state.status] += 1
+        return counts
 
     def __len__(self) -> int:
         return len(self._items)

@@ -10,15 +10,51 @@ from typing import cast
 from src.analyzer.context_state import ContextState
 from src.analyzer.event_log import EventType
 from src.analyzer.inference_engine import InferenceEngine
+from src.analyzer.prompts import USER_PREFIX_REVIEW
 from src.analyzer.trace import TraceRecorder
 from src.analyzer.schemas import DebugRequest, ReviewRequest
+from src.models.compat import ModelCallPolicy
 from src.models.conversation import ModelConversation
-from src.models.schemas import ModelResponse, TokenUsage
+from src.models.request_assembler import AssembledRequest, RequestAssembler
+from src.models.schemas import Message, ModelConfig, ModelResponse, TokenUsage
+from src.models.token_telemetry import serialize_json
 from src.tools.base import ToolResult
 
 
 def _extract_payload_from_user_message(content: str) -> dict[str, Any]:
     return cast(dict[str, Any], json.loads(content.split("\n", 1)[1]))
+
+
+def test_final_submit_context_validation_uses_serialized_wire_payload() -> None:
+    telemetry = {
+        "required_catalog_ids": ["ev-required"],
+    }
+    missing = InferenceEngine._validate_final_submit_request_context(  # noqa: SLF001
+        AssembledRequest(
+            messages=[],
+            estimated_tokens=100,
+            request_hash="hash",
+            serialized_payload='{"messages":[{"role":"user","content":"other"}]}',
+        ),
+        telemetry,
+        budget=200,
+    )
+    present = InferenceEngine._validate_final_submit_request_context(  # noqa: SLF001
+        AssembledRequest(
+            messages=[],
+            estimated_tokens=100,
+            request_hash="hash",
+            serialized_payload=(
+                '{"messages":[{"role":"user","content":"evidence_id=ev-required"}]}'
+            ),
+        ),
+        telemetry,
+        budget=200,
+    )
+
+    assert missing["valid"] is False
+    assert missing["missing_catalog_ids"] == ["ev-required"]
+    assert present["valid"] is True
 
 
 class RecordingFakeModelClient:
@@ -74,6 +110,141 @@ class RecordingFakeModelClient:
             for call in self.calls
             if self.SUMMARY_SYSTEM_MARKER in str(call[0].content)
         )
+
+
+def test_v3_final_call_allows_content_actions_without_exploration(monkeypatch) -> None:
+    from src.orchestrator.tool_schemas import build_v3_finding_action_tool_schemas
+
+    monkeypatch.setenv("CONTEXT_SUMMARY_ENABLED", "false")
+    client = RecordingFakeModelClient()
+    engine = InferenceEngine(model_client=client)  # type: ignore[arg-type]
+    request = ReviewRequest(repo_path=".")
+    asyncio.run(
+        engine.analyze(
+            state=ContextState(),
+            request=request,
+            tool_specs=[],
+            tool_schemas=build_v3_finding_action_tool_schemas()
+            + [
+                {
+                    "type": "function",
+                    "function": {"name": "read_file", "parameters": {}},
+                }
+            ],
+            force_submit=True,
+            contract_version="3.0",
+            submit_tool_name="finish_review",
+        )
+    )
+    assert {tool["function"]["name"] for tool in client.tools[-1]} == {
+        "save_finding",
+        "revise_finding",
+        "finish_review",
+    }
+    assert client.configs[-1].tool_choice == "auto"
+    assert client.policies[-1].forced_tool is None
+    finding = {
+        "anchor": {"file": "src/app.py", "line": 1},
+        "description": "A supported behavior change.",
+        "evidence_refs": ["ev-1"],
+        "severity": "warning",
+    }
+    plan, metadata = engine._parse_tool_calls(  # noqa: SLF001
+        [
+            {"function": {"name": name, "arguments": json.dumps(arguments)}}
+            for name, arguments in [
+                ("save_finding", {"finding": finding}),
+                ("finish_review", {"summary": "One finding saved."}),
+                ("read_file", {"path": "src/app.py"}),
+            ]
+        ],
+        request,
+        force_submit=True,
+        contract_version="3.0",
+    )
+    assert len(plan.v3_save_findings) == 1
+    assert plan.v3_finish_review is not None
+    assert not plan.tool_calls
+    assert metadata["force_submit_discarded_count"] == 1
+
+
+def test_repair_target_survives_tiny_optional_feedback_budget(monkeypatch) -> None:
+    from src.orchestrator.tool_schemas import build_repair_tool_schemas
+
+    monkeypatch.setenv("CONTEXT_SUMMARY_ENABLED", "false")
+    monkeypatch.setenv("FINAL_SUBMIT_FEEDBACK_TOKEN_BUDGET", "1")
+    client = RecordingFakeModelClient()
+    engine = InferenceEngine(model_client=client)  # type: ignore[arg-type]
+    asyncio.run(
+        engine.analyze(
+            state=ContextState(),
+            request=ReviewRequest(repo_path="."),
+            tool_specs=[],
+            tool_schemas=build_repair_tool_schemas(contract_version="3.0"),
+            force_submit=True,
+            repair_mode=True,
+            contract_version="3.0",
+            validator_result={
+                "unresolved_evidence_gaps": [
+                    {
+                        "target_handle": "repair_target_exact",
+                        "candidate_content": {},
+                        "gaps": [{"required_action": "Correct severity to info."}],
+                    }
+                ]
+            },
+        )
+    )
+    assert client.calls
+    protocols = [
+        message
+        for message in client.calls[-1]
+        if "target_handle=repair_target_exact" in message.content
+    ]
+    assert len(protocols) == 1
+    assert protocols[0].preserve_on_trim
+    assert "Correct severity to info." in protocols[0].content
+    assert client.policies[-1].forced_tool == "repair_review"
+    wire_text = "\n".join(message.content for message in client.calls[-1])
+    assert "Save each supported finding" not in wire_text
+    assert "When the saved set is ready" not in wire_text
+    assert "Submit minimal patches through repair_review" in wire_text
+
+
+def test_repair_without_complete_target_context_never_calls_provider(
+    monkeypatch,
+) -> None:
+    from src.orchestrator.tool_schemas import build_repair_tool_schemas
+
+    monkeypatch.setenv("CONTEXT_SUMMARY_ENABLED", "false")
+    for validator_result in [
+        None,
+        {
+            "unresolved_evidence_gaps": [
+                {
+                    "target_handle": "repair_target_exact",
+                    "candidate_content": {},
+                    "gaps": [{"required_action": "specific correction " * 20000}],
+                }
+            ]
+        },
+    ]:
+        client = RecordingFakeModelClient()
+        engine = InferenceEngine(model_client=client)  # type: ignore[arg-type]
+        plan, _ = asyncio.run(
+            engine.analyze(
+                state=ContextState(),
+                request=ReviewRequest(repo_path="."),
+                tool_specs=[],
+                tool_schemas=build_repair_tool_schemas(contract_version="3.0"),
+                force_submit=True,
+                repair_mode=True,
+                contract_version="3.0",
+                validator_result=validator_result,
+            )
+        )
+        assert not client.calls
+        assert plan.incomplete_reason == "final_submit_context_insufficient"
 
 
 class InvalidThenValidSubmitClient(RecordingFakeModelClient):
@@ -456,6 +627,286 @@ def test_analyze_keeps_prefetch_when_loaded_file_is_not_selected(monkeypatch) ->
     assert any(
         "prefetched_tool_context" in message.content for message in client.calls[-1]
     )
+
+
+def test_delivered_ledger_uses_post_assembly_payload_only() -> None:
+    state = ContextState(
+        evidence_snapshot_id="snapshot-a",
+        evidence_revision="revision-a",
+        candidate_context_manifests=[
+            {
+                "candidate_id": "candidate-a",
+                "snapshot_id": "graph-snapshot",
+                "revision": "graph-revision",
+                "included_spans": [
+                    {
+                        "span_id": "span-a",
+                        "file": "src/sent.py",
+                        "start_line": 4,
+                        "end_line": 5,
+                        "content": "4: sent\n5: source",
+                        "context_hash": "hash-a",
+                        "retrieval_source": "relation_graph",
+                        "snapshot_id": "graph-snapshot",
+                        "revision": "graph-revision",
+                        "side": "new",
+                    }
+                ],
+            }
+        ],
+    )
+    payload = {
+        "repo_path": ".",
+        "diff_mode": True,
+        "diff_text": None,
+        "diff_loaded": "",
+        "files": {"src/sent.py": "1: sent\n2: source"},
+        "summarized": ["file:src/summary.py"],
+        "candidate_context_manifests": [
+            {
+                "candidate_id": "candidate-a",
+                "included_spans": [
+                    {
+                        "span_id": "span-a",
+                        "file": "src/sent.py",
+                        "start_line": 4,
+                        "end_line": 5,
+                        "content": "4: sent\n5: source",
+                        "context_hash": "hash-a",
+                        "retrieval_source": "relation_graph",
+                    }
+                ],
+                "included_graph_paths": [],
+            }
+        ],
+    }
+    messages = [
+        Message(role="system", content="system"),
+        Message(role="user", content=USER_PREFIX_REVIEW + serialize_json(payload)),
+    ]
+    config = ModelConfig(model="fake-model")
+    assembled = AssembledRequest(
+        messages=messages,
+        estimated_tokens=1,
+        request_hash="request",
+        serialized_payload=RequestAssembler.serialized(
+            messages, [], config, ModelCallPolicy(thinking="off")
+        ),
+    )
+
+    InferenceEngine._record_delivered_review_evidence(  # noqa: SLF001
+        state,
+        assembled,
+        [],
+        repo_path=".",
+    )
+
+    records = {record["path"]: record for record in state.evidence_ledger}
+    assert records["src/sent.py"]["snapshot_id"] == "snapshot-a"
+    assert records["src/sent.py"]["revision"] == "revision-a"
+    assert not any(record["path"] == "src/summary.py" for record in state.evidence_ledger)
+    assert not any(record["path"] == "src/missing.py" for record in state.evidence_ledger)
+    manifest_record = next(
+        record
+        for record in state.evidence_ledger
+        if record["artifact_id"] == "span-a"
+    )
+    assert manifest_record["snapshot_id"] == "graph-snapshot"
+    assert manifest_record["revision"] == "graph-revision"
+
+
+def test_delivered_ledger_ignores_an_assembled_json_body_that_was_shortened() -> None:
+    state = ContextState(
+        evidence_snapshot_id="snapshot-a",
+        evidence_revision="revision-a",
+    )
+    assembled = AssembledRequest(
+        messages=[],
+        estimated_tokens=1,
+        request_hash="request",
+        serialized_payload=serialize_json(
+            {
+                "model": "fake-model",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": USER_PREFIX_REVIEW
+                        + '{"files":{"src/a.py":"1: body"}[request context shortened; retrieve missing evidence]',
+                    }
+                ],
+            }
+        ),
+    )
+
+    InferenceEngine._record_delivered_review_evidence(  # noqa: SLF001
+        state,
+        assembled,
+        [],
+        repo_path=".",
+    )
+
+    assert state.evidence_ledger == []
+
+
+def test_delivered_ledger_ignores_a_handoff_truncated_file_body() -> None:
+    state = ContextState(
+        evidence_snapshot_id="snapshot-a",
+        evidence_revision="revision-a",
+    )
+    payload = {
+        "repo_path": ".",
+        "diff_mode": False,
+        "files": {
+            "src/a.py": "1: body\n...[handoff truncated]",
+        },
+        "summarized": [],
+        "candidate_context_manifests": [],
+    }
+    messages = [
+        Message(role="system", content="system"),
+        Message(role="user", content=USER_PREFIX_REVIEW + serialize_json(payload)),
+    ]
+    assembled = AssembledRequest(
+        messages=messages,
+        estimated_tokens=1,
+        request_hash="request",
+        serialized_payload=RequestAssembler.serialized(
+            messages,
+            [],
+            ModelConfig(model="fake-model"),
+            ModelCallPolicy(thinking="off"),
+        ),
+    )
+
+    InferenceEngine._record_delivered_review_evidence(  # noqa: SLF001
+        state,
+        assembled,
+        [],
+        repo_path=".",
+    )
+
+    assert state.evidence_ledger == []
+
+
+def test_delivered_ledger_rejects_a_rewritten_manifest_span() -> None:
+    state = ContextState(
+        evidence_snapshot_id="snapshot-a",
+        evidence_revision="revision-a",
+        candidate_context_manifests=[
+            {
+                "candidate_id": "candidate-a",
+                "included_spans": [
+                    {
+                        "span_id": "span-a",
+                        "file": "src/a.py",
+                        "start_line": 4,
+                        "end_line": 4,
+                        "content": "4: trusted source",
+                        "context_hash": "hash-a",
+                        "retrieval_source": "relation_graph",
+                    }
+                ],
+            }
+        ],
+    )
+    payload = {
+        "files": {},
+        "candidate_context_manifests": [
+            {
+                "candidate_id": "candidate-a",
+                "included_spans": [
+                    {
+                        "span_id": "span-a",
+                        "file": "src/a.py",
+                        "start_line": 4,
+                        "end_line": 4,
+                        "content": "4: rewritten source",
+                    }
+                ],
+            }
+        ],
+    }
+    messages = [
+        Message(role="user", content=USER_PREFIX_REVIEW + serialize_json(payload)),
+    ]
+    assembled = AssembledRequest(
+        messages=messages,
+        estimated_tokens=1,
+        request_hash="request",
+        serialized_payload=RequestAssembler.serialized(
+            messages,
+            [],
+            ModelConfig(model="fake-model"),
+            ModelCallPolicy(thinking="off"),
+        ),
+    )
+
+    InferenceEngine._record_delivered_review_evidence(  # noqa: SLF001
+        state,
+        assembled,
+        [],
+        repo_path=".",
+    )
+
+    assert state.evidence_ledger == []
+
+
+def test_delivered_tool_evidence_requires_the_complete_wire_result_body() -> None:
+    captured = [
+        {
+            "tool_name": "read_file",
+            "tool_call_id": "call-1",
+            "data": {
+                "file_path": "src/a.py",
+                "start_line": 1,
+                "line_count": 2,
+                "content": "1: first\n2: second",
+            },
+        }
+    ]
+    complete = {
+        "role": "tool",
+        "tool_call_id": "call-1",
+        "content": serialize_json({"ok": True, "data": captured[0]["data"]}),
+    }
+    shortened = {
+        **complete,
+        "content": serialize_json(
+            {
+                "ok": True,
+                "data": {
+                    **captured[0]["data"],
+                    "content": "1: first\n[request context shortened; retrieve missing evidence]",
+                },
+            }
+        ),
+    }
+
+    assert InferenceEngine._delivered_tool_evidence(captured, [complete]) == captured  # noqa: SLF001
+    assert InferenceEngine._delivered_tool_evidence(captured, [shortened]) == []  # noqa: SLF001
+
+
+def test_schema_validation_repair_respects_a_zero_shared_budget(monkeypatch) -> None:
+    monkeypatch.setenv("CONTEXT_SUMMARY_ENABLED", "false")
+    client = InvalidThenValidSubmitClient()
+    engine = InferenceEngine(model_client=client)  # type: ignore[arg-type]
+
+    plan, _ = asyncio.run(
+        engine.analyze(
+            state=ContextState(goal="Run structured code review"),
+            request=ReviewRequest(repo_path="."),
+            tool_specs=[],
+            tool_schemas=[
+                {"type": "function", "function": {"name": "submit_review"}}
+            ],
+            repair_attempt_budget=0,
+        )
+    )
+
+    assert len(client.calls) == 1
+    assert plan.draft_review is None
+    assert plan.schema_repair_attempted_count == 0
+    assert plan.incomplete_reason == "schema_repair_budget_exhausted"
 
 
 def test_prefetch_coverage_requires_selected_file_to_reach_end_line() -> None:
@@ -1575,6 +2026,42 @@ def test_submit_review_rejects_issue_missing_confidence() -> None:
 
     assert plan.draft_review is None
     assert "missing required confidence" in parse_meta["submit_review_validation_error"]
+
+
+def test_repair_submit_rejects_top_level_semantic_fields() -> None:
+    client = RecordingFakeModelClient()
+    engine = InferenceEngine(model_client=client)  # type: ignore[arg-type]
+
+    plan, parse_meta = engine._parse_tool_calls(  # noqa: SLF001
+        [
+            {
+                "function": {
+                    "name": "submit_review",
+                    "arguments": json.dumps(
+                        {
+                            "summary": "repair",
+                            "issues": [
+                                {
+                                    "target_candidate_id": "cand-runtime",
+                                    "candidate_content_version": "version-a",
+                                    "repair_status": "repaired",
+                                    "suggestion": "silently replace the finding",
+                                    "repair_patch": {"trigger": "new trigger"},
+                                }
+                            ],
+                        }
+                    ),
+                }
+            }
+        ],
+        ReviewRequest(repo_path="."),
+        force_submit=True,
+    )
+
+    assert plan.draft_review is None
+    assert "forbidden top-level semantic fields" in parse_meta[
+        "submit_review_validation_error"
+    ]
 
 
 def test_fallback_review_json_cannot_bypass_missing_confidence() -> None:

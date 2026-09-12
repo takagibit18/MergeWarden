@@ -12,6 +12,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from src.analyzer.context_mode import ReviewContextMode
+from src.models.schemas import DraftFindingState
 
 
 class DecisionStep(BaseModel):
@@ -61,6 +62,42 @@ class ContextState(BaseModel):
     candidate_context_manifests: list[dict[str, Any]] = Field(
         default_factory=list,
         description="Budgeted context manifests that are actually sent to the reviewer.",
+    )
+    evidence_snapshot_id: str = Field(
+        default="",
+        description="System-owned snapshot identity for delivered source evidence.",
+    )
+    evidence_revision: str = Field(
+        default="",
+        description="System-owned repository revision identity for delivered evidence.",
+    )
+    evidence_ledger: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Exact source ranges delivered to the reviewer; index-only graph entries "
+            "are intentionally excluded."
+        ),
+    )
+    candidate_registrations: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Runtime-owned candidate identities and content versions used for replay; "
+            "model-authored draft or graph ids are not authoritative here."
+        ),
+    )
+    repair_transactions: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Bounded repair transaction facts, including target versions, executed "
+            "steps, budget, and per-target disposition."
+        ),
+    )
+    draft_findings: list[DraftFindingState] = Field(
+        default_factory=list,
+        description=(
+            "Explicit investigation checkpoints for durable draft hypotheses. "
+            "A pending draft is not a final finding."
+        ),
     )
     relation_graph_summary: dict[str, object] = Field(
         default_factory=dict,

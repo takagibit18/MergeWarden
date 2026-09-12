@@ -78,7 +78,9 @@ def _metadata_warnings(value: Mapping[str, Any]) -> tuple[str, ...]:
 
     warnings: list[str] = []
     persisted = value.get("metadata_warnings")
-    if _is_valid_optional_metadata(persisted):
+    if isinstance(persisted, (list, tuple)) and all(
+        isinstance(item, str) for item in persisted
+    ):
         warnings.extend(item.strip() for item in persisted if item.strip())
     for field in _OPTIONAL_METADATA_FIELDS:
         if field in value and not _is_valid_optional_metadata(value[field]):

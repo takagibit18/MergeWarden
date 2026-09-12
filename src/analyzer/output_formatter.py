@@ -8,13 +8,17 @@ from __future__ import annotations
 
 import re
 from enum import Enum
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from src.analyzer.finding_schema import (
+    ClaimSupport,
     FINDING_SCHEMA_VERSION,
+    FINDING_V3_SCHEMA_VERSION,
     CounterfactualResult,
     EvidenceProvenance,
+    FindingRepairPatch,
     RelatedLocation,
     RepairIntent,
     SourceAnchor,
@@ -48,13 +52,63 @@ class ReviewIssue(BaseModel):
     confidence: float = Field(
         default=0.0, ge=0.0, le=1.0, description="Model confidence"
     )
+    description: str = Field(
+        default="",
+        description=(
+            "Slim 3.0 finding description. This is the semantic claim; the legacy "
+            "evidence field is only a compatibility projection."
+        ),
+    )
+    evidence_refs: list[str] = Field(
+        default_factory=list,
+        description="Exact delivered evidence ids selected by a 3.0 finding.",
+    )
+    evidence_provenance: list[EvidenceProvenance] = Field(
+        default_factory=list,
+        description="Runtime-bound provenance for the 3.0 evidence_refs.",
+    )
     candidate_id: str = Field(
         default="",
         description="Stable runtime candidate identifier for this finding",
     )
+    target_candidate_id: str = Field(
+        default="",
+        description=(
+            "Repair-only selector for an existing runtime candidate. The model may "
+            "not use it to create or rename a candidate."
+        ),
+    )
+    repair_status: Literal["", "repaired", "unchanged", "incomplete", "deferred"] = Field(
+        default="",
+        description=(
+            "Repair-only outcome for the exact target candidate. Use unchanged or "
+            "incomplete when the original finding must remain visible."
+        ),
+    )
+    candidate_content_version: str = Field(
+        default="",
+        description="Repair-only content version copied from candidate_repair_feedback.",
+    )
+    repair_reason: str = Field(
+        default="",
+        description=(
+            "Repair-only explanation for unchanged, incomplete, or deferred "
+            "target disposition."
+        ),
+    )
+    repair_patch: FindingRepairPatch | None = Field(
+        default=None,
+        description=(
+            "Repair-only field-level semantic patch. Omitted fields remain "
+            "unchanged on the exact runtime candidate."
+        ),
+    )
     schema_version: str = Field(
         default="1.0",
         description="1.0 for legacy issues; 2.0 for structured hypotheses.",
+    )
+    integrity_status: Literal["pending", "verified", "needs_repair", "invalid"] = (
+        "pending"
     )
     finding_id: str = Field(
         default="",
@@ -78,6 +132,13 @@ class ReviewIssue(BaseModel):
     repair_intent: RepairIntent = Field(default_factory=RepairIntent)
     trigger: str = ""
     impact: str = ""
+    supports: list[ClaimSupport] = Field(
+        default_factory=list,
+        description=(
+            "Canonical role envelopes. Runtime may derive this field from the "
+            "legacy role-specific evidence arrays during the compatibility migration."
+        ),
+    )
     cause_evidence: list[EvidenceProvenance] = Field(default_factory=list)
     contract_evidence: list[EvidenceProvenance] = Field(default_factory=list)
     trigger_evidence: list[EvidenceProvenance] = Field(default_factory=list)
@@ -89,11 +150,42 @@ class ReviewIssue(BaseModel):
     counterfactual_result: CounterfactualResult | None = None
     merge_rejection_reasons: list[str] = Field(default_factory=list)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_public_v3_payload(cls, value: object) -> object:
+        """Adapt the slim public 3.0 result back into the runtime envelope."""
+
+        if not isinstance(value, dict) or value.get("schema_version") != "3.0":
+            return value
+        payload = dict(value)
+        anchor = payload.get("anchor")
+        if isinstance(anchor, dict):
+            try:
+                parsed_anchor = SourceAnchor.model_validate(anchor)
+            except Exception:  # noqa: BLE001
+                parsed_anchor = None
+            if parsed_anchor is not None:
+                payload.setdefault("primary_anchor", parsed_anchor.model_dump(mode="json"))
+                payload.setdefault("location", parsed_anchor.location)
+        payload.setdefault("location", "")
+        payload.setdefault("evidence", "")
+        payload.setdefault("suggestion", "")
+        payload.setdefault("confidence", 0.0)
+        return payload
+
     @property
     def is_structured_hypothesis(self) -> bool:
-        return self.schema_version == FINDING_SCHEMA_VERSION
+        return self.schema_version in {FINDING_SCHEMA_VERSION, FINDING_V3_SCHEMA_VERSION}
+
+    @property
+    def is_v3_finding(self) -> bool:
+        """Whether this issue uses the slim semantic contract."""
+
+        return self.schema_version == FINDING_V3_SCHEMA_VERSION
 
     def all_evidence(self) -> list[EvidenceProvenance]:
+        if self.is_v3_finding:
+            return list(self.evidence_provenance)
         return [
             *self.cause_evidence,
             *self.contract_evidence,
@@ -104,6 +196,17 @@ class ReviewIssue(BaseModel):
     def v022_payload(self) -> dict[str, object]:
         """Return the legacy single-anchor issue contract for old consumers."""
 
+        if self.is_v3_finding:
+            # Do not manufacture a confidence value while adapting a 3.0
+            # finding for a consumer that only understands the old envelope.
+            return {
+                "schema_version": FINDING_V3_SCHEMA_VERSION,
+                "severity": self.severity.value,
+                "location": self.location,
+                "description": self.description,
+                "evidence_refs": list(self.evidence_refs),
+                "suggestion": self.suggestion,
+            }
         return {
             "severity": self.severity.value,
             "location": self.location,
@@ -112,6 +215,35 @@ class ReviewIssue(BaseModel):
             "confidence": self.confidence,
             "candidate_id": self.candidate_id,
         }
+
+    def contract_payload(self) -> dict[str, object]:
+        """Return the versioned public payload without legacy semantic fields."""
+
+        if not self.is_v3_finding:
+            return self.model_dump(mode="json")
+        payload: dict[str, object] = {
+            "schema_version": FINDING_V3_SCHEMA_VERSION,
+            "anchor": (
+                self.primary_anchor.model_dump(mode="json")
+                if self.primary_anchor is not None
+                else None
+            ),
+            "description": self.description,
+            "evidence_refs": list(self.evidence_refs),
+            "severity": self.severity.value,
+        }
+        if self.suggestion:
+            payload["suggestion"] = self.suggestion
+        if self.related_locations:
+            payload["related_locations"] = [
+                {
+                    key: value
+                    for key, value in location.model_dump(mode="json").items()
+                    if key in {"file", "line", "end_line", "symbol_id"}
+                }
+                for location in self.related_locations
+            ]
+        return payload
 
 
 class ReviewReport(BaseModel):
@@ -124,12 +256,43 @@ class ReviewReport(BaseModel):
         description="Version of the review-output compatibility envelope.",
     )
 
+    @model_validator(mode="after")
+    def _validate_contract_envelope(self) -> ReviewReport:
+        """Keep the report envelope authoritative, including for empty reports."""
+
+        if self.schema_version not in {"1.0", FINDING_SCHEMA_VERSION, FINDING_V3_SCHEMA_VERSION}:
+            raise ValueError(
+                f"Unsupported review report schema_version: {self.schema_version!r}"
+            )
+        issue_versions = {issue.schema_version for issue in self.issues}
+        if self.schema_version == FINDING_V3_SCHEMA_VERSION:
+            if any(version != FINDING_V3_SCHEMA_VERSION for version in issue_versions):
+                raise ValueError(
+                    "mixed finding contracts are not supported in a v3 report"
+                )
+        elif FINDING_V3_SCHEMA_VERSION in issue_versions:
+            raise ValueError(
+                "v3 findings require an explicit report schema_version='3.0'"
+            )
+        return self
+
     def v022_payload(self) -> dict[str, object]:
         """Compatibility conversion for integrations pinned to v0.2.2."""
 
         return {
             "summary": self.summary,
             "issues": [issue.v022_payload() for issue in self.issues],
+        }
+
+    def contract_payload(self) -> dict[str, object]:
+        """Return the active finding contract for CLI/API/artifact consumers."""
+
+        if self.schema_version != FINDING_V3_SCHEMA_VERSION:
+            return self.model_dump(mode="json")
+        return {
+            "schema_version": FINDING_V3_SCHEMA_VERSION,
+            "summary": self.summary,
+            "issues": [issue.contract_payload() for issue in self.issues],
         }
 
 

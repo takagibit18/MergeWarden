@@ -81,6 +81,48 @@ def test_runtime_summary_collects_review_skill_metrics(tmp_path: Path) -> None:
     assert summary.review_skill_fallback_count == 1
 
 
+def test_runtime_summary_collects_checkpoint_and_repair_metrics(tmp_path: Path) -> None:
+    log = tmp_path / "checkpoint.jsonl"
+    log.write_text(
+        json.dumps(
+            {
+                "event_type": "phase_end",
+                "phase": "review_complete",
+                "payload": {
+                    "draft_state_transition_count": 2,
+                    "draft_status_counts": {
+                        "pending": 0,
+                        "evidence_sufficient": 1,
+                        "disproved": 1,
+                        "incomplete": 0,
+                    },
+                    "draft_stagnation_streak": 0,
+                    "incomplete_reasons": [],
+                    "repair_budget_total": 3,
+                    "repair_budget_remaining": 1,
+                    "repair_format_attempt_count": 1,
+                    "repair_contract_attempt_count": 1,
+                    "repair_evidence_attempt_count": 0,
+                    "final_submit_attempt_count": 2,
+                    "finding_run_status": "complete",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = summarize_event_log(log)
+
+    assert summary.draft_state_transition_count == 2
+    assert summary.draft_status_counts["disproved"] == 1
+    assert summary.repair_budget_total == 3
+    assert summary.repair_budget_remaining == 1
+    assert summary.repair_format_attempt_count == 1
+    assert summary.repair_contract_attempt_count == 1
+    assert summary.final_submit_attempt_count == 2
+    assert summary.finding_run_status == "complete"
+
+
 def test_summarize_run_artifacts_includes_artifact_paths(tmp_path: Path) -> None:
     event_log = tmp_path / "run-2.jsonl"
     response_json = tmp_path / "response.json"

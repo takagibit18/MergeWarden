@@ -126,6 +126,11 @@ async def execute_github_pull_request_review(
             blocking_error = find_blocking_review_error(response)
             if blocking_error:
                 raise RuntimeError(f"review produced no trusted result: {blocking_error}")
+            if response.semantic_verifier_required and not response.report_ready:
+                raise RuntimeError(
+                    "review report is not ready for external publication: "
+                    "independent semantic verification is incomplete"
+                )
 
             publish_result = await GitHubPublisher(client).publish(
                 GitHubPublishRequest(
@@ -138,6 +143,7 @@ async def execute_github_pull_request_review(
                     publish_comments=publish_comments,
                 )
             )
+            response.external_publish_status = "published"
             logger.info(
                 "comment published",
                 extra={

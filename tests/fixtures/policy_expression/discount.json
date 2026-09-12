@@ -1,0 +1,320 @@
+{
+  "provenance": {
+    "description": "Minimal validated issue and final delivered catalog extracted from the historical Discount run; no provider calls.",
+    "source_event_log": "development_agent_search_cross_file_22b62d9d-dd66-4f98-a980-7a796fa17c0b.jsonl",
+    "source_event_sha256": "875b045376827dfb02d6ecb8c6c9db277e590b57161256f578dfe6a358c10c12",
+    "source_journal": "development_agent_search_cross_file_A-agent-search_22b62d9d-dd66-4f98-a980-7a796fa17c0b_journal.jsonl",
+    "source_journal_sha256": "b31b4362c52ed6354e76730405d76d44d4ab4dea3ff64ec5c83bc9fe2d0a92cd"
+  },
+  "issue": {
+    "severity": "critical",
+    "location": "src/checkout.py:4",
+    "evidence": "src/discounts.py:2 shows apply_discount returns total - total*rate; the diff adds '- total * rate' in checkout, so checkout(100, 0.2) evaluates to 60 instead of 80.",
+    "suggestion": "Revert checkout to 'return apply_discount(total, rate)'.",
+    "confidence": 0.95,
+    "description": "",
+    "evidence_refs": [],
+    "evidence_provenance": [],
+    "candidate_id": "cand_c037f02d416d47f9a96a",
+    "target_candidate_id": "",
+    "repair_status": "",
+    "candidate_content_version": "",
+    "repair_reason": "",
+    "repair_patch": null,
+    "schema_version": "2.0",
+    "integrity_status": "pending",
+    "finding_id": "F-7920AC70F535",
+    "root_cause_id": "",
+    "primary_anchor": {
+      "file": "src/checkout.py",
+      "line": 4,
+      "end_line": 4,
+      "symbol_id": "checkout"
+    },
+    "related_locations": [],
+    "observed_behavior": "checkout(100, 0.2) returns 60 while the existing test expects 80.",
+    "causal_mechanism": "apply_discount already applies the discount internally; the newly added expression subtracts the discount a second time.",
+    "violated_invariant": "checkout applies exactly one discount of total*rate, i.e. returns total - total*rate.",
+    "repair_intent": {
+      "action": "Remove the extra '- total * rate' term so checkout returns apply_discount(total, rate) directly.",
+      "targets": [
+        "src/checkout.py:4"
+      ],
+      "boundary": "src/checkout.py:4"
+    },
+    "trigger": "Any call to checkout(total, rate) with rate != 0.",
+    "impact": "All callers receive undercharged/incorrect discounted totals; the existing test test_checkout_applies_discount_once fails.",
+    "supports": [
+      {
+        "role": "cause",
+        "statement": "checkout subtracts total*rate again on top of apply_discount's own discount.",
+        "evidence_refs": [
+          "ev_75b55ca728b7114fe5e75ebe"
+        ]
+      },
+      {
+        "role": "trigger",
+        "statement": "The diff hunk shows the new '- total * rate' suffix added to the return expression.",
+        "evidence_refs": [
+          "ev_493d801ca85f159b5eeaa912"
+        ]
+      },
+      {
+        "role": "impact",
+        "statement": "The changed return value breaks checkout's documented single-discount contract exercised by the existing test.",
+        "evidence_refs": [
+          "ev_7245344ae1bea12b944e618c"
+        ]
+      }
+    ],
+    "cause_evidence": [
+      {
+        "candidate_id": "",
+        "artifact_id": "e3218b0a5ec02c8e866a5449",
+        "evidence_id": "ev_75b55ca728b7114fe5e75ebe",
+        "reference_id": "ev_75b55ca728b7114fe5e75ebe",
+        "resolution_status": "resolved",
+        "snapshot_id": "13f5b6d99720b1a255f3793c",
+        "revision": "3ad48764a73c2f9c61a8c773c47625913ce8252a",
+        "side": "new",
+        "context_manifest_id": "",
+        "retrieval_source": "read_file",
+        "file": "src/checkout.py",
+        "line": 1,
+        "end_line": 4,
+        "symbol_id": "",
+        "context_hash": "",
+        "edge_kind": "",
+        "edge_confidence": null,
+        "resolver": "",
+        "evidence_eligibility": "strong",
+        "statement": "checkout subtracts total*rate again on top of apply_discount's own discount."
+      }
+    ],
+    "contract_evidence": [],
+    "trigger_evidence": [
+      {
+        "candidate_id": "",
+        "artifact_id": "diff:src/checkout.py:0:1",
+        "evidence_id": "ev_493d801ca85f159b5eeaa912",
+        "reference_id": "ev_493d801ca85f159b5eeaa912",
+        "resolution_status": "resolved",
+        "snapshot_id": "13f5b6d99720b1a255f3793c",
+        "revision": "3ad48764a73c2f9c61a8c773c47625913ce8252a",
+        "side": "new",
+        "context_manifest_id": "",
+        "retrieval_source": "git_diff",
+        "file": "src/checkout.py",
+        "line": 1,
+        "end_line": 4,
+        "symbol_id": "",
+        "context_hash": "",
+        "edge_kind": "",
+        "edge_confidence": null,
+        "resolver": "",
+        "evidence_eligibility": "strong",
+        "statement": "The diff hunk shows the new '- total * rate' suffix added to the return expression."
+      }
+    ],
+    "impact_evidence": [
+      {
+        "candidate_id": "",
+        "artifact_id": "c728af64d78cc41d98aa5aca",
+        "evidence_id": "ev_7245344ae1bea12b944e618c",
+        "reference_id": "ev_7245344ae1bea12b944e618c",
+        "resolution_status": "resolved",
+        "snapshot_id": "13f5b6d99720b1a255f3793c",
+        "revision": "3ad48764a73c2f9c61a8c773c47625913ce8252a",
+        "side": "new",
+        "context_manifest_id": "",
+        "retrieval_source": "file_context",
+        "file": "src/checkout.py",
+        "line": 1,
+        "end_line": 4,
+        "symbol_id": "",
+        "context_hash": "",
+        "edge_kind": "",
+        "edge_confidence": null,
+        "resolver": "",
+        "evidence_eligibility": "strong",
+        "statement": "The changed return value breaks checkout's documented single-discount contract exercised by the existing test."
+      }
+    ],
+    "context_manifest_id": "",
+    "context_hash": "",
+    "member_findings": [],
+    "absorbed_roles": {},
+    "counterfactual_result": null,
+    "merge_rejection_reasons": []
+  },
+  "catalog": [
+    {
+      "artifact_id": "e3218b0a5ec02c8e866a5449",
+      "evidence_id": "ev_75b55ca728b7114fe5e75ebe",
+      "snapshot_id": "13f5b6d99720b1a255f3793c",
+      "revision": "3ad48764a73c2f9c61a8c773c47625913ce8252a",
+      "path": "src/checkout.py",
+      "side": "new",
+      "start_line": 1,
+      "end_line": 4,
+      "content": "1: from .discounts import apply_discount\n2: \n3: def checkout(total, rate):\n4:     return apply_discount(total, rate) - total * rate",
+      "content_hash": "8041061fa46d758385603aa33cd2407cd7e329d56c9390746ea13c8ac24d96c5",
+      "source_type": "read_file",
+      "source_tool_call_id": "prefetch-read-file-0",
+      "delivery_request_id": "prefetch-read-file-0",
+      "lifecycle": "delivered",
+      "displayed_ranges": [
+        {
+          "start_line": 1,
+          "end_line": 4
+        }
+      ],
+      "displayed_line_numbers": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "body_hash": "8041061fa46d758385603aa33cd2407cd7e329d56c9390746ea13c8ac24d96c5",
+      "truncated": false,
+      "scope": "file_read",
+      "aliases": [
+        "e3218b0a5ec02c8e866a5449",
+        "ev_75b55ca728b7114fe5e75ebe"
+      ]
+    },
+    {
+      "artifact_id": "c728af64d78cc41d98aa5aca",
+      "evidence_id": "ev_7245344ae1bea12b944e618c",
+      "snapshot_id": "13f5b6d99720b1a255f3793c",
+      "revision": "3ad48764a73c2f9c61a8c773c47625913ce8252a",
+      "path": "src/checkout.py",
+      "side": "new",
+      "start_line": 1,
+      "end_line": 4,
+      "content": "from .discounts import apply_discount\n\ndef checkout(total, rate):\n    return apply_discount(total, rate) - total * rate\n",
+      "content_hash": "f702fe91cf0d9acb07b08adbb8741c755a92e43cac8505fd9972285be47e0b9f",
+      "source_type": "file_context",
+      "source_tool_call_id": "",
+      "delivery_request_id": "",
+      "lifecycle": "delivered",
+      "displayed_ranges": [
+        {
+          "start_line": 1,
+          "end_line": 4
+        }
+      ],
+      "displayed_line_numbers": [],
+      "body_hash": "f702fe91cf0d9acb07b08adbb8741c755a92e43cac8505fd9972285be47e0b9f",
+      "truncated": false,
+      "scope": "prompt_file",
+      "aliases": [
+        "c728af64d78cc41d98aa5aca",
+        "ev_7245344ae1bea12b944e618c"
+      ]
+    },
+    {
+      "artifact_id": "diff:src/checkout.py:0:1",
+      "evidence_id": "ev_493d801ca85f159b5eeaa912",
+      "snapshot_id": "13f5b6d99720b1a255f3793c",
+      "revision": "3ad48764a73c2f9c61a8c773c47625913ce8252a",
+      "path": "src/checkout.py",
+      "side": "new",
+      "start_line": 1,
+      "end_line": 4,
+      "content": "@@ -1,4 +1,4 @@\n from .discounts import apply_discount\n \n def checkout(total, rate):\n-    return apply_discount(total, rate)\n+    return apply_discount(total, rate) - total * rate",
+      "content_hash": "fad26021863aca848e9f260c989ed9d8c587dda4c4bc0ea169e78041ce030528",
+      "source_type": "git_diff",
+      "source_tool_call_id": "",
+      "delivery_request_id": "",
+      "lifecycle": "delivered",
+      "displayed_ranges": [
+        {
+          "start_line": 1,
+          "end_line": 4
+        }
+      ],
+      "displayed_line_numbers": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "body_hash": "fad26021863aca848e9f260c989ed9d8c587dda4c4bc0ea169e78041ce030528",
+      "truncated": false,
+      "scope": "prompt_diff",
+      "aliases": [
+        "diff:src/checkout.py:0:1",
+        "ev_493d801ca85f159b5eeaa912"
+      ]
+    },
+    {
+      "artifact_id": "0f3afb12b7571866e22e2276",
+      "evidence_id": "ev_c83c5ddeb0b321bf1cabfd06",
+      "snapshot_id": "13f5b6d99720b1a255f3793c",
+      "revision": "3ad48764a73c2f9c61a8c773c47625913ce8252a",
+      "path": "src/discounts.py",
+      "side": "new",
+      "start_line": 1,
+      "end_line": 2,
+      "content": "1: def apply_discount(total, rate):\n2:     return total - total * rate",
+      "content_hash": "34fd412ced1144cf9cde88079c91f558f3b3e72e43290d9dff156683978ca822",
+      "source_type": "read_file",
+      "source_tool_call_id": "call_-7272454439103888015",
+      "delivery_request_id": "call_-7272454439103888015",
+      "lifecycle": "delivered",
+      "displayed_ranges": [
+        {
+          "start_line": 1,
+          "end_line": 2
+        }
+      ],
+      "displayed_line_numbers": [
+        1,
+        2
+      ],
+      "body_hash": "34fd412ced1144cf9cde88079c91f558f3b3e72e43290d9dff156683978ca822",
+      "truncated": false,
+      "scope": "file_read",
+      "aliases": [
+        "0f3afb12b7571866e22e2276",
+        "ev_c83c5ddeb0b321bf1cabfd06"
+      ]
+    },
+    {
+      "artifact_id": "69cc7640c3d3d74530648477",
+      "evidence_id": "ev_e4742bca8657586f05475976",
+      "snapshot_id": "13f5b6d99720b1a255f3793c",
+      "revision": "3ad48764a73c2f9c61a8c773c47625913ce8252a",
+      "path": "tests/test_checkout.py",
+      "side": "new",
+      "start_line": 1,
+      "end_line": 4,
+      "content": "1: from src.checkout import checkout\n2: \n3: def test_checkout_applies_discount_once():\n4:     assert checkout(100, 0.2) == 80",
+      "content_hash": "1e0bb4c9fce694a81002dbd90d7610a64b2b063fe71559b4818a5e9fd4d6aeba",
+      "source_type": "read_file",
+      "source_tool_call_id": "call_-7272454439103888014",
+      "delivery_request_id": "call_-7272454439103888014",
+      "lifecycle": "delivered",
+      "displayed_ranges": [
+        {
+          "start_line": 1,
+          "end_line": 4
+        }
+      ],
+      "displayed_line_numbers": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "body_hash": "1e0bb4c9fce694a81002dbd90d7610a64b2b063fe71559b4818a5e9fd4d6aeba",
+      "truncated": false,
+      "scope": "file_read",
+      "aliases": [
+        "69cc7640c3d3d74530648477",
+        "ev_e4742bca8657586f05475976"
+      ]
+    }
+  ]
+}

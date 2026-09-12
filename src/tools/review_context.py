@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from src.analyzer.diff_lines import ParsedDiffHunk, changed_new_lines_by_file, parse_unified_diff_hunks
 
@@ -47,9 +48,16 @@ class ReviewToolContext:
     diff_text: str
     changed_lines_by_file: dict[str, set[int]]
     diff_hunks_by_file: dict[str, list[DiffHunk]]
+    evidence_catalog_provider: Callable[[], list[dict[str, object]]] | None = None
 
     @classmethod
-    def from_diff(cls, repo_root: Path | str, diff_text: str) -> "ReviewToolContext":
+    def from_diff(
+        cls,
+        repo_root: Path | str,
+        diff_text: str,
+        *,
+        evidence_catalog_provider: Callable[[], list[dict[str, object]]] | None = None,
+    ) -> "ReviewToolContext":
         """Build context from a repo root and unified diff text."""
         parsed_hunks = parse_unified_diff_hunks(diff_text)
         return cls(
@@ -60,4 +68,5 @@ class ReviewToolContext:
                 file_path: [DiffHunk.from_parsed(hunk) for hunk in hunks]
                 for file_path, hunks in parsed_hunks.items()
             },
+            evidence_catalog_provider=evidence_catalog_provider,
         )

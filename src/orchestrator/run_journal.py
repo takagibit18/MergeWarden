@@ -15,16 +15,24 @@ from threading import Lock
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from src.models.schemas import DraftFinding, TokenUsage
+from src.models.schemas import DraftFinding, DraftFindingStatus, TokenUsage
 
 RUN_JOURNAL_SCHEMA_VERSION: Literal["1.0"] = "1.0"
 RunJournalEntryType = Literal[
     "model_response",
     "tool_result",
     "draft_finding",
+    "draft_finding_state",
     "length_recovery",
+    "candidate_registration",
+    "preflight",
+    "evidence_catalog",
+    "format_recovery",
+    "repair_transaction",
+    "semantic_verifier_call",
+    "finding_finalization",
 ]
 LengthRecoveryStatus = Literal["required", "attempted", "succeeded", "failed"]
 
@@ -103,6 +111,118 @@ class LengthRecoveryJournalPayload(BaseModel):
     draft_finding_ids: list[str] = Field(default_factory=list)
     submit_response_id: str = ""
     reason: str = ""
+
+
+class CandidateRegistrationJournalPayload(BaseModel):
+    """Runtime candidate identities and versions persisted for replay."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    iteration: int = Field(default=0, ge=0)
+    registrations: list[dict[str, Any]] = Field(default_factory=list)
+    duplicate_sources: dict[str, list[int]] = Field(default_factory=dict)
+
+
+class PreflightJournalPayload(BaseModel):
+    """Input and deterministic result of one draft preflight call."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    iteration: int = Field(default=0, ge=0)
+    all_tools_succeeded: bool = False
+    input: dict[str, Any] = Field(default_factory=dict)
+    result: dict[str, Any] = Field(default_factory=dict)
+
+
+class EvidenceCatalogJournalPayload(BaseModel):
+    """Exact evidence catalog snapshot available to later integrity checks."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    snapshot_id: str = ""
+    revision: str = ""
+    records: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class FormatRecoveryJournalPayload(BaseModel):
+    """Raw structured-submit recovery and its preservation decision."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    recovery_id: str = Field(default="", min_length=1)
+    iteration: int = Field(default=0, ge=0)
+    input_response_id: str = ""
+    recovery_response_id: str = ""
+    validation_error: str = ""
+    status: Literal["accepted", "rejected_preserved_input", "deferred"]
+    raw_payload: dict[str, Any] = Field(default_factory=dict)
+    preserved_evidence_refs: list[str] = Field(default_factory=list)
+    mapped_candidate_ids: list[str] = Field(default_factory=list)
+    diagnostics: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class RepairTransactionJournalPayload(BaseModel):
+    """One bounded repair transaction and its latest target decisions."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    transaction: dict[str, Any] = Field(default_factory=dict)
+
+
+class SemanticVerifierJournalPayload(BaseModel):
+    """Safe replay binding for one verifier request/receipt pair."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    phase: Literal["request", "receipt"]
+    opaque_handle: str = ""
+    candidate_id: str = ""
+    content_version: str = ""
+    evidence_context_digest: str = ""
+    input_digest: str = ""
+    request_hash: str = ""
+    request_estimated_tokens: int = Field(default=0, ge=0)
+    response_digest: str = ""
+    provider_request_id: str = ""
+    provider_attempt_count: int = Field(default=0, ge=0)
+    budget_tokens_used: int = Field(default=0, ge=0)
+    budget_remaining_tokens: int | None = Field(default=None, ge=0)
+    verdict: str = ""
+    status: str = ""
+    error_code: str = ""
+    investigation_calls: int = Field(default=0, ge=0)
+    investigation_tool_calls: int = Field(default=0, ge=0)
+    investigation_evidence_refs: list[str] = Field(default_factory=list)
+
+
+class FindingFinalizationJournalPayload(BaseModel):
+    """Final candidate dispositions needed to replay publication decisions."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_statuses: dict[str, str] = Field(default_factory=dict)
+    final_published_count: int = Field(default=0, ge=0)
+    finding_run_status: Literal["complete", "incomplete"] = "incomplete"
+    review_outcome: str = ""
+
+
+class DraftFindingStateJournalPayload(BaseModel):
+    """Explicit model-requested transition for a durable draft checkpoint."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    draft_id: str = Field(..., min_length=1)
+    status: DraftFindingStatus
+    reason: str = ""
+    missing_checks: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+    iteration: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def _terminal_states_need_reason(self) -> "DraftFindingStateJournalPayload":
+        if self.status in {"evidence_sufficient", "disproved", "incomplete"} and not self.reason.strip():
+            raise ValueError(f"status={self.status} requires a non-empty reason")
+        return self
 
 
 class PendingRunJournalEntry(BaseModel):
@@ -272,7 +392,15 @@ class RunJournal:
             ModelResponseJournalPayload
             | ToolResultJournalPayload
             | DraftFinding
+            | DraftFindingStateJournalPayload
             | LengthRecoveryJournalPayload
+            | CandidateRegistrationJournalPayload
+            | PreflightJournalPayload
+            | EvidenceCatalogJournalPayload
+            | FormatRecoveryJournalPayload
+            | RepairTransactionJournalPayload
+            | SemanticVerifierJournalPayload
+            | FindingFinalizationJournalPayload
         )
         if entry_type == "model_response":
             model = ModelResponseJournalPayload.model_validate(payload)
@@ -280,8 +408,24 @@ class RunJournal:
             model = ToolResultJournalPayload.model_validate(payload)
         elif entry_type == "draft_finding":
             model = DraftFinding.model_validate(payload)
-        else:
+        elif entry_type == "draft_finding_state":
+            model = DraftFindingStateJournalPayload.model_validate(payload)
+        elif entry_type == "length_recovery":
             model = LengthRecoveryJournalPayload.model_validate(payload)
+        elif entry_type == "candidate_registration":
+            model = CandidateRegistrationJournalPayload.model_validate(payload)
+        elif entry_type == "preflight":
+            model = PreflightJournalPayload.model_validate(payload)
+        elif entry_type == "evidence_catalog":
+            model = EvidenceCatalogJournalPayload.model_validate(payload)
+        elif entry_type == "format_recovery":
+            model = FormatRecoveryJournalPayload.model_validate(payload)
+        elif entry_type == "repair_transaction":
+            model = RepairTransactionJournalPayload.model_validate(payload)
+        elif entry_type == "semantic_verifier_call":
+            model = SemanticVerifierJournalPayload.model_validate(payload)
+        else:
+            model = FindingFinalizationJournalPayload.model_validate(payload)
         return model.model_dump(mode="json")
 
 

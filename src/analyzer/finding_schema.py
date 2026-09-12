@@ -10,13 +10,32 @@ from __future__ import annotations
 import hashlib
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 FINDING_SCHEMA_VERSION = "2.0"
+FINDING_V3_SCHEMA_VERSION = "3.0"
 CounterfactualResult = Literal["yes", "no", "uncertain"]
 EvidenceEligibility = Literal["strong", "exploratory", "none"]
 EvidenceRole = Literal["cause", "contract", "trigger", "impact", "related"]
+EvidenceSide = Literal["old", "new", "context", "unknown"]
+FindingSeverity = Literal["critical", "warning", "info", "style"]
+RepairPatchRole = Literal["cause", "contract", "trigger", "impact"]
+RepairPatchField = Literal[
+    "severity",
+    "primary_anchor",
+    "evidence",
+    "suggestion",
+    "confidence",
+    "observed_behavior",
+    "causal_mechanism",
+    "violated_invariant",
+    "repair_intent",
+    "trigger",
+    "impact",
+    "supports",
+    "related_locations",
+]
 
 
 class SourceAnchor(BaseModel):
@@ -49,6 +68,94 @@ class RelatedLocation(SourceAnchor):
     description: str = ""
 
 
+class FindingContentV3(BaseModel):
+    """Slim semantic finding content owned by the review contract.
+
+    This is the only finding shape exposed to a 3.0 reviewer.  Runtime
+    identity, confidence, role envelopes, narrative decomposition, and
+    provenance are deliberately not part of this model-facing contract.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    anchor: SourceAnchor = Field(
+        ..., description="The changed-code anchor that the conclusion is about."
+    )
+    description: str = Field(
+        ..., min_length=1, description="One concise explanation of the finding."
+    )
+    evidence_refs: list[str] = Field(
+        ..., min_length=1, description="Exact ids from the delivered evidence catalog."
+    )
+    severity: FindingSeverity
+    suggestion: str | None = Field(
+        default=None, description="Optional concrete remediation suggestion."
+    )
+    related_locations: list[SourceAnchor] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _unique_evidence_refs(self) -> "FindingContentV3":
+        refs = [str(item).strip() for item in self.evidence_refs]
+        if any(not item for item in refs):
+            raise ValueError("evidence_refs must contain non-empty ids")
+        if len(refs) != len(set(refs)):
+            raise ValueError("evidence_refs must not contain duplicates")
+        self.evidence_refs = refs
+        return self
+
+
+V3FindingPatchField = Literal["suggestion", "related_locations"]
+
+
+class FindingPatchV3(BaseModel):
+    """Atomic patch surface for a 3.0 finding re-review."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    anchor: SourceAnchor | None = None
+    description: str | None = None
+    evidence_refs: list[str] | None = None
+    severity: FindingSeverity | None = None
+    suggestion: str | None = None
+    related_locations: list[SourceAnchor] | None = None
+    delete_fields: list[V3FindingPatchField] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _patch_semantics(self) -> "FindingPatchV3":
+        if len(self.delete_fields) != len(set(self.delete_fields)):
+            raise ValueError("delete_fields must not contain duplicates")
+        overlap = set(self.delete_fields).intersection(self.model_fields_set)
+        if overlap:
+            raise ValueError(
+                "delete_fields cannot also carry a value for: "
+                + ", ".join(sorted(overlap))
+            )
+        explicit_nulls = {
+            field
+            for field in self.model_fields_set
+            if field in {
+                "anchor",
+                "description",
+                "evidence_refs",
+                "severity",
+                "suggestion",
+                "related_locations",
+            }
+            and getattr(self, field) is None
+        }
+        if explicit_nulls:
+            raise ValueError(
+                "null is ambiguous in a finding patch; use delete_fields for: "
+                + ", ".join(sorted(explicit_nulls))
+            )
+        if self.evidence_refs is not None:
+            refs = [str(item).strip() for item in self.evidence_refs]
+            if any(not item for item in refs) or len(refs) != len(set(refs)):
+                raise ValueError("evidence_refs must contain unique non-empty ids")
+            self.evidence_refs = refs
+        return self
+
+
 class RepairIntent(BaseModel):
     """Minimal repair signature proposed by the reviewer."""
 
@@ -68,12 +175,138 @@ class RepairIntent(BaseModel):
         )
 
 
+class ClaimSupport(BaseModel):
+    """One role-specific claim backed by shared evidence references."""
+
+    role: EvidenceRole
+    statement: str = Field(min_length=1)
+    evidence_refs: list[str] = Field(min_length=1)
+
+
+class RepairPatchSupport(BaseModel):
+    """Model-facing support replacement allowed inside a field-level patch."""
+
+    role: RepairPatchRole
+    statement: str = Field(min_length=1)
+    evidence_refs: list[str] = Field(min_length=1)
+
+
+class FindingRepairPatch(BaseModel):
+    """Explicit semantic fields that a bounded repair may replace.
+
+    Runtime identity, finding labels, and provenance are deliberately absent.
+    An omitted field is preserved.  An explicitly empty string/list is an
+    actual replacement and is checked by the normal canonical/integrity guard.
+    ``null`` is intentionally not treated as omission by the runtime: it is an
+    invalid ambiguous update.  Explicit deletion uses ``delete_fields`` so the
+    four states (omitted, null, empty value, delete) cannot collapse together.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    severity: FindingSeverity | None = None
+    primary_anchor: SourceAnchor | None = None
+    evidence: str | None = None
+    suggestion: str | None = None
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    observed_behavior: str | None = None
+    causal_mechanism: str | None = None
+    violated_invariant: str | None = None
+    repair_intent: RepairIntent | None = None
+    trigger: str | None = None
+    impact: str | None = None
+    supports: list[RepairPatchSupport] | None = None
+    related_locations: list[RelatedLocation] | None = None
+    delete_fields: list[RepairPatchField] = Field(
+        default_factory=list,
+        description=(
+            "Explicit semantic deletions. Never use null to mean omission; "
+            "the runtime applies and revalidates these deletions atomically."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _no_duplicate_or_overlapping_deletes(self) -> "FindingRepairPatch":
+        if len(self.delete_fields) != len(set(self.delete_fields)):
+            raise ValueError("delete_fields must not contain duplicates")
+        overlap = set(self.delete_fields).intersection(self.model_fields_set)
+        if overlap:
+            raise ValueError(
+                "delete_fields cannot also carry a value for: "
+                + ", ".join(sorted(overlap))
+            )
+        return self
+
+
+class FindingDraft(BaseModel):
+    """Canonical internal finding contract shared by parser and verifier."""
+
+    finding_id: str = Field(min_length=1)
+    schema_version: Literal["2.0"] = "2.0"
+    severity: FindingSeverity
+    confidence: float = Field(ge=0.0, le=1.0)
+    primary_anchor: SourceAnchor
+    observed_behavior: str = Field(min_length=1)
+    causal_mechanism: str = Field(min_length=1)
+    violated_invariant: str = Field(min_length=1)
+    repair_intent: RepairIntent
+    trigger: str = Field(min_length=1)
+    impact: str = Field(min_length=1)
+    supports: list[ClaimSupport] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _unique_support_roles(self) -> "FindingDraft":
+        """Reject duplicate role envelopes before runtime evidence binding."""
+
+        roles = [item.role for item in self.supports]
+        if len(roles) != len(set(roles)):
+            raise ValueError("supports must contain at most one envelope per role")
+        return self
+
+
 class EvidenceProvenance(BaseModel):
     """One evidence claim whose provenance is canonically bound by the runtime."""
 
     candidate_id: str = Field(
         default="",
         description="System-owned candidate identity; model input is overwritten.",
+    )
+    artifact_id: str = Field(
+        default="",
+        description="System-owned delivered-source artifact identity.",
+    )
+    evidence_id: str = Field(
+        default="",
+        description=(
+            "Single model-facing evidence identity selected from the delivered "
+            "catalog; never a Graph span, candidate id, content hash, or revision."
+        ),
+    )
+    reference_id: str = Field(
+        default="",
+        description=(
+            "Model-selected evidence reference retained for unresolved or aliased "
+            "catalog lookups; it is not a trusted artifact identity."
+        ),
+    )
+    resolution_status: str = Field(
+        default="resolved",
+        description=(
+            "Evidence reference resolution state: resolved, unresolved, "
+            "ambiguous, or undelivered."
+        ),
+    )
+    snapshot_id: str = Field(
+        default="",
+        description="System-owned repository snapshot identity.",
+    )
+    revision: str = Field(
+        default="",
+        description="System-owned repository/index revision identity.",
+    )
+    side: EvidenceSide = Field(
+        default="new",
+        description="Source side used for the citation: new, old, or context.",
     )
     context_manifest_id: str = Field(
         default="",

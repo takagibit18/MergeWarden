@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from src.analyzer.evidence_binding import bind_candidate_evidence
+from src.analyzer.evidence_ledger import ledger_from_sources
 from src.analyzer.finding_integrity import FindingIntegrityGuard, build_candidates
 from src.analyzer.finding_schema import EvidenceProvenance, RepairIntent, SourceAnchor
 from src.analyzer.output_formatter import ReviewIssue, ReviewReport, Severity
@@ -98,6 +99,34 @@ def test_structured_risk_requires_cause_and_contract_roles(tmp_path: Path) -> No
     assert {
         failure.code for failure in result.results[0].failures
     } >= {"evidence_incomplete"}
+
+
+def test_delivered_source_with_missing_role_is_contract_gap_not_source_gap(
+    tmp_path: Path,
+) -> None:
+    service = tmp_path / "pkg" / "service.py"
+    service.parent.mkdir(parents=True, exist_ok=True)
+    service.write_text("\n".join(f"line {line}" for line in range(1, 7)) + "\n")
+    request = _request(str(tmp_path))
+    candidate = build_candidates(
+        ReviewReport(issues=[_structured_issue(contract=False)]), iteration=0
+    )
+    ledger = ledger_from_sources(
+        tool_evidence=_read_evidence(),
+        diff_text=request.diff_text,
+    )
+
+    result = FindingIntegrityGuard(tmp_path).validate(
+        candidate,
+        request,
+        tool_evidence=_read_evidence(),
+        evidence_ledger=ledger,
+        context_mode="agent_search",
+    )
+
+    codes = {failure.code for failure in result.results[0].failures}
+    assert "role_claim_missing" in codes
+    assert "evidence_incomplete" not in codes
 
 
 def test_invalid_optional_role_evidence_is_dropped_when_required_roles_pass(

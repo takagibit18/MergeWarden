@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from src.analyzer.diff_lines import ParsedDiffHunk, parse_unified_diff_hunks
-from src.analyzer.finding_schema import EvidenceProvenance, normalize_repo_path
+from src.analyzer.evidence_ledger import EvidenceLedger
+from src.analyzer.finding_schema import (
+    EvidenceProvenance,
+    EvidenceSide,
+    normalize_repo_path,
+)
 from src.analyzer.output_formatter import ReviewIssue
 from src.analyzer.schemas import FindingCandidate, ReviewRequest
 
@@ -15,6 +20,7 @@ _CANONICAL_TOOL_SOURCES = {
     "get_changed_context": "get_changed_context",
     "symbol_context": "find_symbol_context",
     "find_symbol_context": "find_symbol_context",
+    "file_context": "file_context",
 }
 _TRUSTED_TOOL_SOURCES = {
     "read_file",
@@ -22,11 +28,13 @@ _TRUSTED_TOOL_SOURCES = {
     "changed_context",
     "find_symbol_context",
     "symbol_context",
+    "grep_files",
 }
 _TOOL_SOURCE_PRIORITY = {
     "read_file": 1,
     "get_changed_context": 2,
     "find_symbol_context": 3,
+    "grep_files": 4,
 }
 
 
@@ -39,6 +47,11 @@ class TrustedEvidenceBinding:
     context_manifest_id: str = ""
     context_hash: str = ""
     symbol_id: str = ""
+    artifact_id: str = ""
+    evidence_id: str = ""
+    snapshot_id: str = ""
+    revision: str = ""
+    side: EvidenceSide = "new"
 
 
 def bind_candidate_evidence(
@@ -47,14 +60,20 @@ def bind_candidate_evidence(
     tool_evidence: list[dict[str, Any]],
     *,
     context_manifests: list[dict[str, Any]] | None = None,
+    evidence_ledger: EvidenceLedger | None = None,
+    snapshot_id: str = "",
+    revision: str = "",
 ) -> list[FindingCandidate]:
     """Return candidates whose evidence is bound only to trusted run context.
 
     Candidate identity and non-manifest source selection are system-owned. When a
     location has several trusted representations, a stable runtime priority chooses
-    diff, then read, changed-context, and symbol-context evidence. Explicit manifest
-    claims still require an exact id/hash match; ambiguous manifest-only provenance
-    remains unchanged so deterministic validation can fail closed.
+    diff, then read, changed-context, and symbol-context evidence. When an evidence
+    ledger is supplied, only records marked delivered by that ledger participate in
+    binding; this prevents a selected or clipped source from outranking the body the
+    reviewer actually received. Explicit manifest claims still require an exact
+    id/hash match; ambiguous manifest-only provenance remains unchanged so
+    deterministic validation can fail closed.
     """
 
     hunks_by_file = parse_unified_diff_hunks(request.diff_text or "")
@@ -71,6 +90,9 @@ def bind_candidate_evidence(
                 hunks_by_file,
                 tool_evidence,
                 manifests,
+                evidence_ledger=evidence_ledger,
+                snapshot_id=snapshot_id,
+                revision=revision,
             )
             selected = _deterministic_unique_binding(evidence, matches)
             if selected is None:
@@ -100,19 +122,41 @@ def _trusted_bindings_for_evidence(
     hunks_by_file: dict[str, list[ParsedDiffHunk]],
     tool_evidence: list[dict[str, Any]],
     manifests: list[dict[str, Any]],
+    *,
+    evidence_ledger: EvidenceLedger | None = None,
+    snapshot_id: str = "",
+    revision: str = "",
 ) -> list[TrustedEvidenceBinding]:
     file = normalize_repo_path(evidence.file)
     line = evidence.line
     if not file or line is None:
         return []
     end_line = evidence.end_line or line
+    if evidence_ledger is not None:
+        return _ledger_bindings_for_evidence(
+            evidence,
+            evidence_ledger,
+            file=file,
+            line=line,
+            end_line=end_line,
+            snapshot_id=snapshot_id,
+            revision=revision,
+        )
     matches: set[TrustedEvidenceBinding] = set()
 
-    for hunk in hunks_by_file.get(file, []):
+    for hunk_index, hunk in enumerate(hunks_by_file.get(file, [])):
         hunk_end = hunk.new_start + max(0, hunk.new_count - 1)
-        if _ranges_overlap(line, end_line, hunk.new_start, hunk_end):
+        if _diff_hunk_is_complete(hunk) and _ranges_cover(
+            line, end_line, hunk.new_start, hunk_end
+        ):
             matches.add(
-                TrustedEvidenceBinding(kind="diff", retrieval_source="git_diff")
+                TrustedEvidenceBinding(
+                    kind="diff",
+                    retrieval_source="git_diff",
+                    artifact_id=f"diff:{file}:{hunk_index}:{hunk.new_start}",
+                    snapshot_id=snapshot_id,
+                    revision=revision,
+                )
             )
 
     for entry in tool_evidence:
@@ -128,6 +172,10 @@ def _trusted_bindings_for_evidence(
                 TrustedEvidenceBinding(
                     kind="tool",
                     retrieval_source=_canonical_tool_source(tool_name),
+                    snapshot_id=str(
+                        entry.get("snapshot_id", snapshot_id)
+                    ).strip(),
+                    revision=str(entry.get("revision", revision)).strip(),
                 )
             )
 
@@ -152,6 +200,23 @@ def _trusted_bindings_for_evidence(
                     context_manifest_id=manifest_id,
                     context_hash=str(span.get("context_hash", "")).strip(),
                     symbol_id=str(span.get("symbol_id", "")).strip(),
+                    artifact_id=str(
+                        span.get("span_id", f"{manifest_id}:{file}:{line}")
+                    ).strip(),
+                    evidence_id=str(span.get("evidence_id", "")).strip(),
+                    snapshot_id=str(
+                        span.get(
+                            "snapshot_id",
+                            manifest.get("snapshot_id", snapshot_id),
+                        )
+                    ).strip(),
+                    revision=str(
+                        span.get("revision", manifest.get("revision", revision))
+                    ).strip(),
+                    side=cast(
+                        EvidenceSide,
+                        str(span.get("side", manifest.get("side", "new")) or "new"),
+                    ),
                 )
             )
     return sorted(
@@ -173,6 +238,31 @@ def _select_binding(
 
     declared_manifest = evidence.context_manifest_id.strip()
     declared_hash = evidence.context_hash.strip()
+    declared_artifact = evidence.artifact_id.strip()
+    declared_evidence_id = evidence.evidence_id.strip()
+    if declared_evidence_id:
+        evidence_matches = [
+            item
+            for item in matches
+            if declared_evidence_id
+            in {
+                item.evidence_id,
+                item.artifact_id,
+            }
+        ]
+        return evidence_matches[0] if len(evidence_matches) == 1 else None
+    if declared_artifact:
+        artifact_matches = [
+            item
+            for item in matches
+            if declared_artifact in {
+                item.artifact_id,
+                item.context_manifest_id,
+                item.context_hash,
+            }
+        ]
+        # An artifact id is an exact identity, never a location hint.
+        return artifact_matches[0] if len(artifact_matches) == 1 else None
     if declared_hash and not declared_manifest:
         return None
     if declared_manifest:
@@ -217,6 +307,11 @@ def _apply_binding(
     evidence.retrieval_source = binding.retrieval_source
     evidence.context_manifest_id = binding.context_manifest_id
     evidence.context_hash = binding.context_hash
+    evidence.artifact_id = binding.artifact_id
+    evidence.evidence_id = binding.evidence_id
+    evidence.snapshot_id = binding.snapshot_id
+    evidence.revision = binding.revision
+    evidence.side = binding.side
     if binding.symbol_id:
         evidence.symbol_id = binding.symbol_id
     if binding.kind != "manifest":
@@ -267,7 +362,7 @@ def _tool_entry_covers(
         start = _as_int(data.get("start_line"))
         count = _as_int(data.get("line_count")) or 0
         finish = start + max(0, count - 1) if start is not None else None
-        return _ranges_overlap(line, end_line, start, finish)
+        return _ranges_cover(line, end_line, start, finish)
     if tool_name in {"get_changed_context", "changed_context"}:
         if data_path != file:
             return False
@@ -277,6 +372,18 @@ def _tool_entry_covers(
             for key in ("hunk", "file_window")
         ) or _records_cover(
             data.get("enclosing_symbols"), file, line, end_line, default_path=data_path
+        )
+    if tool_name == "grep_files":
+        return any(
+            isinstance(item, dict)
+            and normalize_repo_path(str(item.get("file_path", ""))) == file
+            and _ranges_cover(
+                line,
+                end_line,
+                _as_int(item.get("line_number")),
+                _as_int(item.get("line_number")),
+            )
+            for item in data.get("matches", [])
         )
     return any(
         _records_cover(data.get(key), file, line, end_line, default_path=data_path)
@@ -323,7 +430,7 @@ def _record_covers(
         if count is None:
             count = _as_int(record.get("line_count"))
         finish = start + max(0, (count or 1) - 1)
-    return _ranges_overlap(line, end_line, start, finish)
+    return _ranges_cover(line, end_line, start, finish)
 
 
 def _ranges_overlap(
@@ -337,6 +444,151 @@ def _ranges_overlap(
     return left_start <= (right_end or right_start) and right_start <= (
         left_end or left_start
     )
+
+
+def _ledger_bindings_for_evidence(
+    evidence: EvidenceProvenance,
+    ledger: EvidenceLedger,
+    *,
+    file: str,
+    line: int,
+    end_line: int,
+    snapshot_id: str,
+    revision: str,
+) -> list[TrustedEvidenceBinding]:
+    """Build bindings from source bodies the reviewer actually received."""
+
+    matches: set[TrustedEvidenceBinding] = set()
+    declared_manifest = evidence.context_manifest_id.strip()
+    declared_hash = evidence.context_hash.strip()
+    declared_artifact = evidence.artifact_id.strip()
+    declared_evidence_id = evidence.evidence_id.strip()
+    for record in ledger.records:
+        if record.path != file or not record.covers(line, end_line):
+            continue
+        if declared_artifact and declared_artifact not in {
+            record.artifact_id,
+            record.evidence_id,
+            *record.aliases,
+        }:
+            continue
+        if declared_evidence_id and declared_evidence_id not in {
+            record.evidence_id,
+            *record.aliases,
+        }:
+            continue
+        if snapshot_id and record.snapshot_id != snapshot_id:
+            continue
+        if revision and record.revision != revision:
+            continue
+        is_manifest = record.scope == "context_manifest"
+        if is_manifest:
+            if declared_manifest and declared_manifest not in record.aliases:
+                continue
+            if declared_hash and declared_hash not in {
+                record.content_hash,
+                record.body_hash,
+            }:
+                continue
+            matches.add(
+                TrustedEvidenceBinding(
+                    kind="manifest",
+                    retrieval_source=record.source_type,
+                    context_manifest_id=_manifest_id_from_record(
+                        record.aliases,
+                        record.artifact_id,
+                        declared_manifest,
+                    ),
+                    context_hash=record.content_hash,
+                    artifact_id=record.artifact_id,
+                    evidence_id=record.evidence_id,
+                    snapshot_id=record.snapshot_id,
+                    revision=record.revision,
+                    side=record.side,
+                )
+            )
+            continue
+        if declared_manifest or declared_hash:
+            continue
+        source = _canonical_tool_source(record.source_type)
+        if (
+            record.source_type not in _TRUSTED_TOOL_SOURCES
+            and record.source_type != "file_context"
+        ):
+            continue
+        matches.add(
+            TrustedEvidenceBinding(
+                kind="tool",
+                retrieval_source=source,
+                artifact_id=record.artifact_id,
+                evidence_id=record.evidence_id,
+                snapshot_id=record.snapshot_id,
+                revision=record.revision,
+                side=record.side,
+            )
+        )
+    return sorted(
+        matches,
+        key=lambda item: (
+            item.kind,
+            item.retrieval_source,
+            item.context_manifest_id,
+            item.context_hash,
+            item.artifact_id,
+            item.evidence_id,
+        ),
+    )
+
+
+def _manifest_id_from_record(
+    aliases: list[str],
+    artifact_id: str,
+    declared_manifest: str,
+) -> str:
+    """Recover a manifest id without treating an artifact id as one."""
+
+    if declared_manifest:
+        return declared_manifest
+    candidates = sorted(
+        value for value in aliases if value and value != artifact_id
+    )
+    return candidates[0] if len(candidates) == 1 else ""
+
+
+def _diff_hunk_is_complete(hunk: ParsedDiffHunk) -> bool:
+    """Exclude a clipped diff hunk from trusted source binding."""
+
+    if hunk.new_count <= 0:
+        return False
+    displayed_new_lines: list[int] = []
+    current = hunk.new_start
+    for raw_line in hunk.lines:
+        if raw_line.startswith("\\"):
+            continue
+        if raw_line.startswith("-") and not raw_line.startswith("---"):
+            continue
+        if current > 0:
+            displayed_new_lines.append(current)
+        current += 1
+    expected_end = hunk.new_start + hunk.new_count - 1
+    return len(displayed_new_lines) == hunk.new_count and (
+        not displayed_new_lines or displayed_new_lines[-1] == expected_end
+    )
+
+
+def _ranges_cover(
+    requested_start: int | None,
+    requested_end: int | None,
+    available_start: int | None,
+    available_end: int | None,
+) -> bool:
+    """Return true only when the observed range fully covers the citation."""
+
+    if requested_start is None or available_start is None:
+        return False
+    requested_finish = requested_end or requested_start
+    available_finish = available_end or available_start
+    return available_start <= requested_start and requested_finish <= available_finish
 
 
 def _as_int(value: Any) -> int | None:

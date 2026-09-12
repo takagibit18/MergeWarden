@@ -9,12 +9,16 @@ import random
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 import httpx
 from pydantic import BaseModel, Field, model_validator
 
 from src.analyzer.schemas import ReviewResponse
+from src.analyzer.finding_delivery import (
+    candidate_content_version,
+    relevant_evidence_context_digest,
+)
 from src.integrations.github_adapter import (
     GitHubAdvisoryPayload,
     InlineCommentCandidate,
@@ -47,6 +51,123 @@ class GitHubPublishRequest(BaseModel):
     changed_lines: dict[str, list[int]] = Field(default_factory=dict)
     dry_run: bool = True
     publish_comments: bool = True
+
+
+def validate_v3_publish_binding(response: ReviewResponse) -> tuple[bool, str]:
+    """Validate runtime-owned v3 approval material before external writes."""
+
+    issues = list(response.report.issues)
+    if response.report.schema_version == "3.0":
+        if any(not issue.is_v3_finding for issue in issues):
+            return False, "mixed_finding_contracts"
+        if response.completion_status != "complete":
+            return False, "finding_run_incomplete"
+        if response.finding_run_status != "complete":
+            return False, "finding_run_incomplete"
+        if not response.report_ready:
+            return False, "report_not_ready"
+        if not response.delivery_complete:
+            return False, "delivery_incomplete"
+        # An empty v3 report is a valid, versioned no-finding result.  It has
+        # no candidate receipt to inspect, but it still needs the same
+        # lifecycle/readiness boundary as a non-empty report.
+        if not issues:
+            return True, "v3_runtime_approval_bound_empty_report"
+    v3_issues = [issue for issue in issues if issue.is_v3_finding]
+    if not v3_issues:
+        return True, "legacy_v2_or_empty_report"
+    if len(v3_issues) != len(issues):
+        return False, "mixed_finding_contracts"
+    if not response.report_ready:
+        return False, "report_not_ready"
+
+    registrations = {
+        str(item.get("candidate_id", "")).strip(): item
+        for item in response.context.candidate_registrations
+        if isinstance(item, dict) and str(item.get("candidate_id", "")).strip()
+    }
+    for issue in v3_issues:
+        candidate_id = issue.candidate_id.strip()
+        if not candidate_id:
+            return False, "v3_candidate_identity_missing"
+        registration = registrations.get(candidate_id)
+        if registration is None:
+            return False, "v3_candidate_registration_missing"
+        current_content = registration.get("current_content")
+        if not isinstance(current_content, dict):
+            return False, "v3_candidate_content_missing"
+        try:
+            bound_issue = issue.model_validate(current_content)
+            current_version = candidate_content_version(bound_issue)
+        except Exception:  # noqa: BLE001
+            return False, "v3_candidate_content_invalid"
+        if str(registration.get("candidate_content_version", "")) != current_version:
+            return False, "v3_registry_version_inconsistent"
+        if candidate_content_version(issue) != current_version:
+            return False, "v3_report_version_mismatch"
+        if (
+            issue.location != bound_issue.location
+            or issue.contract_payload() != bound_issue.contract_payload()
+            or issue.finding_id != bound_issue.finding_id
+        ):
+            return False, "v3_report_content_changed"
+        if str(registration.get("status", "")) not in {"verified", "published"}:
+            return False, "v3_integrity_not_verified"
+        if str(registration.get("validated_content_version", "")) != current_version:
+            return False, "v3_integrity_binding_missing"
+        receipts = registration.get("semantic_receipts", [])
+        if not isinstance(receipts, list):
+            return False, "v3_semantic_receipts_missing"
+        matching = [
+            item
+            for item in receipts
+            if isinstance(item, dict)
+            and str(item.get("content_version", "")) == current_version
+        ]
+        if len(matching) != 1:
+            return False, "v3_semantic_receipt_missing_or_ambiguous"
+        receipt = matching[0]
+        if (
+            str(receipt.get("verdict", "")) != "accept"
+            or str(receipt.get("status", "")) != "completed"
+            or receipt.get("severity_correction") is not None
+        ):
+            return False, "v3_semantic_receipt_not_accept"
+        if not all(
+            str(receipt.get(field, "")).strip()
+            for field in (
+                "input_digest",
+                "request_hash",
+                "response_digest",
+                "evidence_context_digest",
+            )
+        ):
+            return False, "v3_semantic_receipt_input_binding_missing"
+        if not str(receipt.get("provider_request_id", "")).strip():
+            return False, "v3_semantic_receipt_provider_binding_missing"
+        if str(
+            registration.get("semantic_validated_evidence_context_digest", "")
+        ) != str(receipt.get("evidence_context_digest", "")):
+            return False, "v3_semantic_receipt_evidence_binding_missing"
+        evidence_refs = set(issue.evidence_refs)
+        investigation_refs = receipt.get("investigation_evidence_refs", [])
+        if isinstance(investigation_refs, list):
+            evidence_refs.update(
+                str(item).strip() for item in investigation_refs if str(item).strip()
+            )
+        current_evidence_digest = relevant_evidence_context_digest(
+            response.context.evidence_ledger,
+            evidence_refs,
+            snapshot_id=response.context.evidence_snapshot_id,
+            revision=response.context.evidence_revision,
+        )
+        if current_evidence_digest != str(receipt.get("evidence_context_digest", "")):
+            return False, "v3_semantic_receipt_evidence_changed"
+        if str(registration.get("semantic_verdict", "")) != "accept":
+            return False, "v3_candidate_semantic_disposition_missing"
+        if str(registration.get("semantic_validated_content_version", "")) != current_version:
+            return False, "v3_candidate_semantic_version_missing"
+    return True, "v3_runtime_approval_bound"
 
 
 class CommentMetadata(BaseModel):
@@ -195,7 +316,7 @@ class GitHubApiClient:
         )
         self._max_attempts = max_attempts
         self._sleep = sleep
-        self._random_source = random_source
+        self._random_source: Callable[[], float] = random_source
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -338,7 +459,8 @@ class GitHubApiClient:
         raise RuntimeError(f"GitHub API {normalized_method} {path} exhausted retries")
 
     def _backoff_seconds(self, attempt: int) -> float:
-        return min(4.0, 0.5 * (2**attempt)) + (0.1 * self._random_source())
+        jitter = cast(float, self._random_source())
+        return min(4.0, 0.5 * (2.0**attempt)) + (0.1 * jitter)
 
     @staticmethod
     def _raise_api_error(resp: httpx.Response, path: str) -> None:
@@ -414,6 +536,11 @@ class GitHubPublisher:
         """Publish or dry-run the advisory."""
         if request.dry_run:
             return self.build_publish_plan(request)
+        approved, reason = validate_v3_publish_binding(request.response)
+        if not approved:
+            raise ValueError(
+                "external publication is blocked by runtime approval binding: " + reason
+            )
         existing_comments = (
             await self._client.list_review_comments(
                 request.owner_repo,

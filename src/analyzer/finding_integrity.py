@@ -9,13 +9,22 @@ It intentionally does not decide whether the reported behavior is a bug.
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
+from uuid import uuid4
 
 from src.analyzer.diff_lines import changed_new_lines_by_file
+from src.analyzer.evidence_ledger import EvidenceLedger
 from src.analyzer.evidence_binding import bind_candidate_evidence, bind_issue_candidate_id
-from src.analyzer.finding_schema import normalize_repo_path
+from src.analyzer.finding_delivery import (
+    CandidateRegistry,
+    candidate_content_version,
+    evidence_context_digest,
+)
+from src.analyzer.finding_contract import canonical_contract_gaps
+from src.analyzer.finding_schema import EvidenceSide, normalize_repo_path
 from src.analyzer.location import LocationParseResult, normalize_location
 from src.analyzer.output_formatter import ReviewIssue, ReviewReport, Severity
 from src.analyzer.schemas import FindingCandidate, ReviewRequest
@@ -28,34 +37,134 @@ from src.analyzer.verifier_context import (
 )
 
 _RISK_SEVERITIES = {Severity.CRITICAL, Severity.WARNING}
+RepairFailureClass = Literal[
+    "deterministic_normalization",
+    "contract_gap",
+    "source_gap",
+    "reference_error",
+    "untrusted_identity",
+]
+
+
+def classify_integrity_failure(
+    failure: IntegrityFailure | str,
+    *,
+    field: str = "",
+) -> RepairFailureClass:
+    """Map an objective failure to the next safe state transition."""
+
+    code = failure.code if isinstance(failure, IntegrityFailure) else str(failure)
+    failure_field = failure.field if isinstance(failure, IntegrityFailure) else field
+    if code in {"evidence_not_observed", "evidence_incomplete", "verifier_context_budget_exhausted"}:
+        return "source_gap"
+    if code in {
+        "support_reference_missing",
+        "support_reference_unresolved",
+        "support_reference_undelivered",
+        "reference_not_delivered",
+        "evidence_binding_missing",
+    }:
+        if failure_field.endswith(".statement") or failure_field.endswith("statement"):
+            return "contract_gap"
+        return "reference_error"
+    if code in {
+        "finding_contract_incomplete",
+        "support_role_missing",
+        "role_claim_missing",
+        "changed_anchor_missing",
+        "finding_structure_invalid",
+        "finding_contract_invalid",
+    }:
+        return "contract_gap"
+    if code in {"location_invalid", "location_line_missing"} and failure_field == "primary_anchor":
+        return "deterministic_normalization"
+    if code in {
+        "candidate_binding_mismatch",
+        "candidate_binding_missing",
+        "repository_path_invalid",
+        "repository_path_missing",
+        "location_invalid",
+        "location_line_missing",
+        "location_line_out_of_range",
+        "location_unreadable",
+        "evidence_identity_mismatch",
+    }:
+        return "untrusted_identity"
+    return "reference_error"
 
 
 def build_candidates(
     report: ReviewReport,
     *,
     iteration: int,
+    registry: CandidateRegistry | None = None,
+    register: bool = True,
+    include_non_risk: bool = False,
 ) -> list[FindingCandidate]:
-    """Build stable risk candidates for the integrity stage."""
+    """Build runtime-registered risk candidates for the integrity stage.
+
+    ``registry`` is the authoritative identity store for orchestrated runs.
+    The optional argument keeps standalone legacy callers source-compatible;
+    those callers still receive a program-generated candidate id.
+    """
 
     candidates: list[FindingCandidate] = []
     seen: set[str] = set()
+    if registry is not None and register:
+        registry.register_report(
+            report,
+            iteration=iteration,
+            include_non_risk=include_non_risk,
+        )
     for source_issue_index, issue in enumerate(report.issues):
-        if issue.severity not in _RISK_SEVERITIES:
+        if not include_non_risk and issue.severity not in _RISK_SEVERITIES:
             continue
-        candidate_id = _candidate_id(issue)
-        if candidate_id in seen:
-            continue
+        registration = (
+            registry.registration(issue.candidate_id)
+            if registry is not None and issue.candidate_id.strip()
+            else None
+        )
+        if registry is not None and issue.target_candidate_id.strip():
+            # Repair payloads are only materialized after the merge validator
+            # has checked their target.  Treating one as a fresh registration
+            # here would silently make a repair target unbound.
+            candidate_id = issue.candidate_id.strip()
+        else:
+            candidate_id = (
+                registration.candidate_id
+                if registration is not None
+                else _runtime_candidate_id(issue, seen)
+            )
         seen.add(candidate_id)
+        if not issue.finding_id:
+            issue.finding_id = (
+                registration.finding_id
+                if registration is not None
+                else "F-" + candidate_id[len("cand_") :].upper()
+            )
         bound_issue = bind_issue_candidate_id(issue, candidate_id)
         issue.candidate_id = candidate_id
         for evidence in issue.all_evidence():
             evidence.candidate_id = candidate_id
-        if not issue.finding_id:
-            issue.finding_id = "F-" + candidate_id[:12].upper()
         bound_issue.finding_id = issue.finding_id
         candidates.append(
             FindingCandidate(
                 candidate_id=candidate_id,
+                logical_identity_hash=_logical_identity_hash(
+                    issue, candidate_id=candidate_id
+                ),
+                content_hash=(
+                    registration.candidate_content_version
+                    if registration is not None
+                    and not issue.target_candidate_id.strip()
+                    else _candidate_content_hash(issue)
+                ),
+                candidate_content_version=(
+                    registration.candidate_content_version
+                    if registration is not None
+                    and not issue.target_candidate_id.strip()
+                    else candidate_content_version(issue)
+                ),
                 issue=bound_issue,
                 claim=issue.suggestion.strip(),
                 evidence_locations=(
@@ -68,15 +177,81 @@ def build_candidates(
     return candidates
 
 
-def _candidate_id(issue: ReviewIssue) -> str:
-    normalized = "\n".join(
-        (
-            issue.severity.value,
-            issue.location.strip().replace("\\", "/"),
-            issue.evidence.strip(),
-            issue.suggestion.strip(),
+def _runtime_candidate_id(issue: ReviewIssue, seen: set[str]) -> str:
+    """Return the program-owned id created at first candidate registration."""
+
+    existing = str(issue.candidate_id or "").strip()
+    if existing.startswith("cand_") and existing not in seen:
+        return existing
+    while True:
+        candidate_id = "cand_" + uuid4().hex[:20]
+        if candidate_id not in seen:
+            return candidate_id
+
+
+def _logical_identity_hash(issue: ReviewIssue, *, candidate_id: str = "") -> str:
+    """Hash the runtime identity, never mutable finding content.
+
+    The runtime candidate id is created once and carried on the issue before a
+    repair round.  It is therefore the only safe identity input here: severity,
+    anchor text, finding labels, evidence, and suggestions are all mutable
+    versions of the same candidate and must not silently retarget repair.
+    """
+
+    logical = str(candidate_id or issue.candidate_id or "").strip()
+    if not logical:
+        # This fallback is only for standalone callers that have not registered
+        # a candidate yet.  ``build_candidates`` always supplies the runtime id.
+        anchor = (
+            issue.primary_anchor.location
+            if issue.primary_anchor is not None
+            else issue.location
         )
-    )
+        logical = anchor.strip().replace("\\", "/")
+    return hashlib.sha256(logical.encode("utf-8")).hexdigest()[:16]
+
+
+def _candidate_content_hash(issue: ReviewIssue) -> str:
+    """Hash the mutable finding version without runtime provenance fields."""
+
+    payload = issue.model_dump(mode="json")
+    for key in (
+        "candidate_id",
+        "finding_id",
+        "target_candidate_id",
+        "repair_status",
+        "candidate_content_version",
+        "integrity_status",
+        "root_cause_id",
+        "context_manifest_id",
+        "context_hash",
+        "repair_reason",
+        "repair_patch",
+    ):
+        payload.pop(key, None)
+    for field in (
+        "cause_evidence",
+        "contract_evidence",
+        "trigger_evidence",
+        "impact_evidence",
+    ):
+        items = payload.get(field)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            for key in (
+                "candidate_id",
+                "artifact_id",
+                "snapshot_id",
+                "revision",
+                "context_manifest_id",
+                "retrieval_source",
+                "context_hash",
+            ):
+                item.pop(key, None)
+    normalized = json.dumps(payload, ensure_ascii=True, sort_keys=True, default=str)
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
 
 
@@ -94,6 +269,7 @@ class IntegrityFailure:
     retrieval_source: str = ""
     context_manifest_id: str = ""
     manifest_hash_prefix: str = ""
+    reference_id: str = ""
 
     def as_detail(self) -> dict[str, Any]:
         """Return a stable structured representation for event logs and reports."""
@@ -109,6 +285,7 @@ class IntegrityFailure:
             "retrieval_source": self.retrieval_source,
             "context_manifest_id": self.context_manifest_id,
             "manifest_hash_prefix": self.manifest_hash_prefix,
+            "reference_id": self.reference_id,
         }
 
 
@@ -119,6 +296,25 @@ class FindingIntegrityResult:
     candidate_id: str
     passed: bool
     failures: tuple[IntegrityFailure, ...] = ()
+    content_version: str = ""
+    evidence_context_digest: str = ""
+
+    @property
+    def status(self) -> Literal["verified", "needs_repair", "invalid"]:
+        """Expose the internal tri-state without changing the legacy ``passed`` flag."""
+
+        if self.passed:
+            return "verified"
+        # ``invalid`` is reserved for failures that cannot be repaired without
+        # guessing runtime identity or source scope.  Contract/reference gaps
+        # remain candidates for the bounded repair loop even when an older
+        # implementation would have grouped them under one invalid bucket.
+        if any(
+            classify_integrity_failure(failure) == "untrusted_identity"
+            for failure in self.failures
+        ):
+            return "invalid"
+        return "needs_repair"
 
 
 @dataclass(frozen=True)
@@ -127,6 +323,7 @@ class IntegrityGuardResult:
 
     results: tuple[FindingIntegrityResult, ...] = ()
     bound_candidates: tuple[FindingCandidate, ...] = ()
+    evidence_context_digest: str = ""
 
     @property
     def checked_count(self) -> int:
@@ -147,6 +344,26 @@ class IntegrityGuardResult:
     @property
     def rejected_candidate_ids(self) -> frozenset[str]:
         return frozenset(item.candidate_id for item in self.results if not item.passed)
+
+    @property
+    def verified_candidate_ids(self) -> frozenset[str]:
+        return frozenset(
+            item.candidate_id for item in self.results if item.status == "verified"
+        )
+
+    @property
+    def needs_repair_candidate_ids(self) -> frozenset[str]:
+        return frozenset(
+            item.candidate_id
+            for item in self.results
+            if item.status == "needs_repair"
+        )
+
+    @property
+    def invalid_candidate_ids(self) -> frozenset[str]:
+        return frozenset(
+            item.candidate_id for item in self.results if item.status == "invalid"
+        )
 
     @property
     def failures(self) -> dict[str, tuple[IntegrityFailure, ...]]:
@@ -181,11 +398,20 @@ class FindingIntegrityGuard:
         context_manifests: list[dict[str, Any]] | None = None,
         candidate_context: list[dict[str, Any]] | None = None,
         context_mode: str = "graph_hybrid",
+        evidence_ledger: EvidenceLedger | None = None,
+        snapshot_id: str = "",
+        revision: str = "",
     ) -> IntegrityGuardResult:
         """Validate candidates against repository and retained run context."""
 
         if not candidates:
             return IntegrityGuardResult()
+
+        validation_context_digest = evidence_context_digest(
+            evidence_ledger.to_payload() if evidence_ledger is not None else [],
+            snapshot_id=snapshot_id,
+            revision=revision,
+        )
 
         evidence = tool_evidence or []
         manifests = context_manifests or []
@@ -198,6 +424,9 @@ class FindingIntegrityGuard:
             request,
             evidence,
             context_manifests=manifests,
+            evidence_ledger=evidence_ledger,
+            snapshot_id=snapshot_id,
+            revision=revision,
         )
         contexts = (
             candidate_context
@@ -225,6 +454,9 @@ class FindingIntegrityGuard:
                 repo_root=self._root_for(request),
                 changed=changed,
                 context=contexts_by_id.get(candidate.candidate_id),
+                evidence_ledger=evidence_ledger,
+                snapshot_id=snapshot_id,
+                revision=revision,
             )
             prepared_candidates.append(prepared)
             preparation_failures[candidate.candidate_id] = failures
@@ -235,10 +467,14 @@ class FindingIntegrityGuard:
                 repo_root=self._root_for(request),
                 changed=changed,
                 context=contexts_by_id.get(candidate.candidate_id),
+                evidence_ledger=evidence_ledger,
                 initial_failures=(
                     *binding_failures.get(candidate.candidate_id, ()),
                     *preparation_failures.get(candidate.candidate_id, ()),
                 ),
+                validation_context_digest=validation_context_digest,
+                snapshot_id=snapshot_id,
+                revision=revision,
             )
             for candidate in prepared_candidates
         )
@@ -249,9 +485,25 @@ class FindingIntegrityGuard:
                     "verification_status": (
                         "accepted"
                         if result_by_id.get(candidate.candidate_id, None)
-                        and result_by_id[candidate.candidate_id].passed
+                        and result_by_id[candidate.candidate_id].status == "verified"
                         else "verification_blocked"
-                    )
+                        if result_by_id.get(candidate.candidate_id, None)
+                        else "verification_blocked"
+                    ),
+                    "integrity_status": (
+                        result_by_id[candidate.candidate_id].status
+                        if result_by_id.get(candidate.candidate_id, None)
+                        else "invalid"
+                    ),
+                    "issue": candidate.issue.model_copy(
+                        update={
+                            "integrity_status": (
+                                result_by_id[candidate.candidate_id].status
+                                if result_by_id.get(candidate.candidate_id, None)
+                                else "invalid"
+                            )
+                        }
+                    ),
                 }
             )
             for candidate in prepared_candidates
@@ -259,6 +511,7 @@ class FindingIntegrityGuard:
         return IntegrityGuardResult(
             results=results,
             bound_candidates=finalized_candidates,
+            evidence_context_digest=validation_context_digest,
         )
 
     def _prepare_candidate_evidence(
@@ -269,10 +522,30 @@ class FindingIntegrityGuard:
         repo_root: Path,
         changed: dict[str, set[int]],
         context: dict[str, Any] | None,
+        evidence_ledger: EvidenceLedger | None,
+        snapshot_id: str = "",
+        revision: str = "",
     ) -> tuple[FindingCandidate, tuple[IntegrityFailure, ...]]:
         """Drop invalid optional structured evidence before final publication."""
 
         issue = candidate.issue
+        if isinstance(issue, ReviewIssue) and issue.is_v3_finding:
+            failures: list[IntegrityFailure] = []
+            for index, evidence_item in enumerate(issue.evidence_provenance):
+                failures.extend(
+                    self._validate_evidence_item(
+                        evidence_item,
+                        request=request,
+                        repo_root=repo_root,
+                        changed=changed,
+                        context=context,
+                        evidence_ledger=evidence_ledger,
+                        field=f"evidence_refs[{index}]",
+                        snapshot_id=snapshot_id,
+                        revision=revision,
+                    )
+                )
+            return candidate, tuple(failures)
         if not (
             isinstance(issue, ReviewIssue)
             and issue.is_structured_hypothesis
@@ -301,10 +574,28 @@ class FindingIntegrityGuard:
                     repo_root=repo_root,
                     changed=changed,
                     context=context,
+                    evidence_ledger=evidence_ledger,
                     field=f"{role}_evidence[{index}]",
+                    snapshot_id=snapshot_id,
+                    revision=revision,
                 )
                 if not failures:
                     valid_items.append(evidence_item)
+                elif any(
+                    failure.code
+                    in {
+                        "support_reference_unresolved",
+                        "support_reference_undelivered",
+                    }
+                    for failure in failures
+                ):
+                    # Retain the unresolved reference for one candidate-level
+                    # diagnostic. It is not source evidence and can never pass
+                    # publication, but dropping it would create a misleading
+                    # cascade of empty-role failures.
+                    valid_items.append(evidence_item)
+                    if role in required_roles:
+                        required_failures.extend(failures)
                 elif role in required_roles:
                     required_failures.extend(failures)
             retained[f"{role}_evidence"] = valid_items
@@ -322,9 +613,34 @@ class FindingIntegrityGuard:
         repo_root: Path,
         changed: dict[str, set[int]],
         context: dict[str, Any] | None,
+        evidence_ledger: EvidenceLedger | None,
         field: str,
+        snapshot_id: str = "",
+        revision: str = "",
     ) -> list[IntegrityFailure]:
         """Validate one evidence role and return failures with full provenance."""
+
+        resolution_status = str(
+            getattr(evidence_item, "resolution_status", "resolved") or "resolved"
+        ).strip().lower()
+        reference_id = str(getattr(evidence_item, "reference_id", "") or "").strip()
+        if resolution_status in {"unresolved", "ambiguous", "undelivered"}:
+            label = {
+                "undelivered": "undelivered",
+                "ambiguous": "ambiguous",
+            }.get(resolution_status, "unresolved")
+            return [
+                IntegrityFailure(
+                    (
+                        "support_reference_undelivered"
+                        if resolution_status == "undelivered"
+                        else "support_reference_unresolved"
+                    ),
+                    f"Evidence reference is {label} in the delivered catalog; choose an exact legal catalog id.",
+                    field=f"{field}.evidence_ref",
+                    reference_id=reference_id,
+                )
+            ]
 
         evidence_location = self._evidence_location(evidence_item)
         failures = _decorate_failures(
@@ -337,6 +653,30 @@ class FindingIntegrityGuard:
             evidence=evidence_item,
         )
         metadata = _evidence_failure_metadata(evidence_item)
+        expected_identity = {
+            "snapshot_id": str(snapshot_id or "").strip(),
+            "revision": str(revision or "").strip(),
+        }
+        if any(expected_identity.values()):
+            for identity_field, expected_value in expected_identity.items():
+                if not expected_value:
+                    continue
+                actual_value = str(
+                    getattr(evidence_item, identity_field, "") or ""
+                ).strip()
+                if actual_value != expected_value:
+                    failures.append(
+                        IntegrityFailure(
+                            "evidence_identity_mismatch",
+                            (
+                                "Evidence provenance does not match the expected "
+                                f"run {identity_field}."
+                            ),
+                            field=f"{field}.{identity_field}",
+                            location=evidence_item.location,
+                            **metadata,
+                        )
+                    )
         if not evidence_item.retrieval_source:
             failures.append(
                 IntegrityFailure(
@@ -347,7 +687,7 @@ class FindingIntegrityGuard:
                     **metadata,
                 )
             )
-        if not evidence_item.statement.strip():
+        if not field.startswith("evidence_refs[") and not evidence_item.statement.strip():
             failures.append(
                 IntegrityFailure(
                     "evidence_binding_missing",
@@ -357,10 +697,89 @@ class FindingIntegrityGuard:
                     **metadata,
                 )
             )
-        if evidence_location.valid and not provenance_in_candidate_context(
-            context, evidence_item
-        ):
+        if evidence_ledger is not None:
+            ledger_records = [
+                record
+                for record in evidence_ledger.records
+                if record.path == evidence_location.path
+                and record.side
+                == cast(
+                    EvidenceSide,
+                    str(getattr(evidence_item, "side", "new") or "new"),
+                )
+                and record.covers(
+                    evidence_location.line or 0,
+                    evidence_location.end_line or evidence_location.line or 0,
+                )
+            ]
+            missing_identity = [
+                field_name
+                for field_name in ("artifact_id", "snapshot_id", "revision")
+                if not str(getattr(evidence_item, field_name, "") or "").strip()
+                and (
+                    field_name == "artifact_id"
+                    or any(
+                        str(getattr(record, field_name, "") or "").strip()
+                        for record in ledger_records
+                    )
+                )
+            ]
+            if missing_identity:
+                failures.append(
+                    IntegrityFailure(
+                        "evidence_identity_mismatch",
+                        "Evidence is missing system-bound artifact, snapshot, or revision identity.",
+                        field=f"{field}.{missing_identity[0]}",
+                        location=evidence_item.location,
+                        **metadata,
+                    )
+                )
+        observed = evidence_location.valid and (
+            evidence_ledger.covers(
+                evidence_location.path or "",
+                evidence_location.line or 0,
+                evidence_location.end_line or evidence_location.line,
+                side=cast(
+                    EvidenceSide,
+                    str(getattr(evidence_item, "side", "new") or "new"),
+                ),
+                artifact_id=str(getattr(evidence_item, "artifact_id", "") or "").strip(),
+                snapshot_id=str(
+                    getattr(evidence_item, "snapshot_id", "") or ""
+                ).strip(),
+                revision=str(getattr(evidence_item, "revision", "") or "").strip(),
+                content_hash=str(
+                    getattr(evidence_item, "context_hash", "") or ""
+                ).strip(),
+            )
+            if evidence_ledger is not None
+            else provenance_in_candidate_context(context, evidence_item)
+        )
+        if evidence_location.valid and not observed:
             evidence_role = field.partition("_evidence")[0]
+            base_observed = bool(
+                evidence_ledger is not None
+                and evidence_ledger.covers(
+                    evidence_location.path or "",
+                    evidence_location.line or 0,
+                    evidence_location.end_line or evidence_location.line,
+                    side=cast(
+                        EvidenceSide,
+                        str(getattr(evidence_item, "side", "new") or "new"),
+                    ),
+                )
+            )
+            if base_observed and evidence_ledger is not None:
+                failures.append(
+                    IntegrityFailure(
+                        "evidence_identity_mismatch",
+                        "Evidence path and range were delivered, but its explicit artifact, snapshot, revision, or hash does not match this run.",
+                        field=f"{field}.identity",
+                        location=evidence_item.location,
+                        **metadata,
+                    )
+                )
+                return failures
             budget_exhausted = context_budget_exhausted_for_evidence(
                 context,
                 evidence_item,
@@ -394,7 +813,11 @@ class FindingIntegrityGuard:
         repo_root: Path,
         changed: dict[str, set[int]],
         context: dict[str, Any] | None,
+        evidence_ledger: EvidenceLedger | None,
         initial_failures: tuple[IntegrityFailure, ...],
+        validation_context_digest: str = "",
+        snapshot_id: str = "",
+        revision: str = "",
     ) -> FindingIntegrityResult:
         issue = candidate.issue
         failures: list[IntegrityFailure] = list(initial_failures)
@@ -416,7 +839,44 @@ class FindingIntegrityGuard:
                     field="issue",
                 )
             )
-            return FindingIntegrityResult(candidate_id, False, tuple(failures))
+            return FindingIntegrityResult(
+                candidate_id,
+                False,
+                tuple(failures),
+                content_version=candidate.candidate_content_version,
+                evidence_context_digest=validation_context_digest,
+            )
+
+        for gap in canonical_contract_gaps(
+            issue,
+            strict=issue.is_structured_hypothesis
+            and issue.severity in _RISK_SEVERITIES
+            and (evidence_ledger is not None or bool(issue.supports)),
+        ):
+            gap_code = gap.code
+            gap_message = gap.message
+            if (
+                gap.code == "evidence_incomplete"
+                and evidence_ledger is not None
+                and _issue_anchor_is_delivered(issue, evidence_ledger)
+            ):
+                # The source is present; what is absent is the role-specific
+                # claim/envelope. Keep this in the contract class so source
+                # retrieval is not requested again for an already delivered
+                # body.
+                gap_code = "role_claim_missing"
+                gap_message = (
+                    "The cited source is already delivered, but the finding is "
+                    f"missing the {gap.field} role claim."
+                )
+            failures.append(
+                IntegrityFailure(
+                    gap_code,
+                    gap_message,
+                    field=gap.field,
+                    location=issue.location,
+                )
+            )
 
         if issue.candidate_id and issue.candidate_id != candidate_id:
             failures.append(
@@ -454,6 +914,7 @@ class FindingIntegrityGuard:
                     context=context,
                     changed=changed,
                     field="location",
+                    evidence_ledger=evidence_ledger,
                 )
             )
 
@@ -474,6 +935,7 @@ class FindingIntegrityGuard:
                         context=context,
                         changed=changed,
                         field="primary_anchor",
+                        evidence_ledger=evidence_ledger,
                     )
                 )
 
@@ -495,6 +957,7 @@ class FindingIntegrityGuard:
                         context=context,
                         changed=changed,
                         field=field,
+                        evidence_ledger=evidence_ledger,
                     )
                 )
 
@@ -512,11 +975,34 @@ class FindingIntegrityGuard:
                         repo_root=repo_root,
                         changed=changed,
                         context=context,
+                        evidence_ledger=evidence_ledger,
                         field=f"{role}_evidence[{index}]",
+                        snapshot_id=snapshot_id,
+                        revision=revision,
                     )
                 )
 
-        if issue.is_structured_hypothesis and issue.severity in _RISK_SEVERITIES:
+        if issue.is_v3_finding:
+            for index, evidence_item in enumerate(issue.evidence_provenance):
+                failures.extend(
+                    self._validate_evidence_item(
+                        evidence_item,
+                        request=request,
+                        repo_root=repo_root,
+                        changed=changed,
+                        context=context,
+                        evidence_ledger=evidence_ledger,
+                        field=f"evidence_refs[{index}]",
+                        snapshot_id=snapshot_id,
+                        revision=revision,
+                    )
+                )
+
+        if (
+            issue.is_structured_hypothesis
+            and not issue.is_v3_finding
+            and issue.severity in _RISK_SEVERITIES
+        ):
             required_roles = {"cause", "contract"}
             if issue.trigger.strip():
                 required_roles.add("trigger")
@@ -524,10 +1010,21 @@ class FindingIntegrityGuard:
                 required_roles.add("impact")
             for role in sorted(required_roles):
                 if not getattr(issue, f"{role}_evidence"):
+                    role_gap_code = (
+                        "role_claim_missing"
+                        if evidence_ledger is not None
+                        and _issue_anchor_is_delivered(issue, evidence_ledger)
+                        else "evidence_incomplete"
+                    )
                     failures.append(
                         IntegrityFailure(
-                            "evidence_incomplete",
-                            f"Structured risk finding is missing {role} evidence.",
+                            role_gap_code,
+                            (
+                                "The cited source is already delivered, but the finding "
+                                f"is missing the {role}_evidence role claim."
+                                if role_gap_code == "role_claim_missing"
+                                else f"Structured risk finding is missing {role} evidence."
+                            ),
                             field=f"{role}_evidence",
                             location=issue.location,
                             **_location_failure_metadata(display),
@@ -546,10 +1043,14 @@ class FindingIntegrityGuard:
                     )
                 )
 
-        unique_failures = tuple(
-            dict.fromkeys(failures)
+        unique_failures = tuple(dict.fromkeys(failures))
+        return FindingIntegrityResult(
+            candidate_id,
+            not unique_failures,
+            unique_failures,
+            content_version=candidate.candidate_content_version,
+            evidence_context_digest=validation_context_digest,
         )
-        return FindingIntegrityResult(candidate_id, not unique_failures, unique_failures)
 
     @staticmethod
     def _candidate_binding_failures(
@@ -742,12 +1243,20 @@ class FindingIntegrityGuard:
         context: dict[str, Any] | None,
         changed: dict[str, set[int]],
         field: str,
+        evidence_ledger: EvidenceLedger | None = None,
     ) -> list[IntegrityFailure]:
         if not location.valid or location.line is None:
             return []
         if _location_intersects_changed_lines(location, changed):
             return []
-        if location_in_candidate_context(context, location):
+        if evidence_ledger is not None:
+            if evidence_ledger.covers(
+                location.path or "",
+                location.line,
+                location.end_line or location.line,
+            ):
+                return []
+        elif location_in_candidate_context(context, location):
             return []
         budget_exhausted = context_budget_exhausted_for_location(context, location)
         return [
@@ -791,6 +1300,9 @@ def _evidence_failure_metadata(evidence: Any) -> dict[str, Any]:
             getattr(evidence, "context_manifest_id", "") or ""
         ).strip(),
         "manifest_hash_prefix": digest[:12],
+        "reference_id": str(
+            getattr(evidence, "reference_id", "") or ""
+        ).strip(),
     }
 
 
@@ -835,6 +1347,27 @@ def _location_intersects_changed_lines(
         line in changed.get(location.path, set())
         for line in range(location.line, end_line + 1)
     )
+
+
+def _issue_anchor_is_delivered(issue: ReviewIssue, ledger: EvidenceLedger) -> bool:
+    """Tell role/claim omissions apart from genuinely missing source bodies."""
+
+    locations: list[LocationParseResult] = []
+    display = normalize_location(issue.location)
+    if display.valid and display.line is not None:
+        locations.append(display)
+    if issue.primary_anchor is not None:
+        anchor = normalize_location(issue.primary_anchor.location)
+        if anchor.valid and anchor.line is not None:
+            locations.append(anchor)
+    for location in locations:
+        if ledger.covers(
+            location.path or "",
+            location.line or 0,
+            location.end_line or location.line,
+        ):
+            return True
+    return False
 
 
 def _line_count(path: Path) -> int:

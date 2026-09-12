@@ -173,6 +173,9 @@ class ArtifactStore:
 
 
 def _jsonable(payload: Any) -> Any:
+    contract_payload = getattr(payload, "contract_payload", None)
+    if callable(contract_payload):
+        return _jsonable(contract_payload())
     if hasattr(payload, "model_dump"):
         return payload.model_dump(mode="json")
     if isinstance(payload, dict):
