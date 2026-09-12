@@ -1,5 +1,7 @@
 # Architecture
 
+设计选择与被替代方案见[长期设计记录](design_decisions.md)，尚需补证据或决策的事项见[维护待办](maintenance_backlog.md)。历史版本段落须结合下方 v3 边界阅读，不作为当前默认配置的唯一来源。
+
 ## Layered Architecture
 
 ```

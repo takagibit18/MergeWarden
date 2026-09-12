@@ -1,5 +1,7 @@
 # Error Log
 
+> 历史记录按当时版本解释，旧文件名是溯源标识，不是现行文档链接；原文可按 [清理审计](documentation_cleanup_audit.md) 的固定提交恢复。当前设计与待办分别见 [设计记录](design_decisions.md)、[维护待办](maintenance_backlog.md)。新记录只保留可复用根因与验证，避免重复命令流水。
+
 记录开发过程中的错误与对应解决方式，按时间倒序追加。
 
 | Date | Module | Error | Cause | Fix |

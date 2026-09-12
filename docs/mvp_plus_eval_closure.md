@@ -1,5 +1,7 @@
 # MVP+ Eval Closure Baseline
 
+> 历史证据：本文仅描述 2026-05-18 的 MVP+ 样本和数值门，不是当前生产或 CI 基线。下文 current / remaining 均指当时；现行入口见 [eval/README](../eval/README.md)，实现状态见 [README](../README.md)。
+
 This note records the May 18, 2026 golden-eval closure point used as the
 current MVP+ quality baseline.
 

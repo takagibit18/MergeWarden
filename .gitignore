@@ -23,6 +23,10 @@ ENV/
 .idea/
 .vscode/
 .cursor/
+# Personal assistant permissions and interview notes
+/.claude/settings.json
+/.claude/settings.local.json
+/mergewarden_agent_interview_qa.md
 *.swp
 *.swo
 *~

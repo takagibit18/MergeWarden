@@ -1,5 +1,7 @@
 # Graph A/B 与 verifier 根因排查及实施方案
 
+> 历史诊断与分阶段提案（2026-09-12 分类）：公共证据/请求/修复能力已有后续实现，原 PR 分支和步骤不可直接重跑；Graph 因果包、路由及 held-out 门保留为待核验提案。现行规则见 [共享契约](shared_contracts.md)，待确认工作见 [维护待办](maintenance_backlog.md)。
+
 日期：2026-09-05。仓库：`takagibit18/MergeWarden`。审计版本：`7a988a8d6dd69161f9678a2d10d34beb7739c27a`，分支 `fix/verifier-p0-p1-closure`。
 
 版本边界：本文审计对象为 `fix/verifier-p0-p1-closure` 分支的上述提交，比本 PR 的 `main` 基线 `7e5a3ec01b85f56e98a538f118846f55851620ac` 多 21 个近期 Graph/verifier/eval 调优提交。本 PR 同时上传这些实现提交、排查方案和文档索引；代码行号、复现结果与故障归因均对应审计版本，后续修复仍按第 5 节拆分推进。

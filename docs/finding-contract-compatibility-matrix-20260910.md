@@ -2,7 +2,7 @@
 
 日期：2026-09-10
 
-后续更新：本矩阵的“Graph A/B pilot v2-only”记录已由 `docs/finding-delivery-python-three-v3-20260910.md` 所述小范围适配取代。pilot 现支持兼容 matcher 下的 v3 review 配对生命周期，仍拒绝不兼容 matcher 和 v3 debug；生产 root-cause consolidation 的 v3 隔离不变。
+2026-09-12 文档校准：pilot 支持兼容 matcher 下的 v3 review 配对生命周期，仍拒绝不兼容 matcher 和 v3 debug；生产 root-cause consolidation 的 v3 隔离不变。实现与回归见 [graph_ab_pilot.py](../eval/graph_ab_pilot.py)、[test_graph_ab_v3.py](../tests/test_graph_ab_v3.py) 和 [test_v3_closeout_eval.py](../tests/test_v3_closeout_eval.py)。本次仅统一既有行为描述，不重新运行真实模型实验。
 范围：版本传播、数据适配、消费语义、验收覆盖。未调用真实模型、付费 provider 或真实发布接口；没有修改原始 finding、gold、receipt、.env 或全局 Git 配置。Harness v3 仍保持非默认状态。
 
 ## 先固定各版本轴
@@ -88,7 +88,7 @@
 
 - v3 risk finding 的 root-cause consolidation 显式返回 unsupported，不进入 v2 merge schema。
 - Core Eval v3 需要完整 runtime response；public slim payload 只可显示，不可当批准证据。
-- Graph A/B pilot 保持既有 v2 研究边界，v3 组合入口显式拒绝；本轮不扩展 Graph。
+- Graph A/B pilot 的 v3 review 使用兼容 matcher 适配；不兼容 matcher 和 v3 debug 仍拒绝。历史 v2 实验与冻结基线不因此重评分。
 
 ### 明确不支持
 

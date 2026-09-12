@@ -1,5 +1,7 @@
 # Graph A/B 阶段二正式评测就绪性
 
+> 历史就绪快照：NO-GO 及阻塞项仅对应当次 pilot，不作为当前环境的故障确认。后续 [formal-readiness 报告](../../eval/reports/graph-ab-formal-readiness.md)也有独立范围；正式研究门仍需匹配当前代码与样本重新验收。
+
 结论：**Ready for formal paired A/B: NO**
 
 ## 已满足

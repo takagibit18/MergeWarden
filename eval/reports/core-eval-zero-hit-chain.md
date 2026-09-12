@@ -1,5 +1,7 @@
 # Core Eval 零命中链路修复实验记录
 
+> 历史实验汇总：中间 fix1 / fix2 / preflight / fix3 / fix4 Markdown 已退出主干；下文旧路径保留用于定位历史矩阵，可使用 `git show 3a1c15a4eab02fc6296869d46635ee172e2b6e2c:<原路径>` 恢复。机器产物、正式 contract-final 和 length-recovery 报告不在此次删除范围。
+
 > 本记录比较相同 5 fixtures × 2 variants、模型与质量合同的正式 Core Eval。冻结 gold、matcher、warning/confidence threshold、clean controls、fixture root cause、fail-closed 原则与 60k/80k 总 token budget 均未修改。按用户 2026-08-12 的经济性要求，Fix 3 起关闭不稳定自动补采并固定 `max_attempts=1`；此前正式快照也都实际在首次 attempt 完成，因此各行都恰好包含 10 个 measured attempts。
 
 ## 汇总

@@ -11,7 +11,7 @@
 1. 首先阅读本文件（`agent.md`），理解任务边界与执行规范。
 2. 根据任务类型按需进入 `docs/` 读取最少必要文档。
 3. 若仍不确定，再补充阅读 `CONTRIBUTING.md` 与 `eval/README.md`。
-4. 仅在需要详细历史背景时阅读 `docs/project_plan.md` 全文。
+4. 需要设计理由时阅读 `docs/design_decisions.md`；历史原文的恢复入口见 `docs/documentation_cleanup_audit.md`。
 
 ### 1.2 最小知识原则
 
@@ -32,13 +32,17 @@ docs/
 ├── shared_contracts.md     # Analyzer/Integration 共享接口与协议契约
 ├── execute_tools_design.md # execute 类工具（run_command/run_tests）设计与安全规范
 ├── cli_tools_orchestrator_contract.md  # CLI/编排/工具层确定性契约
-├── mvp_plus_roadmap.md     # MVP+ 增量与「已落地/待办」对照
+├── maintenance_backlog.md # 未完成、待确认事项及关闭条件
+├── design_decisions.md    # 长期设计理由与兼容边界
+├── golden_fixture_contract.md # Fixture 快照、范围及恢复契约
+├── review_skill_retrieval_architecture.md # Skill 检索设计
+├── review_skill_retrieval_acceptance.md # 离线与真实 A/B 验收
 ├── v023_v025_root_cause_relation_graph.md # 根因归并、关系图、Manifest 与增量索引
 ├── graph_review_verifier_root_cause_and_plan_20260905.md # Graph A/B 与 verifier 排查及分阶段实施方案
 ├── finding_contract_field_ownership.md # finding 字段所有权与运行时职责
 ├── investigation_state_and_repair_contract.md # 调查状态与修复契约
 ├── finding-contract-compatibility-matrix-20260910.md # 上下游版本兼容矩阵
-└── project_plan.md         # 项目规划与里程碑（由根目录计划文档迁移）
+└── documentation_cleanup_audit.md # 文档去留、设计承接和历史恢复
 
 root/
 ├── README.md               # 项目介绍、安装运行、目录与开发命令
@@ -53,13 +57,15 @@ root/
 - 工具接口、状态模型、输出 schema → `docs/shared_contracts.md`
 - execute 工具策略、白名单、沙箱后端、EXECUTE_* → `docs/execute_tools_design.md`
 - CLI/编排高危门控、phase 约束 → `docs/cli_tools_orchestrator_contract.md`
-- MVP+ 增量清单与基线更新 → `docs/mvp_plus_roadmap.md`
+- 维护待办与验收缺口 → `docs/maintenance_backlog.md`
 - 根因 finding、代码关系图、证据 provenance 与增量索引 → `docs/v023_v025_root_cause_relation_graph.md`
 - Graph A/B 成本、verifier 错拒及后续 PR/commit 验收 → `docs/graph_review_verifier_root_cause_and_plan_20260905.md`
 - finding 字段所有权与运行时职责 → `docs/finding_contract_field_ownership.md`
 - v3 收尾、独立复核、修复预算及发布门禁 → `docs/shared_contracts.md`
 - 一次性实验报告和过程交付文档仅本地保留，不作为正式契约来源。
-- 里程碑、分工、演进路线 → `docs/project_plan.md`
+- 长期设计与取舍 → `docs/design_decisions.md`
+- Golden fixture 快照与范围 → `docs/golden_fixture_contract.md`
+- Skill 检索与验收 → `docs/review_skill_retrieval_architecture.md`、`docs/review_skill_retrieval_acceptance.md`
 - 提交流程、分支规范、代码风格 → `CONTRIBUTING.md`
 - 评测标准与基线策略 → `eval/README.md`
 
@@ -145,7 +151,7 @@ root/
 2. 根据 2.2 映射只读取必要文档。
 3. 实施改动前核对接口/输出契约（优先 `docs/shared_contracts.md`）。
 4. 改动后运行最小验证（lint/type/test 中相关项）。
-5. 若在开发、调试或验证过程中遇到错误（如 lint 报错、测试失败、运行异常），必须在 `docs/error_log.md` 追加记录（日期、模块、错误摘要、原因、修复方式）。
+5. 若在开发、调试或验证过程中遇到可复用的错误，必须在 `docs/error_log.md` 记录日期、模块、根因、修复和验证；相同根因更新既有记录，不追加临时命令流水或重复交付记录。
 6. 若协议变化，先更新文档再更新实现。
 
 ---
@@ -155,3 +161,5 @@ root/
 - `docs/` 中文档是开发知识主存放区。
 - 根目录保留高入口文件（如 `README.md`、`CONTRIBUTING.md`、`agent.md`）。
 - 任何新增“开发指导类文档”默认放在 `docs/` 下并在本文件补充索引。
+- 当前契约、长期设计与待办分开维护；已完成的一次性计划回到 Git 历史，移除前保存独有设计并更新引用。
+- 历史报告必须标记日期与适用范围，不作为当前配置、CI 或完成状态来源。

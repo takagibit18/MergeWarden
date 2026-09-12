@@ -1,4 +1,13 @@
-# MergeWarden Review Skill Retrieval 架构调查报告
+# Review Skill Retrieval：设计与调研依据
+
+## 现行状态（2026-09-12）
+
+metadata、确定性 filter/rank/packing、run 内 selection pinning、telemetry 与固定 bank 评测已有实现。
+生产默认仍为 `sequential`；`deterministic` 由配置显式启用。Core 完整预算、坏 metadata 跳过与有界 legacy fallback 已有回归。
+[验收手册](review_skill_retrieval_acceptance.md)集中记录当前运行方式、历史离线证据及真实 A/B 门。
+
+下文 §1–11 保留 `803385c` 调研基线的问题、方案比较及设计理由，其中“当前”均指该调研基线；
+不应据此重新实施三层 PR。旧分支操作、重复任务清单和预计修改文件列表已移出主干。
 
 调查基线：本地仓库 `803385c`（2026-09-01），分支 `codex/adapt-stashed-verifier-context`。本报告只做架构调查与实施设计，不修改 Review Skill 运行时代码。
 
@@ -10,7 +19,7 @@
 
 这项工作当前是 **scale-readiness**，不是线上性能修复：仓库中的 `review_skills/learned.jsonl` 和 `review_experience/feedback.jsonl` 都是空文件，当前没有 learned skill 会污染 Prompt。但顺序垄断在代码机制上已经被确认；一旦 Skill Bank 增长，它会成为确定性、可复现的召回缺陷。
 
-## 1. Current implementation
+## 1. 调研基线实现（803385c）
 
 ### 1.1 持久化与生成链路
 
@@ -439,98 +448,8 @@ candidate: 相同所有条件 + deterministic retrieval
 
 比较：finding hit/recall、false positives、schema/workflow validity、prompt/total tokens、skill tokens、tool calls、reviewer/end-to-end latency。先保证 quality non-regression，再看 context cost。Skill Bank 必须在两组间固定 hash；建议多样本而不是只跑一次。
 
-### 11.4 已验证回归基线
+## 后续事项
 
-调查期间执行：
-
-```text
-tests/test_review_skills.py
-tests/test_review_experience.py
-tests/test_github_feedback.py
-tests/test_prompts.py
-tests/test_review_workflow.py
-```
-
-结果：48 passed。
-
-## 12. Incremental implementation plan
-
-### PR 1 — Pure retrieval core（不切生产默认）
-
-- 扩展可选 metadata 与 backward-compatible parsing；
-- 新增 `SkillQuery / SkillMatch / SkillSelection`；
-- 实现 deterministic filter/rank/Top-K/atomic budget；
-- Core full-inclusion invariant；
-- 保留无参 `render()` legacy path；
-- 完整 unit/lifecycle compatibility tests。
-
-### PR 2 — Runtime wiring + telemetry + feature flag
-
-- 在首次 analyze 使用 resolved diff + optional manifests 建 query；
-- run-scoped pin selection 与 bank digest；
-- Prompt 改为显式接收 selection；
-- Settings 增加 mode/top-k/char-budget；
-- 事件日志与 run/eval process metrics；
-- 默认先 `sequential`，允许环境/variant 开启 `deterministic`。
-
-### PR 3 — Retrieval labels + Golden A/B + default gate
-
-- fixture 可选 `expected_skill_ids`；
-- retrieval accuracy report；
-- EvalVariant 增加 skill mode 与 bank fixture/hash；
-- 跑 sequential vs deterministic 的 real Golden PR A/B；
-- 达到 recall/FP/cost gate 后才把生产默认切到 deterministic。
-
-### Future（不进入 MVP）
-
-- 标注证明简单 lexical ranking 不足后加入 BM25；
-- 有足够曝光与反馈数据后加入小权重、经 propensity/exposure 校正的 utility；
-- 只有证明 rare-tail Skill 的 harness retrieval 召回不足且额外 tool round 值得时，才实验 optional `load_skill`；
-- Embedding/vector store 保持最后选项。
-
-## 13. Exact files likely to change
-
-### PR 1
-
-- `src/analyzer/review_skills.py`：metadata、query、score、selection、packing、digest；
-- `src/analyzer/review_lifecycle.py`：proposal metadata validation、status update 保留字段；
-- `tests/test_review_skills.py`：retrieval/budget/determinism/compat；
-- `tests/test_review_experience.py`：metadata proposal 与 lifecycle round-trip；
-- 可选 `src/analyzer/language_detection.py`：若把 extension mapping 从多个模块统一出来；否则首 PR 内部纯函数即可。
-
-### PR 2
-
-- `src/orchestrator/agent_loop.py`：构建并 pin run-scoped selection、记录完成 telemetry；
-- `src/analyzer/inference_engine.py`：传递 selection 与 per-call telemetry；
-- `src/analyzer/prompts.py`：显式 skill context 注入，移除生产路径隐式 loader I/O；
-- `src/config.py`、`.env.example`：retrieval mode、Top-K、char budget；
-- `src/analyzer/event_log.py`：只有决定新增专用 event type 时才改；复用 `CONTEXT_TELEMETRY` 则无需改；
-- `src/analyzer/run_summary.py`、`eval/run_summary.py`：聚合新指标；
-- `tests/test_prompts.py`、`tests/test_agent_loop.py`、`tests/test_review_loop_observability.py`、`tests/test_run_summary.py`。
-
-### PR 3
-
-- `eval/schemas.py`：skill variant/retrieval metrics/fixture annotation；
-- `eval/runner.py`：固定 Skill Bank 并注入 variant；
-- `eval/run.py`、`eval/report.py`、`eval/compare.py`、必要的 gate tests；
-- 一小组 `eval/fixtures/*.json`：人工标注 expected skill ids；
-- 对应 `tests/test_eval_runner.py`、`tests/test_eval_process_metrics.py`、`tests/test_eval_gate.py`。
-
-当前不需要改 `context_planner.py`、`code_graph.py` 或 persistent SQLite schema。Graph 只是 query signal provider，Skill lifecycle 仍留在 JSONL。
-
-## 14. Risks / open questions
-
-1. **Metadata authoring quality**：模型可提出 metadata，但 activation 前必须由人确认；错误的窄 scope 会造成 false negative。
-2. **Filter recall**：明确 language/path mismatch 与已声明 trigger 的零命中都属于 hard filter；没有 trigger 的 language/path scoped skill 才表示 scope 内通用。holdout 需要覆盖 lexical miss、graph-only hit 与同语言 hard negative，证明该 gate 没有误杀。
-3. **Language mapping fragmentation**：Graph 只支持 py/rs/cs，而 ContextBuilder 已知道 js/ts/tsx 邻居。应有一个 lightweight shared mapper，不能误称 Graph 已覆盖 TypeScript。
-4. **CLI diff timing**：当前本地 `--diff` 在 Graph prepare 后才读取。Retrieval 可在 analyze 覆盖，但若未来要统一 Graph+Skill signals，应单独把 effective diff resolution 前移并做回归测试。
-5. **Core 与 hard budget 冲突**：当前会截断 Core。推荐 CI 保证完整 Core fit；运行时发现超限应 telemetry + 禁止 learned skills，不应静默切断 invariant 文本。
-6. **Legacy fallback pollution**：兼容策略只能用于迁移期。持续存在大量 unscoped active skill 会重新产生污染，应以 telemetry 驱动回填并设置收紧门槛。
-7. **Utility attribution**：当前没有 usage_count、hit_count、last_used 或 skill-level outcome。未来不能按 raw usage 排序；需记录 eligibility/exposure，并用 capped、Bayesian-smoothed、低权重 outcome signal，保留 exploration，避免 rich-get-richer。
-8. **Skill duplication/conflict**：Bank 增长后需要离线 lint/合并/冲突审查，但不要把它塞进 runtime retrieval PR。
-9. **Prompt budget口径**：Skill 的 char budget 与整体 payload token budget分离。首版保留该边界并测 estimated tokens；是否把 System Prompt 纳入统一 global budget 是另一个更大的问题。
-10. **Repository-specific skills**：当前 analyzer request 丢弃 repo identity。只有先定义 bank ownership（global、tenant、repo）后，repository-specific routing 才值得实现。
-
-## Final recommendation
-
-MergeWarden 现在需要的不是 Skill RAG，而是一个小型、确定性、可审计的 procedural-memory selector。先让 `active` 从“永久 Prompt 内容”变成“经过批准、可参与检索的经验”，再用真实 Golden PR 标签判断 deterministic metadata 是否足够。只有测到明确的 lexical miss，才升级 BM25；只有测到 harness 无法覆盖的长尾价值，才讨论动态 tool；当前没有任何证据支持 embedding/vector DB。
+真实 A/B、holdout 裁定、bank ownership、metadata 误召回及可选检索增强见[维护待办](maintenance_backlog.md)。
+不要根据原始调研中的 Core 截断、隐式 loader I/O 或预算假设推定当前代码仍有同样缺陷；应先复现。
+保持轻量 metadata selector；只有真实标注证明不足时才评估 BM25、动态工具或向量存储。
