@@ -9,7 +9,7 @@ export interface ChangeUnit {
   changeUnitId: string; snapshotId: string; path: string; kind: 'file' | 'class' | 'function';
   changedRanges: LineRange[]; entity?: DispatchEntity;
   resolution: 'resolved' | 'ambiguous' | 'missing' | 'deleted_head_unsupported' | 'coverage_limited';
-  provenance: { inputIndices: number[]; source: 'immutable_head_diff' };
+  provenance: { inputIndices: number[]; source: 'immutable_head_diff'; omittedEntityCount?: number };
 }
 export interface CandidateCard {
   candidateRefId: string; entity: DispatchEntity;

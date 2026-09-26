@@ -71,6 +71,13 @@ test('previews contain at most three declaration lines / 512 UTF-8 bytes and no 
  assert.ok(Buffer.byteLength(declarationPreview('def f('+ '值'.repeat(500),1,'function'))<=512);
  assert.equal(declarationPreview('def f(\n a,\n b,\n c):\n body',1,'function').split('\n').length,3);
 });
+test('coalesced named ranges use exact overlap; large batches bound total entity metadata with explicit omissions',()=>{
+ const symbols=Array.from({length:100},(_,i)=>symbol('f'+i,'app.py',i*4+1,i*4+3));
+ const named=resolveChangeHints(symbols,'s',[{path:'app.py',name:'f50',kind:'function',startLine:1,endLine:400}]);assert.equal(named[0].items[0].entityId,'f50');
+ const anchors=Array.from({length:10},(_,i)=>({path:'app.py',startLine:i*40+1,endLine:i*40+40}));
+ const result=resolveChangeHints(symbols,'s',anchors);assert.equal(new Set(result.flatMap(r=>r.items.map(e=>e.entityId))).size,32);
+ assert.equal(result.reduce((n,r)=>n+(r.omittedItems??0),0),68);assert.ok(changeUnits('s',anchors,result).some(u=>u.provenance.omittedEntityCount));
+});
 test('delivery and expansion persistence failures poison the investigation; cancellation grants no evidence',async()=>{
  const f=fixture();f.observe();const pack=await f.service.dispatch(f.trigger);f.service.queued(pack);f.service.setRecorder(()=>{throw Error('disk')});
  assert.throws(()=>f.service.providerPayload(JSON.stringify(pack)),/persistence/);f.service.setRecorder(()=>{});assert.throws(()=>f.service.providerPayload(JSON.stringify(pack)),/persistence/);

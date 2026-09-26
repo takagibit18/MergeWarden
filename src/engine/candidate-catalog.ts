@@ -45,6 +45,15 @@ export const packageBytes = (pack: ContextPackageV2) => Buffer.byteLength(JSON.s
 export function packInvestigation(pack: ContextPackageV2) {
   const max = 24 * 1024, cards = pack.investigations.flatMap(i => i.candidateCatalog);
   for (const card of [...cards].reverse()) { if (packageBytes(pack) <= max) break; delete card.headerPreview; }
+  if (packageBytes(pack) > max) for (const inv of pack.investigations) {
+    const referenced = new Set(inv.candidateCatalog.flatMap(c => c.roots.map(r => r.changeUnitId)));
+    let compacted = 0;
+    for (const unit of [...inv.changeUnits].reverse()) {
+      if (packageBytes(pack) <= max) break;
+      if (unit.entity && !referenced.has(unit.changeUnitId)) { delete unit.entity; compacted++; }
+    }
+    if (compacted) { inv.limitations.push(`${compacted} non-catalog-root entity display records omitted; change-unit identity/ranges/status retained`); pack.terminal = 'coverage_limited'; }
+  }
   if (packageBytes(pack) > max) for (const card of [...cards].reverse()) {
     if (packageBytes(pack) <= max) break;
     // Preserve reference identity, location, roots, and one actual relation summary.

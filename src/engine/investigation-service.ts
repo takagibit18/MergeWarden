@@ -118,7 +118,8 @@ export class ProgressiveInvestigation {
       if (r.status !== 'ok') inv.limitations.push('Graph coverage: ' + r.status);
     };
     try {
-      if (focus.omitted.length) { inv.limitations.push(`${focus.omitted.length} changed ranges omitted by resolver bound`); pack.omitted.push(...focus.omitted.map(h => JSON.stringify(h))); }
+      if (focus.omitted.length) { inv.limitations.push(`${focus.omitted.length} changed ranges omitted by resolver bound`); pack.omitted.push(...focus.omitted.slice(0, 8).map(h => JSON.stringify(h)));
+        if (focus.omitted.length > 8) pack.omitted.push(`${focus.omitted.length - 8} further omitted ranges retained in host request telemetry`); }
       if (!focus.anchors.length) pack.terminal = 'anchor_missing';
       else {
         inv.status = 'resolving'; const resolved = await operation('resolve_change_units', { anchors: focus.anchors }); validate(resolved);
