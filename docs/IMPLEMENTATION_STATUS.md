@@ -1,5 +1,16 @@
 # 当前实现状态 · 2026-09-26
 
+ChangeUnit Semantic Intent Router 的 eval-only shadow 已完成到私有准入停止点，见
+[实验契约](experiments/SEMANTIC_INTENT_ROUTER.md)。公开准入为 7 defect + 13 clean；
+20 次独立首轮请求得到 15 个格式有效输出、5 个格式失败、0 个 provider failure。
+预测冻结后，36 个合法 oracle plans 各重放两次，仅 1 个 defect structurally actionable，
+低于要求的 4 个。状态为 **INCONCLUSIVE — INSUFFICIENT STRUCTURALLY ACTIONABLE ROUTE MISSES**。
+未执行预测计划评分、Candidate Choice、small model、Hybrid Shadow 或 Review E2E，产品运行时不变。
+最新完整验证为 478 passed / 0 failed / 0 skipped；历史 Attribution v3 与 dispatch_v2 Gate 1 包 hash 保持一致。
+下一阶段仅建议 **C. EXPAND STRUCTURALLY ACTIONABLE DATASET**，本轮不自动扩展或重跑。
+
+## dispatch_v2 工程阶段 · 2026-09-26
+
 新增内部实验策略 `dispatch_v2`，架构见 [ADR 0017](adr/0017-progressive-structural-investigation.md)。
 生产接入包括稳定 ChangeUnit/Investigation、逐 hint 精确解析、多 root 共享预算、
 Gate2B 共享探索实现、CandidateCatalog、一个预取源码、主 Agent 候选展开、
