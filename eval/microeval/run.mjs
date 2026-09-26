@@ -12,6 +12,8 @@ assert(process.permission,'Public runner requires filesystem isolation');
 for(const p of freeze.denied)assert.equal(process.permission.has('fs.read',p),false,'Private path accessible');
 for(const f of freeze.files)assert.equal(hash(await readFile(f.path)),f.sha256,'Frozen input drift: '+f.path);
 if(process.argv.includes('--preflight')){console.log(JSON.stringify({preflight:'PASS',filesVerified:freeze.files.length,privateReadsDenied:freeze.denied.length,modelRequests:0}));process.exit(0);}
+const preflight=await read(join(out,'mechanical-preflight.json'));assert.equal(preflight.status,'PASS');assert.equal(preflight.realProviderRequests,0);
+assert.deepEqual(preflight.rows.map(r=>[r.id,r.arm,r.status]),config.runOrder.map(r=>[r.id,r.arm,'PASS']));
 const key=process.env.MERGEWARDEN_API_KEY;assert(key?.trim(),'Explicit API key missing');
 const modelRuntime=await createModelRuntime(config.model.provider,key),originalFetch=globalThis.fetch,completed=[];
 await save(join(out,'run-started.json'),{startedAt:new Date().toISOString(),runCount:config.runOrder.length,firstAttemptOnly:true});

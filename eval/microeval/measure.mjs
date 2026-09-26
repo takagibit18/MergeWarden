@@ -21,7 +21,9 @@ for(const job of config.runOrder){
  for(const s of sources){const p=await store.source(s.source.revision,s.source.path,s.source.startLine,s.source.endLine);assert.equal(p.contentSha256,s.source.contentSha256);assert.equal(hash(s.source.text),s.source.contentSha256);assert.equal(s.source.snapshotId,c.snapshotId);}
  const deliveredKeys=new Set(),requests=[];
  for(const name of (await readdir(raw)).filter(n=>/^request-\d+\.json$/.test(n)).sort()){
-  const wire=await read(join(raw,name)),ordinal=Number(/\d+/.exec(name)[0]);requests.push(wire);
+  const wire=await read(join(raw,name)),ordinal=Number(/\d+/.exec(name)[0]);
+  if(!r.transport.some(t=>t.ordinal===ordinal&&t.status>=200&&t.status<300))continue;
+  requests.push(wire);
   assert.equal(wire.model,config.model.modelId);assert.equal(wire.temperature,config.temperature);assert.equal(wire.top_p,config.top_p);assert.deepEqual(wire.thinking,config.thinking);
   const text=strings(wire.messages);assert(text.some(s=>s.includes(publicData.prompt)),'Public prefix/question drift');
   const resultSources=[];

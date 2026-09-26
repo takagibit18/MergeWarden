@@ -8,5 +8,6 @@ for(const name of ['package-lock.json','integrations/pi/package-lock.json','inte
 await walk(join(out,'public'));await walk(join(repo,'src'),p=>p.endsWith('.ts'));await walk(join(repo,'integrations/pi/src'));await walk(join(repo,'eval/microeval'));
 await walk(join(out,'state/snapshots'));await walk(join(out,'state/graphs'));
 const denied=[join(out,'private'),join(out,'preparation-v1'),join(out,'admission'),join(out,'../changeunit-semantic-intent-shadow-20260926'),join(out,'../real-route-recall-diagnostic-20260925'),join(out,'../full-context-candidate-dataset-20260925')];
+const protocol=await read(join(out,'protocol.json'));if(protocol.predecessor)denied.push(protocol.predecessor);
 await save(join(out,'input-freeze.json'),{identity:EXPERIMENT,createdAt:new Date().toISOString(),files,denied,privateTargetContentsExcluded:true,realModelRuns:0});
 console.log(JSON.stringify({frozen:files.length,realModelRuns:0}));
