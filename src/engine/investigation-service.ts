@@ -8,7 +8,7 @@ import { InvestigationFocus, stableId } from './investigation-focus.ts';
 import { changeUnits } from './change-resolution.ts';
 import type { resolveChangeHints } from './change-resolution.ts';
 import { INVESTIGATION_VERSION } from './investigation-contracts.ts';
-import type { CandidateCard, CandidateSource, ContextPackageV2, Investigation } from './investigation-contracts.ts';
+import type { CandidateCard, CandidateSource, ChangeUnit, ContextPackageV2, Investigation } from './investigation-contracts.ts';
 import { candidateCard, candidateSource, packageBytes, packInvestigation, sourceWindow } from './candidate-catalog.ts';
 import type { hostStructuralInvestigation } from '../experiments/locagent/host-investigation.ts';
 import { isObject } from './tool-result.ts';
@@ -54,6 +54,11 @@ export class ProgressiveInvestigation {
       this.visible.push({ path: String(event.result.path), startLine: Number(event.result.startLine), endLine: Number(event.result.endLine) });
   }
   hasPending() { return this.pending.size > 0; }
+  /** Explicit eval entry point; execution, budgets, delivery and evidence remain shared. */
+  dispatchRegistered(trigger: DispatchTrigger, unit: ChangeUnit) {
+    this.focus.register(trigger, unit);
+    return this.dispatch(trigger);
+  }
   queued(pack: ContextPackageV2) {
     this.options.signal.throwIfAborted();
     const text = JSON.stringify(pack);

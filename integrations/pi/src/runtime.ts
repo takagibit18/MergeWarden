@@ -4,7 +4,9 @@ import { annotateResult, isObject } from "../../../src/engine/tool-result.ts";
 import { closeSync, openSync } from "node:fs";
 import { join } from "node:path";
 import type { TSchema } from "typebox";
-import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { reviewResources } from './review-resources.ts';
+import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import type { RuntimeFactory } from "../../../src/engine/contracts.ts";
 import { createReviewExtension } from "./extension.ts";
 import { createStructuralRouting, TEXT_TOOLS, STRUCTURAL_TOOLS } from "./structural-routing.ts";
@@ -36,17 +38,23 @@ export function createPiRuntimeFactory(apiKey: string): RuntimeFactory {
   };
 }
 /** Injecting a runtime allows offline SDK integration tests without changing the production loop. */
-export async function createPiRuntime(options: Parameters<RuntimeFactory>[0], modelRuntime: ModelRuntime): ReturnType<RuntimeFactory> {
+export async function createPiRuntime(options: Parameters<RuntimeFactory>[0], modelRuntime: ModelRuntime,
+  evaluation?: { extensions: ExtensionFactory[]; firstAttemptOnly: boolean; onExtensionError?(error: unknown): void }): ReturnType<RuntimeFactory> {
+  if (evaluation && !options.evaluation) throw Error('Runtime overrides require explicit internal evaluation');
   const model = modelRuntime.getModel(options.model.provider, options.model.modelId);
   if (!model) throw new Error("Configured provider/model is not in the configured review catalog; no fallback is allowed");
-  const settingsManager = SettingsManager.inMemory();
+  const settingsManager = SettingsManager.inMemory(evaluation?.firstAttemptOnly ? {
+    retry: { enabled: false, maxRetries: 0, provider: { maxRetries: 0, timeoutMs: 180_000 } },
+    compaction: { enabled: false },
+  } : undefined);
+  // Review never authorizes project resource discovery.
+  settingsManager.setProjectTrusted(false);
   const allowlist = new Set(options.tools.map(t => t.name));
-  const routing = options.routing ? createStructuralRouting(options.routing, allowlist) : undefined;
+  const routing = options.routing && !evaluation ? createStructuralRouting(options.routing, allowlist) : undefined;
   const structuralCapability = routing ? undefined : allowlist.has("graph_lookup") ? GRAPH_CAPABILITY_PROMPT : allowlist.has("search_entity") || allowlist.has("traverse_graph") ? LOCAGENT_CAPABILITY_PROMPT : undefined;
-  const resourceLoader = new DefaultResourceLoader({ cwd: options.runDir, agentDir: options.runDir, settingsManager,
-    noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-    systemPromptOverride: () => BASE_SYSTEM_PROMPT + (options.routing?.dispatch && "version" in options.routing.dispatch ? "\nExperimental dispatch_v2: Host packages are investigation context, not findings. Catalogs and declaration previews are exploration only. Inspect prefetched source first; use expand_structural_candidate if the question remains unanswered. Depend only on actual source evidence and explicitly select its EvidenceRef. Stop when sufficient evidence exists; do not read every candidate by default." : options.routing?.dispatch ? "\nExperimental dispatch_v1: the host executes bounded structural retrieval after existing rules trigger. Native host_dispatch context packages contain immutable source; explicitly select their evidenceRefId when a finding depends on it. Execution completion and candidate ordering are not semantic conclusions." : "") + (structuralCapability ? "\n" + NAVIGATION_POLICY_PROMPT + "\n" + structuralCapability : ""),
-    appendSystemPromptOverride: () => [], extensionFactories: [createReviewExtension(allowlist), ...(routing ? [routing.extension] : [])] });
+  const resourceLoader = await reviewResources({ cwd: options.runDir,
+    systemPrompt: BASE_SYSTEM_PROMPT + (options.routing?.dispatch && "version" in options.routing.dispatch ? "\nExperimental dispatch_v2: Host packages are investigation context, not findings. Catalogs and declaration previews are exploration only. Inspect prefetched source first; use expand_structural_candidate if the question remains unanswered. Depend only on actual source evidence and explicitly select its EvidenceRef. Stop when sufficient evidence exists; do not read every candidate by default." : options.routing?.dispatch ? "\nExperimental dispatch_v1: the host executes bounded structural retrieval after existing rules trigger. Native host_dispatch context packages contain immutable source; explicitly select their evidenceRefId when a finding depends on it. Execution completion and candidate ordering are not semantic conclusions." : "") + (structuralCapability ? "\n" + NAVIGATION_POLICY_PROMPT + "\n" + structuralCapability : ""),
+    extensionFactories: [createReviewExtension(allowlist), ...(evaluation?.extensions ?? (routing ? [routing.extension] : []))] });
   await resourceLoader.reload();
   // Opening an exclusively created empty file sets Pi's flushed state via its public API.
   // No synthetic assistant message, SDK patch, or second conversation log is needed.
@@ -63,7 +71,7 @@ export async function createPiRuntime(options: Parameters<RuntimeFactory>[0], mo
   options.routing?.dispatch?.setRecorder(event => { journal.checkpoint(); manager.appendCustomEntry(event.version === 'structural-dispatch-2' ? INVESTIGATION_EVENT : DISPATCH_EVENT, structuredClone(event)); journal.checkpoint(); });
   try {
     if (result.extensionsResult.errors.length) throw new Error("Review extension failed to initialize");
-    await session.bindExtensions({ onError: () => { void session.abort().catch(() => undefined); } });
+    await session.bindExtensions({ onError: error => { evaluation?.onExtensionError?.(error); void session.abort().catch(() => undefined); } });
     const active = session.getActiveToolNames();
     if (routing) {
       if (active.some(t => !allowlist.has(t)) || TEXT_TOOLS.some(t => !active.includes(t)) || STRUCTURAL_TOOLS.some(t => active.includes(t)) || session.getAllTools().some(t => !allowlist.has(t.name))) throw Error("Unexpected routing tool set");

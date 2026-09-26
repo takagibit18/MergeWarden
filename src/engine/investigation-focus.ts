@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { DispatchObservation, DispatchTrigger } from './dispatch-contracts.ts';
-import type { ChangeHint, LineRange } from './investigation-contracts.ts';
+import type { ChangeHint, ChangeUnit, LineRange } from './investigation-contracts.ts';
 
 export const stableId = (prefix: string, value: unknown) => prefix + createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export function mergeRanges(ranges: readonly LineRange[]): LineRange[] {
@@ -21,6 +21,18 @@ export class InvestigationFocus {
   private snapshotId: string;
   private changedPaths: readonly string[];
   constructor(snapshotId: string, changedPaths: readonly string[]) { this.snapshotId = snapshotId; this.changedPaths = changedPaths; }
+  /** Internal pre-registered evaluation: select a resolved public diff unit, never a hidden target. */
+  register(trigger: DispatchTrigger, unit: ChangeUnit) {
+    const e = unit.entity, observed = this.changes.get(unit.path) ?? [];
+    if (this.frozen.has(trigger.routeId) || unit.snapshotId !== this.snapshotId || unit.resolution !== 'resolved'
+      || !e || e.snapshotId !== this.snapshotId || e.path !== unit.path || e.kind !== unit.kind
+      || !this.changedPaths.includes(unit.path) || !unit.changedRanges.length
+      || !unit.changedRanges.every(r => observed.some(h => h.startLine === r.startLine && h.endLine === r.endLine))
+      || !unit.changedRanges.some(r => r.startLine <= e.endLine && r.endLine >= e.startLine))
+      throw Error('Pre-registered unit must derive from complete observed immutable diff');
+    this.frozen.set(trigger.routeId, { anchors: [{ path: e.path, kind: e.kind, name: e.name,
+      qualifiedName: e.qualifiedName, startLine: e.startLine, endLine: e.endLine }], omitted: [] });
+  }
   observe({ toolName, result: r, isError }: DispatchObservation) {
     if (isError || toolName !== 'read_diff' || r.status !== 'ok' || r.snapshotId !== this.snapshotId
       || typeof r.path !== 'string' || !this.changedPaths.includes(r.path) || !Array.isArray(r.lines)

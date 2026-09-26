@@ -23,3 +23,12 @@ test('incomplete, failed and cross-snapshot diff pages cannot establish investig
  f.observe({...e,result:{...e.result,snapshotId:'other'}});assert.equal(f.freeze(trigger).anchors.length,0);
  const g=new InvestigationFocus('s',['app.py']);g.observe({...e,result:{...e.result,totalLines:3}});assert.equal(g.freeze(trigger).anchors.length,0);
 });
+test('pre-registration requires complete public diff focus and cannot select untouched or stale units',()=>{
+ const event=diff('app.py',['@@ -1 +1 @@','+def work():']),unit={snapshotId:'s',path:'app.py',kind:'function',resolution:'resolved',changedRanges:[{startLine:1,endLine:1}],entity:{snapshotId:'s',path:'app.py',kind:'function',name:'work',qualifiedName:'app.work',startLine:1,endLine:3}};
+ for(const variant of [unit,{...unit,snapshotId:'old'},{...unit,path:'hidden.py'},{...unit,changedRanges:[{startLine:2,endLine:2}]}]){
+  const f=new InvestigationFocus('s',['app.py']);if(variant!==unit)f.observe(event);assert.throws(()=>f.register(trigger,variant),/complete observed/);
+ }
+ const f=new InvestigationFocus('s',['app.py']);f.observe(event);f.register(trigger,unit);
+ assert.deepEqual(f.freeze(trigger).anchors,[{path:'app.py',kind:'function',name:'work',qualifiedName:'app.work',startLine:1,endLine:3}]);
+ assert.throws(()=>f.register(trigger,unit));
+});
