@@ -44,6 +44,7 @@ export function createStructuralRouting(context: RoutingContext, allowed: Readon
     metrics: { version: ROUTING_VERSION, triggered: 0, activated: 0, structuralAttempts: 0, verified: 0, degraded: 0, suppressed: 0, reasons: {} } });
   let data = fresh();
   const extension: ExtensionFactory = pi => {
+    const textTools = [...TEXT_TOOLS, ...(allowed.has('expand_structural_candidate') ? ['expand_structural_candidate'] : [])];
     const deliver = context.dispatch ? dispatchAdapter(pi, context.dispatch) : undefined;
     const pendingDispatch: Route[] = [];
     const persist = (route?: Route) => pi.appendEntry(ROUTING_ENTRY, structuredClone({ ...data, ...(route ? { routeId: route.routeId, routeType: route.routeType, trigger: route.trigger, targetHint: route.targetHint, relationHint: route.relationHint, activationOrdinal: route.activationOrdinal, structuralCalls: route.structuralCalls, verifiedPaths: route.verifiedPaths, suppressionReason: route.suppressionReason } : {}) }));
@@ -90,7 +91,7 @@ export function createStructuralRouting(context: RoutingContext, allowed: Readon
         if (saved?.version === ROUTING_VERSION && saved.snapshotId === context.snapshotId && !!saved.textOnly === !!context.textOnly && (saved.variant ?? "pi_structural_v1") === (context.variant ?? "pi_structural_v1")) data = structuredClone(saved);
       }
       data.observation ??= freshObservation(context.changedPaths);
-      pi.setActiveTools([...TEXT_TOOLS, ...(data.enabled && !context.textOnly && !context.dispatch ? STRUCTURAL_TOOLS : [])].filter(t => allowed.has(t)));
+      pi.setActiveTools([...textTools, ...(data.enabled && !context.textOnly && !context.dispatch ? STRUCTURAL_TOOLS : [])].filter(t => allowed.has(t)));
       persist();
     });
     pi.on("tool_call", event => {

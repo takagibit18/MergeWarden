@@ -1,4 +1,5 @@
 import { StructuralDispatch } from "./dispatch-service.ts";
+import { ProgressiveInvestigation } from "./investigation-service.ts";
 import { OperationGate } from "./operations.ts";
 import type { OperationOrigin } from "./operations.ts";
 import { randomUUID } from "node:crypto";
@@ -55,8 +56,9 @@ export class ReviewEngine {
     const routingTextOnly = options.evaluation?.routingTextOnly === true;
     requireCondition(!routingTextOnly || (routingEnabled && options.evaluation?.tools === "text-only"), "Routing text ablation requires routing and text-only tools");
     requireCondition(!routingEnabled || routingTextOnly || options.evaluation?.tools === "text+locagent", "Structural routing v1 requires G1 evaluation tools");
-    const dispatchEnabled = options.evaluation?.executionStrategy === "dispatch_v1";
-    requireCondition(!options.evaluation?.executionStrategy || ["advisory", "dispatch_v1"].includes(options.evaluation.executionStrategy), "Unknown execution strategy");
+    const dispatchV2 = options.evaluation?.executionStrategy === "dispatch_v2";
+    const dispatchEnabled = options.evaluation?.executionStrategy === "dispatch_v1" || dispatchV2;
+    requireCondition(!options.evaluation?.executionStrategy || ["advisory", "dispatch_v1", "dispatch_v2"].includes(options.evaluation.executionStrategy), "Unknown execution strategy");
     requireCondition(!dispatchEnabled || (routingEnabled && !routingTextOnly && options.evaluation?.graphMode === "prepared_only"), "dispatch_v1 requires routed G1 prepared_only evaluation");
     const abort = new AbortController(); let timedOut = false; let budgetExceeded = false;
     const cancel = () => abort.abort(new Error("Review cancelled"));
@@ -123,7 +125,7 @@ export class ReviewEngine {
         operations.set(name, execute);
         return { name, description, schema, execute: input => executeOperation("model", name, input) };
       };
-      let dispatch: StructuralDispatch | undefined;
+      let dispatch: StructuralDispatch | ProgressiveInvestigation | undefined;
       let modelGraphCalls = 0, hostGraphCalls = 0, hostSourceReadOperations = 0;
       const tools = [
         tool("read_source", "Read 1–200 lines of immutable base/head source. If a final finding depends on this source, select its returned _mergewarden.evidenceRefId (preferred) or full exact evidence reference. Do not include it otherwise.", object({ revision, path: string, startLine: integer, endLine: integer }, ["revision", "path", "startLine", "endLine"]), async (input, origin) => {
@@ -187,19 +189,31 @@ export class ReviewEngine {
         catch (error) { navigationDegraded = true; navigationErrors++; throw error; }
       })));
       if (dispatchEnabled) {
+        for (const name of ['resolve_change_units', 'host_structural_investigation']) operations.set(name, async (input, origin) => {
+          requireCondition(dispatchV2 && origin === 'host_dispatch' && retrieval, 'Investigation operations are host-only v2');
+          hostGraphCalls++; return retrieval.query(name, input, abort.signal);
+        });
         operations.set("locate_entity", async (input, origin) => {
           requireCondition(origin === "host_dispatch" && retrieval, "Exact locator is host-only G1");
           hostGraphCalls++; return retrieval.query("locate_entity", input, abort.signal);
         });
-        dispatch = new StructuralDispatch({ runId, snapshotId: store.manifest.identity.id, changedPaths: [...store.manifest.changedPaths], signal: abort.signal,
+        const dispatchOptions = { runId, snapshotId: store.manifest.identity.id, changedPaths: [...store.manifest.changedPaths], signal: abort.signal,
           ...(options.evaluation?.routingBudget ? { budget: options.evaluation.routingBudget } : {}),
-          operation: (name, input) => {
-            requireCondition(["locate_entity", "traverse_graph", "read_source"].includes(name), "Host operation outside dispatch allowlist");
+          operation: (name: string, input: Record<string, unknown>) => {
+            requireCondition((dispatchV2 ? ['resolve_change_units', 'host_structural_investigation', 'read_source'] : ["locate_entity", "traverse_graph", "read_source"]).includes(name), "Host operation outside dispatch allowlist");
             return executeOperation("host_dispatch", name, input);
           },
-          promote(source) { evidenceRegistry.register(source); sourceReads.add(sourceKey(source)); },
-          onPersistenceFailure(error) { acceptingTools = false; abort.abort(error); }
-        });
+          promote(source: import('./dispatch-contracts.ts').DispatchSource) { evidenceRegistry.register(source); sourceReads.add(sourceKey(source)); },
+          onPersistenceFailure(error: PersistenceFailure) { acceptingTools = false; abort.abort(error); }
+        };
+        dispatch = dispatchV2 ? new ProgressiveInvestigation({ ...dispatchOptions,
+          source: async (path, startLine, endLine) => ({ ...await store.source('head', path, startLine, endLine) }),
+        }) : new StructuralDispatch(dispatchOptions);
+        if (dispatchV2) tools.push(tool('expand_structural_candidate', 'Read one delivered structural candidate as immutable source evidence. Supply only its candidateRefId. Stop when the review question has enough evidence.',
+          object({ candidateRefId: { type: 'string', minLength: 1, maxLength: 80 } }, ['candidateRefId']), async input => {
+            requireCondition(Object.keys(input).length === 1, 'Only candidateRefId is accepted');
+            return (dispatch as ProgressiveInvestigation).expand(text(input.candidateRefId));
+          }));
       }
       runtime = await this.factory({ repositoryPath: repository, runDir, stateDir, model: options.model, tools, ...(options.evaluation ? { evaluation: true } : {}), ...(routingEnabled ? { routing: { ...(dispatch ? { dispatch } : {}), ...(routingTextOnly ? { textOnly: true } : {}), variant: options.evaluation!.routing as Exclude<import("./routing-contracts.ts").RoutingMode, "none">, snapshotId: store.manifest.identity.id, changedPaths: [...store.manifest.changedPaths], ...(options.evaluation?.routingBudget ? { budget: options.evaluation.routingBudget } : {}), onBlockedCall } } : {}) });
       if (runtime.configuration) manifest.runtimeConfiguration = runtime.configuration();

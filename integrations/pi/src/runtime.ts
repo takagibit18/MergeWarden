@@ -1,3 +1,4 @@
+import { INVESTIGATION_EVENT } from '../../../src/engine/investigation-contracts.ts';
 import { DISPATCH_EVENT } from "../../../src/engine/dispatch-service.ts";
 import { annotateResult, isObject } from "../../../src/engine/tool-result.ts";
 import { closeSync, openSync } from "node:fs";
@@ -44,7 +45,7 @@ export async function createPiRuntime(options: Parameters<RuntimeFactory>[0], mo
   const structuralCapability = routing ? undefined : allowlist.has("graph_lookup") ? GRAPH_CAPABILITY_PROMPT : allowlist.has("search_entity") || allowlist.has("traverse_graph") ? LOCAGENT_CAPABILITY_PROMPT : undefined;
   const resourceLoader = new DefaultResourceLoader({ cwd: options.runDir, agentDir: options.runDir, settingsManager,
     noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-    systemPromptOverride: () => BASE_SYSTEM_PROMPT + (options.routing?.dispatch ? "\nExperimental dispatch_v1: the host executes bounded structural retrieval after existing rules trigger. Native host_dispatch context packages contain immutable source; explicitly select their evidenceRefId when a finding depends on it. Execution completion and candidate ordering are not semantic conclusions." : "") + (structuralCapability ? "\n" + NAVIGATION_POLICY_PROMPT + "\n" + structuralCapability : ""),
+    systemPromptOverride: () => BASE_SYSTEM_PROMPT + (options.routing?.dispatch && "version" in options.routing.dispatch ? "\nExperimental dispatch_v2: Host packages are investigation context, not findings. Catalogs and declaration previews are exploration only. Inspect prefetched source first; use expand_structural_candidate if the question remains unanswered. Depend only on actual source evidence and explicitly select its EvidenceRef. Stop when sufficient evidence exists; do not read every candidate by default." : options.routing?.dispatch ? "\nExperimental dispatch_v1: the host executes bounded structural retrieval after existing rules trigger. Native host_dispatch context packages contain immutable source; explicitly select their evidenceRefId when a finding depends on it. Execution completion and candidate ordering are not semantic conclusions." : "") + (structuralCapability ? "\n" + NAVIGATION_POLICY_PROMPT + "\n" + structuralCapability : ""),
     appendSystemPromptOverride: () => [], extensionFactories: [createReviewExtension(allowlist), ...(routing ? [routing.extension] : [])] });
   await resourceLoader.reload();
   // Opening an exclusively created empty file sets Pi's flushed state via its public API.
@@ -59,7 +60,7 @@ export async function createPiRuntime(options: Parameters<RuntimeFactory>[0], mo
       async execute(_id, params) { if (!allowlist.has(t.name)) throw Error("Tool is outside the immutable review allowlist"); const value = await t.execute(params); return { content: [{ type: "text" as const, text: JSON.stringify(isObject(value) ? annotateResult(value) : value) }], details: value }; } })) });
   const session = result.session;
   const journal = new PiSessionJournal(manager, { durable: true, onFailure: () => { void session.abort().catch(() => undefined); } });
-  options.routing?.dispatch?.setRecorder(event => { journal.checkpoint(); manager.appendCustomEntry(DISPATCH_EVENT, structuredClone(event)); journal.checkpoint(); });
+  options.routing?.dispatch?.setRecorder(event => { journal.checkpoint(); manager.appendCustomEntry(event.version === 'structural-dispatch-2' ? INVESTIGATION_EVENT : DISPATCH_EVENT, structuredClone(event)); journal.checkpoint(); });
   try {
     if (result.extensionsResult.errors.length) throw new Error("Review extension failed to initialize");
     await session.bindExtensions({ onError: () => { void session.abort().catch(() => undefined); } });

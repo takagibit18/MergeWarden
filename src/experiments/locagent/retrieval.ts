@@ -2,6 +2,9 @@ import type { RelationFact, SymbolFact } from '../../graph/contracts.ts';
 import type { ExplorationBudget, GraphData, RetrievalConfig, SearchInput, TraverseInput } from './contracts.ts';
 import {progressiveWalk,STRUCTURAL_PATTERNS} from './patterns.ts';
 import { SparseIndex, fuzzyScore } from './sparse.ts';
+import {resolveChangeHints} from '../../engine/change-resolution.ts';
+import {hostStructuralInvestigation} from './host-investigation.ts';
+import {declarationPreview} from '../../engine/candidate-catalog.ts';
 const order = (a:string,b:string)=>a<b?-1:a>b?1:0;
 const size = (v:unknown)=>Buffer.byteLength(JSON.stringify(v));
 const measured = <T extends {responseBytes:number}>(value:T):T=>{let next=size(value);while(next!==value.responseBytes){value.responseBytes=next;next=size(value);}return value;};
@@ -66,6 +69,22 @@ export class LocAgentRetrieval {
     else try{this.contents=new SparseIndex(this.chunks.map(c=>c.text));this.contentDocumentBytes=bytes;}catch{this.chunks=[];this.contentWarning='Content retrieval index failed to initialize; exact/entity search and graph traversal remain available.';}
   }
   stats(){return {relationIndexBuildMs:this.relationIndexBuildMs,relationIndexBuildCount:this.relationIndexBuildCount,entityIndex:this.entities.stats(),contentIndex:this.contents?.stats(),contentDocumentBytes:this.contentDocumentBytes,contentChunks:this.chunks.length,contentAvailable:Boolean(this.contents)};}
+  resolveChangeUnits(input: {anchors: import('../../engine/investigation-contracts.ts').ChangeHint[]}) {
+    return {...this.envelope(), resolutions: resolveChangeHints(this.symbols, this.data.snapshotId, input.anchors)};
+  }
+  investigate(input: Parameters<typeof hostStructuralInvestigation>[0]) {
+    if (input.context.snapshotId !== this.data.snapshotId || input.context.generationId !== this.data.generationId) throw Error('Investigation identity mismatch');
+    const result = hostStructuralInvestigation(input, {
+      entity: id => this.byId.get(id), neighbors: (id, direction) => (direction === 'upstream' ? this.incomingByEntity : this.outgoingByEntity).get(id) ?? [],
+      compare: (a, b) => order(entityName(a), entityName(b)) || order(a.id, b.id),
+    });
+    const previews: Record<string, string> = {};
+    for (const c of result.pool.eligible) {
+      const preview = declarationPreview(this.data.sources[c.terminalPath] ?? '', c.terminalEntity.startLine, c.entityKind);
+      if (preview) previews[c.terminalEntityId] = preview;
+    }
+    return {...this.envelope(), ...result, previews};
+  }
   /** Host-only exact metadata query. Uses the same frozen entities; never creates edges. */
   locate(input: { anchors: import('../../engine/dispatch-contracts.ts').AnchorHint[] }) {
     requireThat(Array.isArray(input.anchors) && input.anchors.length > 0 && input.anchors.length <= 32, 'Expected 1..32 observed anchor hints');

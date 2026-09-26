@@ -1,6 +1,6 @@
 import type { EvidenceRef } from "../domain/contracts.ts";
 import type { RelationFact } from "../graph/contracts.ts";
-export type ExecutionStrategy = "advisory" | "dispatch_v1";
+export type ExecutionStrategy = "advisory" | "dispatch_v1" | "dispatch_v2";
 export const DISPATCH_VERSION = "structural-dispatch-1" as const;
 export const DISPATCH_LIMITS = Object.freeze({ maxRouteEpisodes: 2, maxStructuralCallsPerEpisode: 4,
   maxStructuralCallsTotal: 6, maxSourceReadsPerEpisode: 3, maxPackageBytes: 24 * 1024,
