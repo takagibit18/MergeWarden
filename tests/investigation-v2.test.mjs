@@ -4,7 +4,7 @@ import {createHash} from 'node:crypto';
 import {LocAgentRetrieval} from '../src/experiments/locagent/retrieval.ts';
 import {ProgressiveInvestigation} from '../src/engine/investigation-service.ts';
 import {changeUnits,resolveChangeHints} from '../src/engine/change-resolution.ts';
-import {declarationPreview,packInvestigation,packageBytes} from '../src/engine/candidate-catalog.ts';
+import {candidateSource,declarationPreview,packInvestigation,packageBytes} from '../src/engine/candidate-catalog.ts';
 import {OperationGate} from '../src/engine/operations.ts';
 import {EvidenceRegistry} from '../src/application/evidence-registry.ts';
 import {emptyCoverage} from '../src/graph/contracts.ts';
@@ -70,6 +70,15 @@ test('previews contain at most three declaration lines / 512 UTF-8 bytes and no 
  assert.equal(declarationPreview('arbitrary body',1,'file'),undefined);
  assert.ok(Buffer.byteLength(declarationPreview('def f('+ '值'.repeat(500),1,'function'))<=512);
  assert.equal(declarationPreview('def f(\n a,\n b,\n c):\n body',1,'function').split('\n').length,3);
+});
+test('actual EOF range is preserved, and oversized identity displays cannot silently exceed 24 KiB',async()=>{
+ const f=fixture();f.observe();const pack=await f.service.dispatch(f.trigger),card=pack.investigations[0].candidateCatalog[0];
+ const text='def caller():\n    pass';
+ const source=candidateSource({status:'ok',snapshotId:'s',revision:'head',path:card.entity.path,startLine:1,endLine:2,text,contentSha256:hash(text)},card,'s');
+ assert.deepEqual(source.returnedRange,{startLine:1,endLine:2});assert.equal(source.truncated,true);assert.equal(source.contentSha256,hash(text));
+ assert.throws(()=>candidateSource({...source,status:'ok',endLine:81},card,'s'),/integrity/);
+ pack.investigations[0].changeUnits[0].path='x'.repeat(30000);packInvestigation(pack);
+ assert.ok(packageBytes(pack)<=24576);assert.ok(pack.investigations[0].limitations.some(x=>x.includes('whole change-unit')));assert.equal(pack.terminal,'coverage_limited');
 });
 test('coalesced named ranges use exact overlap; large batches bound total entity metadata with explicit omissions',()=>{
  const symbols=Array.from({length:100},(_,i)=>symbol('f'+i,'app.py',i*4+1,i*4+3));

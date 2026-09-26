@@ -1,4 +1,36 @@
-# 当前实现状态 · 2026-09-24
+# 当前实现状态 · 2026-09-26
+
+新增内部实验策略 `dispatch_v2`，架构见 [ADR 0017](adr/0017-progressive-structural-investigation.md)。
+生产接入包括稳定 ChangeUnit/Investigation、逐 hint 精确解析、多 root 共享预算、
+Gate2B 共享探索实现、CandidateCatalog、一个预取源码、主 Agent 候选展开、
+缓存与独立 v2 归因。默认 advisory、dispatch_v1、历史 Attribution v3 与 ADR 0016 保持原语义。
+
+本轮 main 基线为 PR #11 合并提交 `35c382c`：438 passed / 0 failed / 0 skipped。
+最新完整 `npm run verify` 为 456 passed / 0 failed / 0 skipped。
+新增真实 Pi SDK 离线 HTTP 测试覆盖展开取证、提前提交、伪造引用和展开持久化故障；
+这些是工程测试，不是实际模型审查成绩。
+
+Gate 1 的 24 个历史前缀强制末尾诊断中，V1 为 7 resolved / 14 ambiguous / 3 missing；
+V2 为 15 resolved / 8 partial / 0 ambiguous / 1 missing，23 个启动 Graph、17 个交付目录。
+实际确定性路由仅触发 3 个案例：V1 3 个 ambiguous，V2 2 个 resolved / 1 个 ambiguous，
+2 个启动 Graph、1 个交付目录。强制末尾诊断不能冒充实际路由覆盖或 Graph 审查价值。
+独立性能产物完成 24 × 100 次诊断重放及 3 × 100 次实际触发重放，包字节均稳定。
+24 个诊断案例 p50 的中位数为 9.10 ms，最差单例 p95 为 44.62 ms，最大 74.08 ms；
+最大包 24,503 bytes、最大队列 26，采样 heap 最大约 168.1 MiB。
+延迟不含 prepared graph 加载/索引初始化，heap 是进程采样而非隔离分配量。
+34 条历史 Attribution v3 会话双次重放与原存档逐字节相同，未回填历史分数。
+
+Gate 2 在既有 full-context 数据集和预登记 D3/D4/D6 上执行公开准入：15 个登记项中
+2 个重复；13 个独立项中 8 个无路由、2 个 root ambiguous、1 个候选池仅 1 项、
+2 个公开条件合格。公开准入上限 2 < 6，因此未打开私有 target、未调用模型、
+未运行 source-fact scoring 或 Gate 3。不能宣称候选选择或 Review 质量通过。
+当前首要限制是 Router 的真实触发覆盖，另有 Investigation 同名范围歧义；
+没有通过调整 selector、Graph schema 或强制路由补足样本。
+
+新实验仅写入 checkout 外 `../output/progressive-structural-investigation-20260926/`。
+首次 Windows 隔离启动失败及首次元数据超限失败均保留，修复使用新的实验目录。
+
+## 历史状态 · 2026-09-24
 
 当前开发基线继承本地 Routing v1 / ABC 提交 c857941、26e6535，未回退到远端 main。Routing 产品默认 none；pi_structural_v1、pi_structural_v2_investigate、pi_structural_v2_synthesize 的触发、预算与 B/C 卡措辞保持冻结。Graph v4、prepared-only、RealGolden 和模型配置未修改。
 

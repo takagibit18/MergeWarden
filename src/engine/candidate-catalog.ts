@@ -35,11 +35,11 @@ export function sourceWindow(card: CandidateCard) { return { startLine: card.ent
 export function candidateSource(page: Record<string, unknown>, card: CandidateCard, snapshotId: string): CandidateSource {
   const range = sourceWindow(card);
   if (page.status !== 'ok' || page.snapshotId !== snapshotId || page.revision !== 'head' || page.path !== card.entity.path
-    || page.startLine !== range.startLine || page.endLine !== range.endLine || typeof page.text !== 'string'
+    || page.startLine !== range.startLine || !Number.isSafeInteger(page.endLine) || Number(page.endLine) < range.startLine || Number(page.endLine) > range.endLine || typeof page.text !== 'string'
     || createHash('sha256').update(page.text).digest('hex') !== page.contentSha256) throw Error('Candidate source integrity mismatch');
   const ref = fullEvidence(page as unknown as DispatchSource);
   return { ...ref, evidenceRefId: evidenceRefId(ref), text: page.text, entity: card.entity, candidateRefId: card.candidateRefId,
-    entityRange: { startLine: card.entity.startLine, endLine: card.entity.endLine }, returnedRange: range, truncated: range.endLine < card.entity.endLine };
+    entityRange: { startLine: card.entity.startLine, endLine: card.entity.endLine }, returnedRange: { startLine: ref.startLine, endLine: ref.endLine }, truncated: ref.endLine < card.entity.endLine };
 }
 export const packageBytes = (pack: ContextPackageV2) => Buffer.byteLength(JSON.stringify(pack));
 export function packInvestigation(pack: ContextPackageV2) {
@@ -68,6 +68,13 @@ export function packInvestigation(pack: ContextPackageV2) {
     const source = pack.sources.pop()!; pack.omitted.push(`Whole source omitted: ${source.candidateRefId}`); pack.terminal = 'coverage_limited';
   }
   for (const inv of pack.investigations) inv.prefetchedSourceRefs = pack.sources.map(s => s.evidenceRefId);
+  // Pathological declaration metadata can itself exceed the package. Preserve
+  // task identity and explicit omission counts rather than throwing after admission.
+  if (packageBytes(pack) > max) for (const inv of pack.investigations) {
+    let omitted = 0;
+    while (packageBytes(pack) > max - 256 && inv.changeUnits.length) { inv.changeUnits.pop(); omitted++; }
+    if (omitted) { inv.limitations.push(`${omitted} whole change-unit display records omitted by package budget; exact resolutions retained in host operation telemetry`); pack.terminal = 'coverage_limited'; }
+  }
   if (packageBytes(pack) > max) throw Error('Required investigation identity exceeds package budget');
   return pack;
 }

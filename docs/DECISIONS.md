@@ -1,5 +1,9 @@
 # 顶层决策索引
 
+新增实验契约：[ADR 0017：渐进式结构调查](adr/0017-progressive-structural-investigation.md)。
+`dispatch_v2` 已实现稳定调查、多 root、有界候选目录和主 Agent 候选展开。
+2026-09-26 工程回归与 Gate 1 通过；Gate 2 公开样本准入上限为 2，未达到 6，模型实验及 Gate 3 未运行。产品默认不变。
+
 新增实验契约：[ADR 0016：规则路由后的宿主结构检索](adr/0016-structural-dispatch.md)。默认 advisory 保持不变，dispatch_v1 仅由显式内部实验配置启用。
 
 “已确定”指讨论中的明确方向，不代表代码实现完成；“待验证”不是默认产品行为。
