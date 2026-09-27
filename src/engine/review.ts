@@ -1,6 +1,7 @@
 import { StructuralDispatch } from "./dispatch-service.ts";
 import { ProgressiveInvestigation } from "./investigation-service.ts";
 import { OperationGate } from "./operations.ts";
+import { missingDiffCoverage, SubmissionValidationError } from "./submission-diagnostics.ts";
 import type { OperationOrigin } from "./operations.ts";
 import { randomUUID } from "node:crypto";
 import { mkdir, open, realpath, rm } from "node:fs/promises";
@@ -118,7 +119,7 @@ export class ReviewEngine {
           return { snapshotId: store.manifest.identity.id, versions: { base: store.manifest.identity.baseVersion, head: store.manifest.identity.headVersion }, ...(result as Record<string, unknown>) };
         } catch (error) {
           if (error instanceof PersistenceFailure) { acceptingTools = false; abort.abort(error); throw error; }
-          throw new Error(JSON.stringify({ snapshotId: store.manifest.identity.id, status: "error", ...(name === "submit_review" ? { outcome: "PRE_ACCEPTANCE_ERROR" } : {}), tool: name, message: error instanceof Error ? error.message : "Tool failed" }));
+          throw new Error(JSON.stringify({ snapshotId: store.manifest.identity.id, status: "error", ...(name === "submit_review" ? { outcome: "PRE_ACCEPTANCE_ERROR" } : {}), tool: name, message: error instanceof Error ? error.message : "Tool failed", ...(error instanceof SubmissionValidationError ? { diagnostics: error.diagnostics } : {}) }));
         }
       });
       const tool = (name: string, description: string, schema: Record<string, unknown>, execute: (input: Record<string, unknown>, origin: OperationOrigin) => Promise<unknown>): RuntimeTool => {
@@ -156,14 +157,15 @@ export class ReviewEngine {
           const ids = new Set<string>();
           for (const path of submission.reviewedPaths) {
             requireCondition(store.manifest.changedPaths.includes(path), "Unknown reviewed path");
-            const coverage = readDiffLines.get(path);
-            requireCondition(coverage && coverage.seen.size === coverage.total, `Read the complete diff first: ${path}`);
           }
+          const missing = missingDiffCoverage(submission.reviewedPaths, readDiffLines);
+          if (missing.length) throw new SubmissionValidationError(`Read the complete diff first: ${missing.map(p => p.path).join(", ")}`, { code: "INCOMPLETE_DIFF_COVERAGE", missing, repair: "Call read_diff for each listed path at its cursor (line offset), then follow returned nextCursor. Prompt previews do not count as tool coverage. Reassess the conclusion after reading missing changes." });
           for (const candidate of submission.findings) {
             assertCandidate(candidate, store.manifest.identity.id);
             requireCondition(!ids.has(candidate.id), "Duplicate candidate id"); ids.add(candidate.id);
             requireCondition(candidate.evidence.some(e => submission.reviewedPaths.includes(e.path)), "Finding needs evidence in a reviewed changed file");
-            const integrity = await checkEvidence(candidate, store); requireCondition(integrity.ok, integrity.failures.join("; "));
+            const integrity = await checkEvidence(candidate, store);
+            if (!integrity.ok) throw new SubmissionValidationError(integrity.failures.join("; "), { code: "EVIDENCE_INTEGRITY", issues: integrity.issues, repair: "Read the exact relevant range and select its returned evidenceRefId. Do not reuse a hash for a different range. Recheck that each reference supports the claim; replacing it solely to pass validation does not establish a defect." });
             requireCondition(candidate.evidence.every(e => sourceReads.has(sourceKey(e))), "Finding evidence must be read with read_source in this run");
           }
           abort.signal.throwIfAborted();
