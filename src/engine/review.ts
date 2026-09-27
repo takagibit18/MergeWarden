@@ -136,7 +136,7 @@ export class ReviewEngine {
           sourceReads.add(sourceKey(page));
           return { ...page, _mergewarden: { schemaVersion: 1, evidenceRefId: evidenceRegistry.register(page) } };
         }),
-        tool("read_diff", "Read a page of the frozen change. Follow nextCursor until truncated=false before marking this path reviewed.", object({ path: string, cursor: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 200 } }, ["path"]), async input => {
+        tool("read_diff", "Read a page of the frozen change. Omit cursor for the first page; cursor is a zero-based LINE OFFSET, never a page number. Continue only with the exact returned nextCursor. truncated=false means the remaining diff is fully returned; do not increment cursor or reread it. Public prompt previews do not count toward this tool's coverage.", object({ path: string, cursor: { type: "integer", minimum: 0, description: "Exact nextCursor from the preceding page; omit initially. Not a page number." }, limit: { type: "integer", minimum: 1, maximum: 200 } }, ["path"]), async input => {
           const page = await store.diff(text(input.path), number(input.cursor, 0), number(input.limit, 100));
           if (page.status === "ok") {
             const coverage = readDiffLines.get(page.path) ?? { total: page.totalLines, seen: new Set<number>() };
@@ -145,7 +145,7 @@ export class ReviewEngine {
           }
           return page;
         }),
-        tool("search_text", "Literal search of immutable source. Truncated results do not establish absence elsewhere.", object({ revision, query: string, limit: { type: "integer", minimum: 1, maximum: 100 } }, ["revision", "query"]), async input => store.search(rev(input.revision), text(input.query), number(input.limit, 50))),
+        tool("search_text", "Literal search of immutable source. Use path for an exact file or a directory ending in /. Follow nextCursor with the same revision, query and path to see omitted matches. Truncated or scoped results do not establish absence elsewhere; read_source is required for evidence.", object({ revision, query: string, path: { type: "string", minLength: 1, description: "Exact repository-relative file, or directory prefix ending in /." }, cursor: { type: "string", maxLength: 8192 }, limit: { type: "integer", minimum: 1, maximum: 100 } }, ["revision", "query"]), async input => store.search(rev(input.revision), text(input.query), number(input.limit, 50), { ...(input.path === undefined ? {} : { path: text(input.path) }), ...(input.cursor === undefined ? {} : { cursor: text(input.cursor) }) })),
         tool("submit_review", "Submit the final mature advisory findings after investigation. reviewedPaths contains only fully read changed paths. A finding may explicitly select changed and untouched source evidence using {evidenceRefId} from read_source (preferred) or full EvidenceRefs. Include only evidence the finding depends on. Never submit hypotheses as findings.", object({ summary: string, reviewedPaths: { type: "array", items: string, maxItems: 200, uniqueItems: true }, findings: { type: "array", items: finding, maxItems: 100 } }, ["summary", "reviewedPaths", "findings"]), async input => {
           requireCondition(!dispatch?.hasPending(), "CONTEXT_PENDING: New host context has not entered a model request. Read the next context package before submitting again.");
           requireText(input.summary, "summary"); requireCondition(input.summary.length <= 4000, "Summary exceeds limit");
