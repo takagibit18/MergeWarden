@@ -25,6 +25,8 @@ export interface FinalSubmissionInput { summary: string; reviewedPaths: string[]
 export interface RunManifest {
   schemaVersion: 1; runId: string; snapshotId: string; repositoryPath: string; model: ModelSelection;
   configurationFingerprint: string; limits: { timeoutMs: number; maxToolCalls: number };
+  /** Run-level policy identity; historical snapshots and reports remain immutable. */
+  reviewPolicy?: { version: string; sha256: string };
   status: "running" | "delivered" | "delivery_failed"; createdAt: string; finishedAt?: string;
   parentRunId?: string; outcome?: ReviewReport["status"]; error?: string;
   reportSha256?: string; markdownSha256?: string; usage?: { input: number; output: number; total: number };

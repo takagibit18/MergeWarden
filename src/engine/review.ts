@@ -2,6 +2,7 @@ import { StructuralDispatch } from "./dispatch-service.ts";
 import { ProgressiveInvestigation } from "./investigation-service.ts";
 import { OperationGate } from "./operations.ts";
 import { missingDiffCoverage, SubmissionValidationError } from "./submission-diagnostics.ts";
+import { FINAL_REVIEW_DESCRIPTION, REVIEW_DECISION_POLICY, REVIEW_DECISION_POLICY_VERSION } from "./prompt.ts";
 import type { OperationOrigin } from "./operations.ts";
 import { randomUUID } from "node:crypto";
 import { mkdir, open, realpath, rm } from "node:fs/promises";
@@ -27,7 +28,7 @@ const CLEANUP_TIMEOUT_MS = 1_000;
 const object = (properties: Record<string, unknown>, required: string[]) => ({ type: "object", properties, required, additionalProperties: false });
 const evidence = object({ snapshotId: string, revision, path: string, startLine: integer, endLine: integer, contentSha256: { type: "string", pattern: "^[a-f0-9]{64}$" } }, ["snapshotId", "revision", "path", "startLine", "endLine", "contentSha256"]);
 const evidenceInput = { anyOf: [object({ evidenceRefId: { type: "string", pattern: "^ev_[a-f0-9]{64}$" } }, ["evidenceRefId"]), evidence] };
-const finding = object({ id: string, title: string, claim: string, trigger: string, impact: string, severity: { type: "string", enum: ["critical", "high", "medium", "low"] }, evidence: { type: "array", items: evidenceInput, minItems: 1, maxItems: 20 } }, ["id", "title", "claim", "trigger", "impact", "severity", "evidence"]);
+const finding = object({ id: string, title: string, claim: { ...string, description: "Explain the violated contract, how this change causes it, and which selected source supports each material assertion. Account for relevant counterevidence." }, trigger: { ...string, description: "Concrete supported input or execution path that exposes the defect now, not a hypothetical future code change." }, impact: { ...string, description: "Observable failure or incorrect behavior supported by the inspected implementation and contract." }, severity: { type: "string", enum: ["critical", "high", "medium", "low"] }, evidence: { type: "array", items: evidenceInput, minItems: 1, maxItems: 20 } }, ["id", "title", "claim", "trigger", "impact", "severity", "evidence"]);
 function args(value: unknown): Record<string, unknown> { requireCondition(isRecord(value), "Tool arguments must be an object"); return value; }
 function text(value: unknown): string { requireText(value, "tool argument"); return value; }
 function rev(value: unknown): "base" | "head" { requireCondition(value === "base" || value === "head", "Invalid source revision"); return value; }
@@ -92,6 +93,7 @@ export class ReviewEngine {
       requireCondition(store.manifest.changedPaths.length <= 200, "Review scope exceeds 200 changed paths; select a smaller commit range");
       const runId = randomUUID(); const runDir = runPath(stateDir, runId); await mkdir(runDir, { recursive: true, mode: 0o700 });
       manifest = { schemaVersion: 1, runId, snapshotId: store.manifest.identity.id, repositoryPath: repository, model: options.model, configurationFingerprint: store.manifest.identity.configurationFingerprint, limits: { timeoutMs, maxToolCalls: maxTools }, status: "running", createdAt: new Date().toISOString(), ...(options.rerunId ? { parentRunId: options.rerunId } : {}) };
+      manifest.reviewPolicy = { version: REVIEW_DECISION_POLICY_VERSION, sha256: sha256(REVIEW_DECISION_POLICY) };
       await writeJson(join(runDir, "run.json"), manifest);
       const preparedOnly = options.evaluation?.graphMode === "prepared_only";
       graph = new LazyCodeGraph(stateDir, store.manifest.identity.id, { preparedOnly });
@@ -147,7 +149,7 @@ export class ReviewEngine {
           return page;
         }),
         tool("search_text", "Literal search of immutable source. Use path for an exact file or a directory ending in /. Follow nextCursor with the same revision, query and path to see omitted matches. Truncated or scoped results do not establish absence elsewhere; read_source is required for evidence.", object({ revision, query: string, path: { type: "string", minLength: 1, description: "Exact repository-relative file, or directory prefix ending in /." }, cursor: { type: "string", maxLength: 8192 }, limit: { type: "integer", minimum: 1, maximum: 100 } }, ["revision", "query"]), async input => store.search(rev(input.revision), text(input.query), number(input.limit, 50), { ...(input.path === undefined ? {} : { path: text(input.path) }), ...(input.cursor === undefined ? {} : { cursor: text(input.cursor) }) })),
-        tool("submit_review", "Submit the final mature advisory findings after investigation. reviewedPaths contains only fully read changed paths. A finding may explicitly select changed and untouched source evidence using {evidenceRefId} from read_source (preferred) or full EvidenceRefs. Include only evidence the finding depends on. Never submit hypotheses as findings.", object({ summary: string, reviewedPaths: { type: "array", items: string, maxItems: 200, uniqueItems: true }, findings: { type: "array", items: finding, maxItems: 100 } }, ["summary", "reviewedPaths", "findings"]), async input => {
+        tool("submit_review", FINAL_REVIEW_DESCRIPTION, object({ summary: { ...string, description: "Summarize checked contracts, reasons for excluding investigated concerns, and unresolved limitations. Required even when findings is empty; do not claim uninspected behavior was verified." }, reviewedPaths: { type: "array", items: string, maxItems: 200, uniqueItems: true }, findings: { type: "array", items: finding, maxItems: 100 } }, ["summary", "reviewedPaths", "findings"]), async input => {
           requireCondition(!dispatch?.hasPending(), "CONTEXT_PENDING: New host context has not entered a model request. Read the next context package before submitting again.");
           requireText(input.summary, "summary"); requireCondition(input.summary.length <= 4000, "Summary exceeds limit");
           requireCondition(Array.isArray(input.findings) && input.findings.length <= 100 && Array.isArray(input.reviewedPaths) && input.reviewedPaths.length <= 200, "Invalid submission");
