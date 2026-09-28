@@ -22,7 +22,8 @@ export function planBatch(tasks,{selected,armNames=['T0','G0','G1'],repeats=1}) 
 /** Resume schedules new attempts; prior failures and crashes remain on disk.
  * Model state is never resumed and accepted findings from partial runs are retained.
  */
-export async function executeBatch({output,plan,identity,resume=false,execute,signal}) {
+export async function executeBatch({output,plan,identity,resume=false,execute,signal,maxJobs=Infinity,shouldStop=()=>false}) {
+ if(maxJobs!==Infinity&&(!Number.isSafeInteger(maxJobs)||maxJobs<1))throw Error('Invalid batch checkpoint');
  await mkdir(output,{recursive:true});
  const lockPath=join(output,'running.lock');let mutex;
  try{mutex=await open(lockPath,'wx');}catch(error){
@@ -43,6 +44,7 @@ export async function executeBatch({output,plan,identity,resume=false,execute,si
   catch(e){if(e.code!=='ENOENT')throw e;if(resume)throw Error('Cannot resume absent batch');batch={schemaVersion:1,identity,identitySha256:digest(identity),planSha256:digest(plan),plan,startedAt:new Date().toISOString()};await writeJson(file,batch);}
   const results=[];
   for(const job of plan){
+   if(results.length>=maxJobs)break;
    signal?.throwIfAborted();const directory=join(output,'attempts',job.task.case_id,String(job.repeat),job.arm);await mkdir(directory,{recursive:true});
    const existing=(await readdir(directory)).filter(x=>/^\d+\.json$/.test(x)).sort((a,b)=>Number(a.split('.')[0])-Number(b.split('.')[0]));
    const attempts=await Promise.all(existing.map(x=>readFile(join(directory,x),'utf8').then(JSON.parse)));
@@ -59,10 +61,12 @@ export async function executeBatch({output,plan,identity,resume=false,execute,si
    catch(error){record={...record,status:signal?.aborted?'cancelled':'failed',error:'Review/materialization/delivery failed; inspect retained native artifacts. '+(error.code??''),delivered:false};
     record.elapsedMs=performance.now()-started;record.finishedAt=new Date().toISOString();await writeJson(target,record);results.push(record);await writeJson(join(output,'latest.json'),{identitySha256:batch.identitySha256,runs:results});
     if(error?.code==='EXPERIMENT_PROTOCOL_VIOLATION')throw error;
+    if(shouldStop(record))break;
     continue;
    }
    record.elapsedMs=performance.now()-started;record.finishedAt=new Date().toISOString();await writeJson(target,record);results.push(record);
    await writeJson(join(output,'latest.json'),{identitySha256:batch.identitySha256,runs:results});
+   if(shouldStop(record))break;
   }
   await writeJson(join(output,'latest.json'),{identitySha256:batch.identitySha256,runs:results});return results;
  }finally{await mutex.close();await unlink(lockPath);}

@@ -1,0 +1,11 @@
+import {spawn} from 'node:child_process';
+import {readdir} from 'node:fs/promises';
+import {join,dirname,resolve} from 'node:path';
+import {root,read} from './ab-contract.mjs';
+const output=resolve(process.argv[2]),auth=resolve(process.argv[3]),experiment=await read(join(output,'experiment.json'));
+const sources=['src','node_modules','integrations/pi/src','integrations/pi/node_modules','integrations/tree-sitter/src','integrations/tree-sitter/node_modules','integrations/tree-sitter/grammars'].map(p=>join(root,p));
+const evalFiles=(await readdir(join(root,'eval/real'))).filter(f=>f.endsWith('.mjs')).map(f=>join(root,'eval/real',f));
+const files=experiment.code.map(f=>join(root,f.path));
+const reads=[...new Set([...sources,...evalFiles,...files.filter(f=>f.endsWith('package-lock.json')),join(root,'package.json'),join(root,'integrations/pi/package.json'),join(root,'integrations/tree-sitter/package.json'),output,dirname(auth),...experiment.cases.map(c=>c.repositoryPath)])];
+const args=['--experimental-strip-types','--permission','--allow-worker',...reads.map(p=>'--allow-fs-read='+p),'--allow-fs-write='+output,'--allow-fs-write='+dirname(auth),join(root,'eval/real/ab-run.mjs'),output,auth,...(process.argv.includes('--resume')?['--resume']:[]),...(process.argv.includes('--check-only')?['--check-only']:[])];
+const child=spawn(process.execPath,args,{stdio:'inherit',windowsHide:true});child.on('exit',code=>process.exitCode=code??1);

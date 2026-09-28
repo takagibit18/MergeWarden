@@ -3,7 +3,7 @@ import {createPiRuntime} from '../../integrations/pi/src/runtime.ts';
 import {INVESTIGATION_MESSAGE} from '../../src/engine/investigation-contracts.ts';
 import {trigger} from './common.mjs';
 /** Only admission/transport hooks: Pi still owns the complete main review loop. */
-export async function microRuntime(options,modelRuntime,{case:c,prefix,prompt,arm,config,onPackage=async()=>{},onPayload=async()=>{},onExtensionError=()=>{}}){
+export async function microRuntime(options,modelRuntime,{case:c,prefix,prompt,arm,config,onPackage=async()=>{},onPayload=async()=>{},onExtensionError=()=>{},validatePayload}){
  const names=['read_diff','search_text','read_source','submit_review',...(arm==='B'?['expand_structural_candidate']:[])];
  const tools=options.tools.filter(t=>names.includes(t.name));assert.deepEqual(tools.map(t=>t.name).sort(),names.sort());
  const service=options.routing?.dispatch;assert.equal(!!service,arm==='B');
@@ -21,10 +21,17 @@ export async function microRuntime(options,modelRuntime,{case:c,prefix,prompt,ar
    return {message:{customType:INVESTIGATION_MESSAGE,content:JSON.stringify(pack),display:true}};
   });
   pi.on('before_provider_request',async event=>{
-   const payload=event.payload;payload.temperature=config.temperature;payload.top_p=config.top_p;
-   assert.equal(payload.model,config.model.modelId);assert.equal(payload.max_tokens,config.maxTokens);
+   const payload=event.payload;
+   assert.equal(payload.model,config.model.modelId);
+   if(validatePayload)validatePayload(payload,names);
+   else {
+   assert.equal(payload.temperature,config.temperature);assert.equal(payload.top_p,config.top_p);
+   // Pi reserves room for the growing conversation. The run setting is a ceiling,
+   // not a requirement to overwrite Pi's native per-request context clamp.
+   assert(Number.isInteger(payload.max_tokens)&&payload.max_tokens>0&&payload.max_tokens<=config.maxTokens,'Output budget must stay within the frozen ceiling');
    assert.deepEqual(payload.thinking,config.thinking);
    assert.deepEqual(payload.tools.map(t=>t.function.name).sort(),names);
+   }
    if(service){service.providerPayload(payload);assert.equal(service.hasPending(),false,'CandidateCatalog not provider-delivered');assert.equal(service.metrics.packagesDelivered,1);delivered=true;}
    await onPayload(payload);return payload;
   });
@@ -33,6 +40,7 @@ export async function microRuntime(options,modelRuntime,{case:c,prefix,prompt,ar
    service.observe({toolName:event.toolName,toolCallId:event.toolCallId,input:event.input,result,isError:event.isError});
   });
  };
- const runtime=await createPiRuntime({...options,tools},modelRuntime,{extensions:[extension],firstAttemptOnly:true,onExtensionError});
+ const inference={...options.inference,maxOutputTokens:config.maxTokens,thinkingLevel:config.thinkingLevel??'low',temperature:config.temperature,topP:config.top_p};
+ const runtime=await createPiRuntime({...options,tools,inference},modelRuntime,{extensions:[extension],firstAttemptOnly:true,onExtensionError});
  return {...runtime,async prompt(base,signal){await runtime.prompt(base+'\n\n'+prompt,signal);if(service)assert(delivered,'Mechanical structural delivery absent');}};
 }

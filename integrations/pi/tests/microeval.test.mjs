@@ -34,7 +34,7 @@ for(const arm of ['A','B','failure','isolated'])test('pre-registered Pi main loo
   assert.equal(child.status,0,child.stdout+child.stderr);assert.equal(JSON.parse(await readFile(join(f.state,'isolated-result.json'),'utf8')).status,'PASS');return;
  }
  let requests=0,runDir,pack,selected;const prior=globalThis.fetch;globalThis.fetch=async(url,init)=>{
-  const body=await new Request(url,init).json();requests++;assert.equal(body.temperature,0);assert.equal(body.top_p,1);
+  const body=await new Request(url,init).json();requests++;assert.equal(body.temperature,0);assert.equal(body.top_p,1);assert.equal(body.reasoning_effort,'low');
   if(arm==='failure')return new Response(JSON.stringify({error:{message:'fixture failure'}}),{status:500,headers:{'Content-Type':'application/json'}});
   const call=(name,args)=>({name,args});let actions=[];
   if(requests===1){assert(strings(body.messages).some(s=>s.includes('Frozen public observations')));
