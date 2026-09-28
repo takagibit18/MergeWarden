@@ -162,7 +162,7 @@ export class SnapshotStore implements SourceReader {
     if (startLine > lines.length && lines.length > 0) throw new Error("Line range outside source");
     const actualEnd = Math.min(endLine, lines.length); const snippet = lines.slice(startLine - 1, actualEnd).join("\n");
     if (Buffer.byteLength(snippet) > 32_768) throw new Error("Source range exceeds output limit; request fewer lines");
-    return { snapshotId: this.manifest.identity.id, revision, path, status: "ok", text: snippet, startLine, endLine: actualEnd, totalLines: lines.length, contentSha256: sha256(snippet), truncated: actualEnd < lines.length, warnings: [] };
+    return { snapshotId: this.manifest.identity.id, revision, path, status: "ok", text: snippet, startLine, endLine: actualEnd, totalLines: lines.length, contentSha256: sha256(snippet), truncated: false, hasMoreLines: actualEnd < lines.length, warnings: [] };
   }
   async read(ref: EvidenceRef): Promise<{ text: string; actualSha256: string }> {
     if (ref.snapshotId !== this.manifest.identity.id) throw new Error("Evidence snapshot mismatch");
@@ -185,15 +185,39 @@ export class SnapshotStore implements SourceReader {
     const next = offset + selected.length; const truncated = next < all.length;
     return { snapshotId: this.manifest.identity.id, path, status: "ok", lines: selected, offset, totalLines: all.length, ...(truncated ? { nextCursor: next } : {}), truncated, warnings: ["Frozen unified diff; widely separated edits may share a coalesced hunk"] };
   }
-  async search(revision: "base" | "head", query: string, limit = 50): Promise<unknown> {
+  async search(revision: "base" | "head", query: string, limit = 50, options: { path?: string; cursor?: string } = {}): Promise<unknown> {
     if (!["base", "head"].includes(revision) || !query || query.length > 256 || !Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("Invalid literal search");
+    const scope = options.path;
+    if (scope !== undefined) safePath(scope.endsWith("/") ? scope.slice(0, -1) : scope);
+    const paths = Object.keys(this.manifest[revision]).sort().filter(p => scope === undefined || (scope.endsWith("/") ? p.startsWith(scope) : p === scope));
+    if (scope !== undefined && !paths.length) throw new Error("Search path is absent from this revision");
+    const key = sha256(JSON.stringify([this.manifest.identity.id, revision, query, scope ?? null]));
+    let resume: { key: string; path: string; line: number } | undefined;
+    if (options.cursor !== undefined) {
+      try {
+        if (options.cursor.length > 8192) throw new Error();
+        resume = JSON.parse(Buffer.from(options.cursor, "base64url").toString("utf8"));
+        if (!resume || resume.key !== key || !paths.includes(resume.path) || !Number.isSafeInteger(resume.line) || resume.line < 1) throw new Error();
+      } catch { throw new Error("Invalid search cursor for this snapshot, revision, query or path"); }
+    }
     const items: { path: string; line: number; text: string }[] = []; let truncated = false; let scanned = 0; let skipped = 0; let outputBytes = 0;
-    for (const path of Object.keys(this.manifest[revision]).sort()) {
+    let nextCursor: string | undefined;
+    for (const path of paths) {
+      if (resume && path < resume.path) continue;
       if (this.manifest[revision][path]!.status !== "text") { skipped++; continue; }
       const lines = (await this.text(revision, path)).split("\n"); scanned++;
-      for (let i = 0; i < lines.length; i++) if (lines[i]!.includes(query)) { const item = { path, line: i + 1, text: lines[i]!.slice(0, 500) }; const bytes = Buffer.byteLength(JSON.stringify(item)); if (items.length >= limit || outputBytes + bytes > 32_768) { truncated = true; break; } items.push(item); outputBytes += bytes; }
+      const start = resume?.path === path ? resume.line - 1 : 0;
+      if (start >= lines.length) throw new Error("Search cursor line outside source");
+      for (let i = start; i < lines.length; i++) if (lines[i]!.includes(query)) {
+        const item = { path, line: i + 1, text: lines[i]!.slice(0, 500) }; const bytes = Buffer.byteLength(JSON.stringify(item));
+        if (items.length >= limit || outputBytes + bytes > 32_768) {
+          if (!items.length) throw new Error("Search item exceeds output limit");
+          truncated = true; nextCursor = Buffer.from(JSON.stringify({ key, path, line: i + 1 })).toString("base64url"); break;
+        }
+        items.push(item); outputBytes += bytes;
+      }
       if (truncated) break;
     }
-    return { snapshotId: this.manifest.identity.id, revision, status: "ok", items, truncated, coverage: { scannedFiles: scanned, skippedFiles: skipped, totalFiles: Object.keys(this.manifest[revision]).length }, warnings: skipped ? ["Non-text, oversized, symbolic link and submodule files are excluded from text search"] : [] };
+    return { snapshotId: this.manifest.identity.id, revision, status: "ok", items, truncated, ...(nextCursor ? { nextCursor } : {}), ...(scope === undefined ? {} : { path: scope }), coverage: { scannedFiles: scanned, skippedFiles: skipped, totalFiles: Object.keys(this.manifest[revision]).length, scopedFiles: paths.length }, warnings: ["Search coverage is per page and scope; omitted or non-text files do not establish absence."] };
   }
 }

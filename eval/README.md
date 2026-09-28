@@ -1,5 +1,32 @@
 # Python retrieval evaluation
 
+## GPT 配对批次（独立后继协议）
+
+`real/ab-prepare.mjs` 和 `real/ab-launch.mjs` 使用现有 RealGolden40 全部公开任务，冻结
+`openai-codex / gpt-5.6-luna / max`。A 为文本工具，B 为生产路由扩展自动触发的
+`pi_structural_v1 + dispatch_v2`，不复用诊断样本的预选调查目标。Pi 仍拥有全部模型/工具循环。
+这是用户指定的分阶段后继实验，不冒充旧 GLM 三臂 reserve/formal 锁已获得的新模型准入。
+
+```sh
+node --experimental-strip-types eval/real/ab-prepare.mjs /outside/new-output /outside/repository-cache
+node --experimental-strip-types eval/real/ab-launch.mjs /outside/new-output /absolute/auth/auth.json --check-only
+node --experimental-strip-types eval/real/ab-launch.mjs /outside/new-output /absolute/auth/auth.json
+node --experimental-strip-types eval/real/ab-launch.mjs /outside/new-output /absolute/auth/auth.json --resume
+```
+
+先运行 `npm run verify`。准备仅使用已缓存 Git 对象；`--check-only` 校验代码、全部快照/图、
+模型身份和隐藏标签的文件权限隔离，不访问真实模型。首次执行保留完整 80-job 计划，在
+10 个配对/20 次首轮后退出。续跑要求阶段复审生成 `checkpoint-review.json`，其中
+`decision: CONTINUE`、`experimentSha256`、`reviewedRuns` 和 `observedRunsSha256` 绑定实验及当前全部结果（后者为 `digest(latest.runs)`）。提前中断后续跑仍会在第 20 条暂停，复审该阶段后才可继续剩余样本。
+不得用回执掩盖故障、覆盖失败或改变配置；代码变化应另建实验。失败、部分完成和观测异常均提前停批。
+
+协议 `gpt-paired-ab-2` 冻结统一的 `review-closeout-1` 策略：A/B 共享同一操作/时间收尾规则，默认剩 20 次或 180 秒提醒，剩 10 次或 90 秒只允许提交及修正，硬上限仍为 100 次/600 秒。策略详细计费见主 README。旧协议必须保留原始结果，不能直接续接新代码。请求观测逐条关联请求审计与原生回答，将本地取消消息、真正中断的请求、供应商错误分开；未知用量保持缺失，不填零。
+
+正式调用统计取 `toolExecuted`；宿主检索操作另记，共享引擎操作预算。禁用自动重试与压缩。
+32768 是本地配置，当前 Codex 请求不携带服务端输出硬上限，不能宣称硬 token 等预算。
+保留请求、原生会话、用量、首轮结果、图归因及准备成本；最终质量仍需独立于组别裁定。
+已有语料及标签来源不变，不能因为新模型重新运行就称为未见样本或独立人工金标准。
+
 ## 真实 PR 候选扩充（独立于受控 Golden）
 
 `real/manifests/candidates.index.json` 固定真实 PR 候选的 repository、完整来源 SHA、source-row hash 和准入状态；对应 lock 校验字节。它包含 40 个 c-CRAB 正例候选和 64 个 SWRBench source-clean 候选，**不是已审核的 40-case gold**。`screening.json` 只记录 Agent 对原始评语的功能范围筛选，不把排除的评语对应 PR 改标 clean，也不声称人工审查。已有受控 r1/r2 的文件、答案及历史成绩独立保存。
@@ -42,7 +69,7 @@ npm run eval:real-live -- --live --corpus eval/real/corpora/mergewarden-real-pyt
 
 300 秒/100 tools 是 reserve 的初始运行配置示例，正式预算必须根据本机 pilot 冻结。锁固定 GLM-5.3-Flash、Pi、完整 prompt（含实际 cwd）、实现摘要和 Git commit；运行中不可改变。`--subset ID,ID`、`--arms T0,G0,G1`、`--repeat 2` 可缩小任务或重复运行。reserve 锁使用 `operational_retry`：`--resume` 可仅补跑未完整交付的 job，并保留每次失败尝试及 native session/report。formal 锁强制 `first_attempt`：一个 run key 第一次开始后，completed/partial/failed/timeout/中断记录都是唯一正式结果，resume 只运行从未开始的 job。无法确认拥有者的锁不自动清理。
 
-`lock` 另支持 `--max-tokens 16384 --provider-reasoning-effort high`：通过 Pi 公共 provider 注册接口，仅在评测实例中设置预算，复用同一运行循环，产品 catalog 不变。默认仍为 8192 / `provider-default`。Pi 的 `medium` 是客户端档位；旧 catalog 不发送 `reasoning_effort`，不能将它冒充服务端 medium。显式档位支持 low/high/max，锁同时记录客户端和服务端设置；请求级离线测试验证实际 HTTP payload。调整必须新建 reserve 锁及输出目录，并让三组全部使用同一配置；正式锁必须匹配所依据 pilot 的模型预算。截断、超时和初次网络失败不能由重试成功覆盖。
+`lock` 另支持 `--max-tokens 16384 --provider-reasoning-effort high`：通过与正式运行相同的 Pi 接入入口选择本次策略，产品 catalog 不变。新锁默认 8192 / `low`；显式档位支持 low/high/max，不再把内部 medium 偷换成原生档位，也不接受旧的 provider-default 配置。模型声明使用 Pi 原生兼容字段与档位映射；每轮发送前参数保存在原生会话审计条目中。调整必须新建 reserve 锁及输出目录，并让三组全部使用同一配置；正式锁必须匹配所依据的 reserve 配置。历史锁、原始请求和结果不可回填。
 
 正式 `lock --kind formal --pilot ../real-work/reserve-run` 必须读取至少 6 个永久预留 task 的三组完成记录，校验原生交付及同一 snapshot，并要求 coverage 和实测 pilot 有调查余量。指定新 `--run-output` 和相同模型配置；只有返回 `READY` 的正式锁可用于 formal tasks。未完成 pilot 时不可启动正式付费实验，reserve 结果不进入正式质量报告。
 
@@ -137,6 +164,23 @@ npm run eval:human-review -- --validate /path/to/golden-human-review.json --outp
 第二条命令验证 corpus hash、20 个 case 身份和 base/head SHA，生成 `reviewed-provenance.json`。其中每例有效 `annotationProvenance.status` 为 pending_human_review、human_reviewed_accepted 或 human_reviewed_disputed；保留签署人、日期和原始理由。软件只能验证声明与数据结构，不能自行证明审核人的身份。部分复核不会升级未审案例；不同意任一标签/行为/severity 或仍有偏向疑问时，必须标记 needs_revision/reject，不能静默接受。
 
 此 receipt 是绑定所选 corpus 的人工来源记录，不修改冻结 case/答案/lock。r2 的 `annotationProvenance` 如实描述 Agent 编写和复核来源；`corpus-revision.json` 保存 Agent 状态，不可冒充这里的人工声明。只有实际人工作答才能生成 human_reviewed 状态。后续再次修订须另建版本，旧实验继续引用原 hash。schema 见 `schemas/human-review.schema.json`。
+
+## 受控端到端接入采样
+
+`controlled-e2e` 在已有三个不可变历史案例上验证新接入策略和数据记录。它复用同一 ReviewEngine、Pi 会话和结构调查服务；包装器只选择案例、观察传输和汇总结果，不接管模型工具循环。
+
+```sh
+node --experimental-strip-types eval/controlled-e2e/prepare.mjs /outside/previous-microeval /outside/session-opaque-id
+node --experimental-strip-types eval/controlled-e2e/launch.mjs /outside/session-opaque-id --offline
+node --experimental-strip-types eval/controlled-e2e/launch.mjs /outside/session-opaque-id
+node --experimental-strip-types eval/controlled-e2e/summarize.mjs /outside/session-opaque-id
+```
+
+必须使用新输出目录。准备阶段固定快照、源码摘要、六次首轮顺序、`low` 推理、32768 输出上限和每次十分钟上限。输出上限不等于每轮固定额度：Pi 会根据增长的上下文自动缩小实际额度，采样只验证实际值为正且不超过上限，并保存每轮参数。输出目录使用中性名称，因为 Pi 会把工作目录写入模型提示。实时运行前必须通过同一冻结输入的全部模拟预检。凭据仍只来自 `MERGEWARDEN_API_KEY`。无自动重试或换例；任一方式遇到接口、原生记录、请求摘要或结构包交付故障，都停止剩余批次。预算不足或缺少最终提交保留为未完成。
+
+修复机械故障后，如需继续尚未尝试的组合，可在 `prepare.mjs` 的第四个参数传入已停止批次目录。这会建立新冻结和 `prior-attempts.json`，排除全部已尝试组合；不能覆盖旧结果，也不能把两个运行版本当作严格质量对照。原生发送前记录与 HTTP 发送记录分别计数；准备后被取消的请求单列，不能误计为实际服务调用或直接视为摘要不一致。
+
+每次保存原始请求、完整或部分流式响应、逐请求时间点与供应商用量、逐工具执行时间、原生会话和正式报告。汇总再校验报告摘要、请求摘要、工具轨迹和证据是否进入后续请求；`runs.csv`、`requests.csv`、`summary.json` 区分完整用量和已知下限。分析器另存自身摘要，模拟结果只进入 `preflight`。这是执行准入采样，不能当成独立盲测、自动选路覆盖或质量增益证明。
 
 ## 工具轨迹与 Finding 归因
 

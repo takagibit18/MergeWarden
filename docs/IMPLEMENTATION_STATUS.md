@@ -1,4 +1,47 @@
-# 当前实现状态 · 2026-09-24
+# 当前实现状态 · 2026-09-26
+
+ChangeUnit Semantic Intent Router 的 eval-only shadow 已完成到私有准入停止点，见
+[实验契约](experiments/SEMANTIC_INTENT_ROUTER.md)。公开准入为 7 defect + 13 clean；
+20 次独立首轮请求得到 15 个格式有效输出、5 个格式失败、0 个 provider failure。
+预测冻结后，36 个合法 oracle plans 各重放两次，仅 1 个 defect structurally actionable，
+低于要求的 4 个。状态为 **INCONCLUSIVE — INSUFFICIENT STRUCTURALLY ACTIONABLE ROUTE MISSES**。
+未执行预测计划评分、Candidate Choice、small model、Hybrid Shadow 或 Review E2E，产品运行时不变。
+最新完整验证为 478 passed / 0 failed / 0 skipped；历史 Attribution v3 与 dispatch_v2 Gate 1 包 hash 保持一致。
+下一阶段仅建议 **C. EXPAND STRUCTURALLY ACTIONABLE DATASET**，本轮不自动扩展或重跑。
+
+## dispatch_v2 工程阶段 · 2026-09-26
+
+新增内部实验策略 `dispatch_v2`，架构见 [ADR 0017](adr/0017-progressive-structural-investigation.md)。
+生产接入包括稳定 ChangeUnit/Investigation、逐 hint 精确解析、多 root 共享预算、
+Gate2B 共享探索实现、CandidateCatalog、一个预取源码、主 Agent 候选展开、
+缓存与独立 v2 归因。默认 advisory、dispatch_v1、历史 Attribution v3 与 ADR 0016 保持原语义。
+
+本轮 main 基线为 PR #11 合并提交 `35c382c`：438 passed / 0 failed / 0 skipped。
+最新完整 `npm run verify` 为 456 passed / 0 failed / 0 skipped。
+新增真实 Pi SDK 离线 HTTP 测试覆盖展开取证、提前提交、伪造引用和展开持久化故障；
+这些是工程测试，不是实际模型审查成绩。
+
+Gate 1 的 24 个历史前缀强制末尾诊断中，V1 为 7 resolved / 14 ambiguous / 3 missing；
+V2 为 15 resolved / 8 partial / 0 ambiguous / 1 missing，23 个启动 Graph、17 个交付目录。
+实际确定性路由仅触发 3 个案例：V1 3 个 ambiguous，V2 2 个 resolved / 1 个 ambiguous，
+2 个启动 Graph、1 个交付目录。强制末尾诊断不能冒充实际路由覆盖或 Graph 审查价值。
+独立性能产物完成 24 × 100 次诊断重放及 3 × 100 次实际触发重放，包字节均稳定。
+24 个诊断案例 p50 的中位数为 9.10 ms，最差单例 p95 为 44.62 ms，最大 74.08 ms；
+最大包 24,503 bytes、最大队列 26，采样 heap 最大约 168.1 MiB。
+延迟不含 prepared graph 加载/索引初始化，heap 是进程采样而非隔离分配量。
+34 条历史 Attribution v3 会话双次重放与原存档逐字节相同，未回填历史分数。
+
+Gate 2 在既有 full-context 数据集和预登记 D3/D4/D6 上执行公开准入：15 个登记项中
+2 个重复；13 个独立项中 8 个无路由、2 个 root ambiguous、1 个候选池仅 1 项、
+2 个公开条件合格。公开准入上限 2 < 6，因此未打开私有 target、未调用模型、
+未运行 source-fact scoring 或 Gate 3。不能宣称候选选择或 Review 质量通过。
+当前首要限制是 Router 的真实触发覆盖，另有 Investigation 同名范围歧义；
+没有通过调整 selector、Graph schema 或强制路由补足样本。
+
+新实验仅写入 checkout 外 `../output/progressive-structural-investigation-20260926/`。
+首次 Windows 隔离启动失败及首次元数据超限失败均保留，修复使用新的实验目录。
+
+## 历史状态 · 2026-09-24
 
 当前开发基线继承本地 Routing v1 / ABC 提交 c857941、26e6535，未回退到远端 main。Routing 产品默认 none；pi_structural_v1、pi_structural_v2_investigate、pi_structural_v2_synthesize 的触发、预算与 B/C 卡措辞保持冻结。Graph v4、prepared-only、RealGolden 和模型配置未修改。
 
@@ -28,11 +71,11 @@ v0.2 的 Python 图与评测工程路径已接在 v0.1 上，修订 Golden 前�
 |---|---|---|
 | 快照 | 提交、暂存区、已保存工作区；仓库外内容存储；版本身份；冻结竞争检查 | VS Code 的用户选择及产品验收 |
 | 文本取证 | 源码行号/hash、差异分页、字面搜索；明确截断/不支持文件 | 非文本内容的语义审查 |
-| 业务引擎 | final_only；候选结构/证据/覆盖核验；取消、工具和时间预算 | 缺陷语义正确性须人工判断 |
-| Pi | 单会话内置供应商及国内 BigModel GLM-5.3-Flash；该模型真实 CLI smoke 已通过；明确 API Key；精确工具白名单；不加载仓库指令/扩展 | 其他供应商未实测；OAuth 不支持 |
+| 业务引擎 | final_only；候选结构/证据/覆盖核验；统一模型/宿主操作预算；分阶段提醒、保留提交额度及硬截止；明确终止原因 | 缺陷语义正确性须人工判断；新收尾策略已通过原生 Pi 离线验收，真实模型完成率待后继实验验证 |
+| Pi | 单会话内置供应商及国内 BigModel GLM-5.3-Flash；明确 API Key 或显式 Pi 原生 OAuth；Codex 登录及真实模型调用已在受控采样中跑通；精确工具白名单；不加载仓库指令/扩展 | 不保证账号具有目录内全部模型权限；既有采样不证明新收尾策略或图模式质量收益 |
 | 原生日志 | 独占空文件经公开 SessionManager.open 初始化；首条回复前持久化；fsync 和写入故障检查 | 不宣称数据库级事务或 exactly-once |
 | 报告和恢复 | JSON/Markdown 原子替换；交付清单最后写入；历史校验；原快照新 run | 中断模型会话不续接；运行中硬退出可能留锁 |
-| CLI | review/rerun/models/history/show/evidence/doctor/unlock | VS Code UI 尚未实现 |
+| CLI | review/rerun/models/history/show/evidence/doctor/unlock；login/auth-status/logout 管理仓库外专属 OAuth 凭据 | VS Code UI 尚未实现 |
 | Python 图 | 固定 grammar；directory/file/class/function；CONTAINS/IMPORTS/CALLS/INHERITS；core/all 分层；两遍流式保守 resolver；可恢复 checkpoint、紧凑不可变 generation 原子发布、失败缓存、单 review 可终止 worker | 只索引 head；动态 receiver、全类型推断、高级 import 根及跨 snapshot 增量更新不支持 |
 | VS Code/WSL | 路线和契约确定 | 扩展、VSIX 及正式环境验收待后续 |
 | 评测 | 当前 r2 的 20 例 Git SHA/源码/hash；12 defect + 8 clean；r1 按原字节归档；r2 的 8-case T0/G0/G1 挑战已实跑；RealGolden40 120 个正式 first-attempt 已保全，4 completed / 116 provider failures；逐例语义 mapping 与 native trace 派生归因 | 本轮正式结果因余额耗尽不能用于三臂质量/成本比较；须充值后另建 successor lock/output，不得覆盖本轮；样本仍由 Agent 审核、非独立 holdout |

@@ -33,7 +33,7 @@ test('BigModel uses bearer auth and exact Flash model through the real Pi HTTP a
     assert.equal(r.url,'https://open.bigmodel.cn/api/paas/v4/chat/completions');
     assert.equal(r.headers.get('authorization'),'Bearer fixture-secret'); assert.match(r.headers.get('content-type'),/application\/json/);
     assert.equal(r.body.model,'glm-5.3-flash'); assert.equal(r.body.max_tokens,256);
-    assert.equal(r.body.store,undefined); assert.equal(r.body.reasoning_effort,undefined);
+    assert.equal(r.body.store,undefined); assert.equal(r.body.reasoning_effort,'low'); assert.equal(r.body.tool_stream,true);
     assert.deepEqual(r.body.thinking,{type:'enabled',clear_thinking:false}); assert.equal(r.body.messages[0].role,'system');
   }
   const assistant=requests[1].body.messages.find(m=>m.role==='assistant');

@@ -9,7 +9,7 @@ const run=async(args,env={})=>{try{return {code:0,...await exec(process.execPath
 
 test('CLI help and status identify the real-model gate',async()=>{
   const help=await run(['help']); assert.equal(help.code,0); assert.match(help.stdout,/api-key-env/);
-  const status=await run(['status']); const value=JSON.parse(status.stdout); assert.equal(value.liveModelValidated,true); assert.equal(value.liveModelValidation.provider,'bigmodel'); assert.match(value.liveModelValidation.scope,/timeout/);
+  const status=await run(['status']); const value=JSON.parse(status.stdout); assert.equal(value.liveModelValidated,false); assert.equal(value.liveModelValidation.historical,true); assert.equal(value.liveModelValidation.appliesToCurrentProviderPolicy,false); assert.equal(value.liveModelValidation.provider,'bigmodel'); assert.match(value.liveModelValidation.scope,/timeout/);
 });
 
 test('CLI rejects missing explicitly named credentials without starting a model',async t=>{
@@ -25,4 +25,16 @@ test('CLI history starts empty and doctor reports the current environment',async
 test('CLI rejects duplicate options without revealing environment key contents',async()=>{
   const result=await run(['review','--model','one','--model','two','--api-key-env','MW_TEST_SECRET'],{MW_TEST_SECRET:'sensitive-fixture-value'});
   assert.equal(result.code,2); assert.match(result.stderr,/Duplicate/); assert.doesNotMatch(result.stdout+result.stderr,/sensitive-fixture-value/);
+});
+
+test('CLI rejects ambiguous OAuth and API-key selection before loading Pi',async t=>{
+  const f=await repositoryFixture(t);
+  const incompatible=await run(['review','--repo',f.repository,'--state',f.state,'--base',f.base,'--head',f.base,'--provider','openai-codex','--model','gpt-5.4','--auth','oauth','--api-key-env','OPENAI_API_KEY']);
+  assert.equal(incompatible.code,2);assert.match(incompatible.stderr,/cannot be combined/);
+});
+
+test('CLI OAuth login refuses credential state inside the reviewed checkout',async t=>{
+  const f=await repositoryFixture(t);
+  const result=await run(['auth-status','--provider','openai-codex','--repo',f.repository,'--state',f.repository]);
+  assert.equal(result.code,2);assert.match(result.stderr,/outside and separate/);
 });

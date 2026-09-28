@@ -120,8 +120,12 @@ test('interruption before delivery manifest cannot confirm a report', async t =>
 });
 
 test('rerun creates a new run on the original immutable snapshot', async t => {
-  const f = await setup(t); const engine = new ReviewEngine(runtime(tools => submit(tools))); const first = await engine.run(f.options);
-  await f.write('app.py','totally different\n'); const second = await engine.run({...f.options, input:undefined, rerunId:first.runId});
+  const f = await setup(t),seen=[],factory=runtime(tools => submit(tools));
+  const engine = new ReviewEngine(options=>{seen.push(options.inference);return factory(options);});
+  const low={thinkingLevel:'low',maxOutputTokens:8192},high={thinkingLevel:'high',maxOutputTokens:16384};
+  const first = await engine.run({...f.options,inference:low});
+  await f.write('app.py','totally different\n'); const second = await engine.run({...f.options, inference:high, input:undefined, rerunId:first.runId});
+  assert.deepEqual(seen,[low,high]);
   assert.notEqual(first.runId, second.runId); assert.equal(first.report.snapshot.id, second.report.snapshot.id);
   assert.equal((await history(f.state)).find(m=>m.runId===second.runId).parentRunId,first.runId);
   await assert.rejects(engine.run({...f.options, rerunId:first.runId, model:{provider:'other',modelId:'offline'}}),/same repository and model/);

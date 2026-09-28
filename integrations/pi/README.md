@@ -11,7 +11,7 @@ npm test
 
 ## 生产路径
 
-- 精确指定 provider/model，不静默回退；API Key 仅由宿主显式传入。静态目录不发起网络刷新，不读本地 auth.json/models.json。
+- 精确指定 provider/model，不静默回退；API Key 仅由宿主显式传入。OAuth 显式使用仓库外专属 `auth/auth.json`，通过 Pi 原生 `ModelRuntime.login/getAuth/logout` 管理；不读取既有 Pi/Codex 登录或仓库 models.json，静态目录不发起网络刷新。
 - session 的 cwd/agentDir 位于独立运行目录；关闭仓库指令、context files、扩展、skills、prompt templates、themes。
 - `tools` 精确白名单并关闭内置工具；源码工具绑定冻结快照，最终提交由业务引擎处理。
 - 独占空 JSONL 经公开 SessionManager.open 初始化；首条 assistant 前可保存业务事件。
@@ -23,10 +23,10 @@ npm test
 
 覆盖：首条回复前落盘、原生重开、分支/序列/身份校验、截断日志、写失败终止、完整离线工具循环和报告交付。原有 synthetic assistant fixture 只存在于历史回归测试，不用于生产初始化。
 
-真实 API Key、供应商错误类型、模型输出质量与实际价格尚未验收。真实模型调用前按 [验收指南](../../docs/LIVE_ACCEPTANCE.md) 配置。供应商内置接入不等于已实测；依赖额外云配置/OAuth 的供应商不在本轮 CLI 范围。
+真实模型调用前按 [验收指南](../../docs/LIVE_ACCEPTANCE.md) 配置。供应商内置接入不等于已实测；依赖额外云配置的供应商不在本轮 CLI 范围。Codex OAuth 测试通过模拟认证响应和模型响应验证原生协议，实际账号授权及模型可用性仍需用户登录后验收。
 
 同步不是数据库事务，也不承诺 exactly-once。产品恢复是原快照的新 run，不继续旧模型会话。Hook 不是沙箱；执行工具和引擎仍负责权限、范围与版本检查。
 
 ## 国内智谱 Flash
 
-应用通过公开 registerProvider 增加 `bigmodel/glm-5.3-flash`，固定使用用户确认的 `https://open.bigmodel.cn/api/paas/v4/`。仍由 Pi 执行模型循环与 HTTP 编解码，不读取仓库 models.json。配置步骤见 [真实模型验收指南](../../docs/LIVE_ACCEPTANCE.md)。
+应用通过 Pi 原生静态模型配置加载适配器自带的 `src/models.json`，增加 `bigmodel/glm-5.3-flash`，固定使用用户确认的 `https://open.bigmodel.cn/api/paas/v4/`。采用内存模型缓存并关闭初始化刷新，避免运行时注册触发全部供应商的后台凭据探测；认证仅在显式操作中等待完成。仍由 Pi 执行模型循环与 HTTP 编解码，不加载被审仓库或用户目录的 models.json。配置步骤见 [真实模型验收指南](../../docs/LIVE_ACCEPTANCE.md)。

@@ -61,7 +61,9 @@ test('diff pagination and source output bounds expose truncation', async t => {
   const f = await repositoryFixture(t, { 'app.py': 'original\n' }); await f.write('app.py', Array.from({length: 250}, (_, i) => `line ${i}`).join('\n')); const head = await f.commit();
   const s = await freeze(f, { kind: 'commits', base: f.base, head }); let cursor = 0; const lines = [];
   do { const page = await s.diff('app.py', cursor, 25); lines.push(...page.lines); cursor = page.nextCursor; } while (cursor !== undefined);
-  assert.ok(lines.includes('+line 249')); assert.equal((await s.source('head', 'app.py', 1, 200)).truncated, true);
+  assert.ok(lines.includes('+line 249'));
+  const source = await s.source('head', 'app.py', 1, 200);
+  assert.equal(source.truncated, false); assert.equal(source.hasMoreLines, true);
   await assert.rejects(s.source('head', 'app.py', 1, 201), /200/);
   assert.equal((await s.search('head', 'line', 1)).truncated, true);
 });

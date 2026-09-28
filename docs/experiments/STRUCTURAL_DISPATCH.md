@@ -1,5 +1,53 @@
 # Structural dispatch experiment
 
+## Progressive dispatch v2 (2026-09-26)
+
+Contract: [ADR 0017](../adr/0017-progressive-structural-investigation.md).
+Use the same internal configuration below with `executionStrategy: "dispatch_v2"`.
+The host executes structural work; the model sees a compact catalog and one
+prefetched source, then may call `expand_structural_candidate` with a delivered
+reference. Direct graph tools remain inactive. The product default is unchanged.
+
+The shared implementation is `src/experiments/locagent/host-investigation.ts`.
+New public-only evaluation entry points:
+
+```sh
+node --experimental-strip-types eval/investigation-gate1-launch.mjs NEW_OUTPUT HISTORICAL_UTILITY_OUTPUT
+node --experimental-strip-types eval/investigation-admission-launch.mjs NEW_OUTPUT HISTORICAL_FULL_CONTEXT_OUTPUT PASSED_GATE1_OUTPUT
+```
+
+Both refuse an existing output directory, freeze implementation/public inputs,
+run under Node filesystem permission isolation, verify private scorer denial,
+and hash-freeze generated outputs. Gate 1 separates actual activation from the
+historical forced-END diagnostic. No scorer or model runtime enters generation.
+
+Baseline verification: 438 passed. V2 mechanical verification: 456 passed, zero
+failures/skips. Controlled identity/root/evidence/queue/packing and native Pi HTTP
+checks pass. Historical V1 dispatcher, Attribution v3 decoder, evidence registry
+and OperationGate source files remain unchanged.
+
+Gate 1: historical diagnostic whole-request ambiguity 14/24 -> 0/24; V2 has
+15 resolved, 8 partial and 1 missing, with 23 graph starts and 17 catalogs.
+Actual route timing: only 3/24 activate; V2 has 2 graph starts and 1 catalog.
+These mechanical results do not establish review value.
+An independently named performance successor repeated all 24 diagnostics 100 times
+and the three activated cases 100 times: byte-stable task/root/catalog/package output.
+Median p50 across 24 diagnostic cases: 9.10 ms; worst case p95: 44.62 ms; max: 74.08 ms, excluding graph
+load/index creation. Max package: 24,503 bytes; max queue: 26; sampled heap: 168.1 MiB.
+The 34-session Attribution v3 two-pass replay is byte-identical to its historical archive.
+
+Gate 2 admission: the pre-existing 12 RealGolden registrations plus D3/D4/D6
+produce 13 independent cases. Eight never route, two have ambiguous named roots,
+one has a one-card catalog, and two satisfy public prerequisites. This upper
+bound is below six even before private target membership is checked. Stop here:
+strong/small model arms, target-aware scoring and Review E2E are NOT_RUN.
+F0–F5, finding precision/recall and necessary-fact coverage are unmeasured.
+
+Outputs: `../output/progressive-structural-investigation-20260926/` outside the
+checkout. Original failed attempts and all older experiment directories remain.
+
+## Historical dispatch v1 contract
+
 Contract: [ADR 0016](../adr/0016-structural-dispatch.md). Pi stays at the three
 existing lockfiles, including pi-coding-agent 0.84.1. Product default is unchanged.
 

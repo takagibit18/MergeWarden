@@ -26,7 +26,7 @@ test('semantic input projection excludes private provenance and untouched source
 });
 test('semantic runtime uses existing BigModel adapter once, no tools, frozen sampling and memory-only credential',async()=>{
   const key='fixture-semantic-secret',runtime=await SemanticRouteRuntime.create(MODEL_CONFIG,{MERGEWARDEN_API_KEY:key});let calls=0;
-  const result=await runtime.decide(input,{fetch:async(url,init)=>{calls++;const req=new Request(url,init),body=await req.json();assert.equal(req.headers.get('authorization'),'Bearer '+key);assert.equal(body.temperature,0);assert.equal(body.top_p,1);assert.equal(body.tools,undefined);assert.equal(body.messages.length,2);assert.equal(body.model,'glm-5.3-flash');assert.deepEqual(body.thinking,{type:'enabled',clear_thinking:false});
+  const result=await runtime.decide(input,{fetch:async(url,init)=>{calls++;const req=new Request(url,init),body=await req.json();assert.equal(req.headers.get('authorization'),'Bearer '+key);assert.equal(body.reasoning_effort,'low');assert.equal(body.temperature,0);assert.equal(body.top_p,1);assert.equal(body.tools,undefined);assert.equal(body.messages.length,2);assert.equal(body.model,'glm-5.3-flash');assert.deepEqual(body.thinking,{type:'enabled',clear_thinking:false});
     const chunk={id:'fixture',object:'chat.completion.chunk',created:1,model:body.model,choices:[{index:0,delta:{content:'{"decision":"UNCERTAIN","rationale":"Need context"}'},finish_reason:'stop'}],usage:{prompt_tokens:20,completion_tokens:10,total_tokens:30}};
     return new Response('data: '+JSON.stringify(chunk)+'\n\ndata: [DONE]\n\n',{headers:{'Content-Type':'text/event-stream'}});
   }});

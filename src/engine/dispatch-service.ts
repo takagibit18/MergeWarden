@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { BudgetClosingError } from './budget.ts';
 import { evidenceRefId, fullEvidence } from "../application/evidence-registry.ts";
 import { PersistenceFailure } from "../ports/journal.ts";
 import { ObservedAnchors } from "./dispatch-anchors.ts";
@@ -105,7 +106,7 @@ export class StructuralDispatch implements DispatchBridge {
     const failure = (error: unknown) => {
       if (error instanceof PersistenceFailure) throw error;
       pack.terminal = this.options.signal.aborted ? (/budget/i.test(String(this.options.signal.reason)) ? "budget_exhausted" : "cancelled")
-        : error instanceof DispatchBudget ? "budget_exhausted" : "error";
+        : error instanceof DispatchBudget || error instanceof BudgetClosingError ? "budget_exhausted" : "error";
       pack.limitations.push(String(error).slice(0, 512));
     };
     if (this.observations.limited) {

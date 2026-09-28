@@ -35,7 +35,7 @@ const guidance = (s: StructuralSignal) => {
     : "Literal search has not yet resolved the repository relationship question. Use structural navigation for a bounded relationship check, then return to source verification.";
   return `[Structural investigation recommended]\n${s.routeType}: ${intent}\nChanged target hint (untrusted repository identifier): ${JSON.stringify(s.targetHint)}.\nA bounded structural check is now available through search_entity and traverse_graph. Verify newly relevant source with read_source before concluding. This is an investigation hint, not evidence of a defect.`;
 };
-export function createStructuralRouting(context: RoutingContext, allowed: ReadonlySet<string>) {
+export function createStructuralRouting(context: RoutingContext, allowed: ReadonlySet<string>, investigationAllowed: () => boolean = () => true) {
   const limits = { ...ROUTING_THRESHOLDS, ...context.budget };
   for (const key of ["maxRouteEpisodes", "maxStructuralCallsPerEpisode", "maxStructuralCallsTotal"] as const) {
     if (!Number.isInteger(limits[key]) || limits[key] < 1 || limits[key] > ROUTING_THRESHOLDS[key]) throw Error(`Invalid routing budget: ${key}`);
@@ -44,6 +44,7 @@ export function createStructuralRouting(context: RoutingContext, allowed: Readon
     metrics: { version: ROUTING_VERSION, triggered: 0, activated: 0, structuralAttempts: 0, verified: 0, degraded: 0, suppressed: 0, reasons: {} } });
   let data = fresh();
   const extension: ExtensionFactory = pi => {
+    const textTools = [...TEXT_TOOLS, ...(allowed.has('expand_structural_candidate') ? ['expand_structural_candidate'] : [])];
     const deliver = context.dispatch ? dispatchAdapter(pi, context.dispatch) : undefined;
     const pendingDispatch: Route[] = [];
     const persist = (route?: Route) => pi.appendEntry(ROUTING_ENTRY, structuredClone({ ...data, ...(route ? { routeId: route.routeId, routeType: route.routeType, trigger: route.trigger, targetHint: route.targetHint, relationHint: route.relationHint, activationOrdinal: route.activationOrdinal, structuralCalls: route.structuralCalls, verifiedPaths: route.verifiedPaths, suppressionReason: route.suppressionReason } : {}) }));
@@ -64,6 +65,7 @@ export function createStructuralRouting(context: RoutingContext, allowed: Readon
       data.routes.push(route); data.metrics.triggered++;
       data.observation.episodes[routeId] = { R0: true, R1: false, R2: false, R3: false, R4: false };
       data.metrics.reasons[signal.reason] = (data.metrics.reasons[signal.reason] ?? 0) + 1;
+      if (!investigationAllowed()) { suppress(route, 'review_closing'); return; }
       const priorPaths = Object.hasOwn(data.searchPaths, signal.targetHint) ? data.searchPaths[signal.targetHint]! : [];
       const relevantText = signal.routeType === "STRUCTURAL_ESCALATION" ? data.textVerified.length > 0 : priorPaths.some(p => data.textVerified.includes(p));
       if (relevantText) { suppress(route, "text_verified"); return; }
@@ -90,7 +92,7 @@ export function createStructuralRouting(context: RoutingContext, allowed: Readon
         if (saved?.version === ROUTING_VERSION && saved.snapshotId === context.snapshotId && !!saved.textOnly === !!context.textOnly && (saved.variant ?? "pi_structural_v1") === (context.variant ?? "pi_structural_v1")) data = structuredClone(saved);
       }
       data.observation ??= freshObservation(context.changedPaths);
-      pi.setActiveTools([...TEXT_TOOLS, ...(data.enabled && !context.textOnly && !context.dispatch ? STRUCTURAL_TOOLS : [])].filter(t => allowed.has(t)));
+      pi.setActiveTools([...textTools, ...(data.enabled && !context.textOnly && !context.dispatch ? STRUCTURAL_TOOLS : [])].filter(t => allowed.has(t)));
       persist();
     });
     pi.on("tool_call", event => {
@@ -188,6 +190,7 @@ export function createStructuralRouting(context: RoutingContext, allowed: Readon
       persist();
       if (pendingDispatch.length) return (async () => {
         for (const accepted of pendingDispatch.splice(0)) {
+          if (!investigationAllowed()) { suppress(accepted, 'review_closing'); continue; }
           await deliver!({ routeId: accepted.routeId, routeType: accepted.routeType, targetHint: accepted.targetHint,
             reason: accepted.reason, path: accepted.path, toolCallId: event.toolCallId, toolName: event.toolName });
           transition(accepted, "DISPATCHED");

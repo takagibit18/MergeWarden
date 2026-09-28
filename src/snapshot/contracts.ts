@@ -11,5 +11,6 @@ export interface SnapshotManifest {
 export interface SourcePage {
   snapshotId: string; revision: "base" | "head"; path: string; status: "ok" | "unavailable";
   text: string; startLine: number; endLine: number; totalLines: number; contentSha256: string;
-  truncated: boolean; warnings: string[];
+  /** True only when requested source was omitted, not when the file continues. */
+  truncated: boolean; hasMoreLines?: boolean; warnings: string[];
 }

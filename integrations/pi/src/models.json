@@ -1,0 +1,28 @@
+{
+  "providers": {
+    "bigmodel": {
+      "name": "智谱 BigModel",
+      "api": "openai-completions",
+      "baseUrl": "https://open.bigmodel.cn/api/paas/v4/",
+      "authHeader": true,
+      "models": [{
+        "id": "glm-5.3-flash",
+        "name": "GLM-5.3-Flash (BigModel)",
+        "reasoning": true,
+        "input": ["text"],
+        "thinkingLevelMap": { "off": null, "minimal": null, "low": "low", "medium": null, "high": "high", "xhigh": null, "max": "max" },
+        "contextWindow": 1000000,
+        "maxTokens": 131072,
+        "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+        "compat": {
+          "supportsStore": false,
+          "supportsDeveloperRole": false,
+          "supportsReasoningEffort": true,
+          "maxTokensField": "max_tokens",
+          "thinkingFormat": "zai",
+          "zaiToolStream": true
+        }
+      }]
+    }
+  }
+}
