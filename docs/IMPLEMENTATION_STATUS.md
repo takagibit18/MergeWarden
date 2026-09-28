@@ -71,11 +71,11 @@ v0.2 的 Python 图与评测工程路径已接在 v0.1 上，修订 Golden 前�
 |---|---|---|
 | 快照 | 提交、暂存区、已保存工作区；仓库外内容存储；版本身份；冻结竞争检查 | VS Code 的用户选择及产品验收 |
 | 文本取证 | 源码行号/hash、差异分页、字面搜索；明确截断/不支持文件 | 非文本内容的语义审查 |
-| 业务引擎 | final_only；候选结构/证据/覆盖核验；取消、工具和时间预算 | 缺陷语义正确性须人工判断 |
-| Pi | 单会话内置供应商及国内 BigModel GLM-5.3-Flash；该模型真实 CLI smoke 已通过；明确 API Key；精确工具白名单；不加载仓库指令/扩展 | 其他供应商未实测；OAuth 不支持 |
+| 业务引擎 | final_only；候选结构/证据/覆盖核验；统一模型/宿主操作预算；分阶段提醒、保留提交额度及硬截止；明确终止原因 | 缺陷语义正确性须人工判断；新收尾策略已通过原生 Pi 离线验收，真实模型完成率待后继实验验证 |
+| Pi | 单会话内置供应商及国内 BigModel GLM-5.3-Flash；明确 API Key 或显式 Pi 原生 OAuth；Codex 登录及真实模型调用已在受控采样中跑通；精确工具白名单；不加载仓库指令/扩展 | 不保证账号具有目录内全部模型权限；既有采样不证明新收尾策略或图模式质量收益 |
 | 原生日志 | 独占空文件经公开 SessionManager.open 初始化；首条回复前持久化；fsync 和写入故障检查 | 不宣称数据库级事务或 exactly-once |
 | 报告和恢复 | JSON/Markdown 原子替换；交付清单最后写入；历史校验；原快照新 run | 中断模型会话不续接；运行中硬退出可能留锁 |
-| CLI | review/rerun/models/history/show/evidence/doctor/unlock | VS Code UI 尚未实现 |
+| CLI | review/rerun/models/history/show/evidence/doctor/unlock；login/auth-status/logout 管理仓库外专属 OAuth 凭据 | VS Code UI 尚未实现 |
 | Python 图 | 固定 grammar；directory/file/class/function；CONTAINS/IMPORTS/CALLS/INHERITS；core/all 分层；两遍流式保守 resolver；可恢复 checkpoint、紧凑不可变 generation 原子发布、失败缓存、单 review 可终止 worker | 只索引 head；动态 receiver、全类型推断、高级 import 根及跨 snapshot 增量更新不支持 |
 | VS Code/WSL | 路线和契约确定 | 扩展、VSIX 及正式环境验收待后续 |
 | 评测 | 当前 r2 的 20 例 Git SHA/源码/hash；12 defect + 8 clean；r1 按原字节归档；r2 的 8-case T0/G0/G1 挑战已实跑；RealGolden40 120 个正式 first-attempt 已保全，4 completed / 116 provider failures；逐例语义 mapping 与 native trace 派生归因 | 本轮正式结果因余额耗尽不能用于三臂质量/成本比较；须充值后另建 successor lock/output，不得覆盖本轮；样本仍由 Agent 审核、非独立 holdout |

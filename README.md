@@ -15,7 +15,13 @@ npm run cli -- models
 
 安装使用三个锁定依赖文件且禁用安装脚本。测试不需要 API Key，不访问真实模型。`models` 读取固定 Pi 版本内置目录及应用注册的智谱 Flash 配置；目录存在表示接入能力，不表示该供应商已实测。
 
-配置和首次验收见 **[真实模型验收指南](docs/LIVE_ACCEPTANCE.md)**。引擎只从命令行明确指定的环境变量读取密钥，不自动采用仓库配置、`.pi`、OAuth 或现有 Pi 登录。
+配置和首次验收见 **[真实模型验收指南](docs/LIVE_ACCEPTANCE.md)**。API Key 只从命令行明确指定的环境变量读取；订阅登录通过 `login --provider openai-codex` 和审查时的 `--auth oauth` 显式启用。复用 Pi 原生授权、凭据存储和刷新，凭据位于数据目录的 `auth/auth.json`；不自动采用仓库配置、`.pi` 或现有 Pi/Codex 登录。
+
+模型接入复用 Pi 原生目录、兼容声明和协议适配器。目录缺失的模型以 Pi 原生格式集中补充在 `integrations/pi/src/model-catalog.ts`；新增供应商无需向审查引擎增加条件分支。正式运行和评测共用 `model-policy.ts` 选择本次策略，不在请求钩子里翻译供应商参数。依赖和补充目录固定版本，运行时不联网刷新目录或读取被审仓库配置。
+
+`review` / `rerun` 可指定 `--thinking low|high|max`（实际可选档位由所选模型决定）及 `--max-output-tokens N`。GLM-5.3-Flash 默认明确使用 `low`，仅支持 `low/high/max`；不支持的显式档位在联网前报错。默认本次输出预算 8192、上下文上限 65536，均不超过模型声明能力；输出预算包含思考，不保证工具调用时间。模型能力与本次预算分别写入运行清单。Pi 原生会话中的 `mergewarden.provider-request.v1` 记录每次最终请求的摘要及非内容参数，不复制消息、源码或密钥。这是发送前观测，不代表服务端已经接受请求。
+
+旧实验的配置和结果保持冻结；使用新模型声明必须重新准备实验锁，不能把旧 `provider-default` 或内部 `medium` 当作新配置继续运行。`eval/budget-gate` 是保留的历史请求对照，其冻结字节约束不适用于新接入配置。离线协议测试不等于新配置已通过真实服务验收。
 
 ```sh
 npm run cli -- review --repo /path/to/repository --base BASE_SHA --head HEAD_SHA --provider PROVIDER --model MODEL_ID --api-key-env MERGEWARDEN_API_KEY
@@ -38,6 +44,8 @@ Windows 默认数据目录是 `%LOCALAPPDATA%/MergeWarden2`，其他环境为 `~
 CLI 的 `--scope staged` / `--scope worktree` 已有底层回归测试；VS Code 的选择界面、证据跳转、stale 提示及 Windows/WSL 产品验收留到后续版本。忽略文件和未保存缓冲区不纳入。文本工具不会执行仓库代码。
 
 默认预算 **10 分钟、100 次工具调用**，可用 `--timeout-ms` / `--max-tools` 调整。记录 token 用量，不估算未知价格。候选通过结构和证据 hash 校验后作为人工复核建议保存，这不证明缺陷语义成立。
+
+模型工具和宿主图检索共用操作额度。统一收尾策略 `review-closeout-1` 在默认额度剩 20 次或时间剩 180 秒时提醒，剩 10 次或时间剩 90 秒时关闭新调查，只允许 `submit_review` 提交及校验失败后的修正。被收尾规则拒绝的调查不扣提交保留额度，实际执行的失败提交仍扣额度；硬上限仍为 100 次/600 秒。其他额度按操作上限的 10%（向下取整，至少 1 次、最多 10 次；上限为 1 时不预留）和时间上限的 15%（最多 90 秒）计算保留量，提醒阈值为保留量的两倍。每轮请求记录当前阶段，最终清单记录终止原因；收尾不会补造证据、降低差异覆盖要求或保证模型一定提交，未完成仍为 `partial`。
 
 图工具只有 `graph_lookup`（精确 entity/限定名）和 `graph_neighbors`（指定关系、方向和分页的一跳查询）。实体为 directory/file/class/function，method 作为 function 子类；可遍历关系为 CONTAINS/IMPORTS/CALLS/INHERITS。普通名称引用不建图，应使用 `search_text`。图只索引当前快照的 **head**，不会把 base/head 混在一起。返回 resolution、coverage 和 warnings；空结果不能证明没有调用者。图查询后的 finding 证据仍须用 `read_source` 实际读取和核对。动态 receiver、外部依赖、复杂动态绑定保持不确定；[解析边界](integrations/tree-sitter/README.md)。
 
