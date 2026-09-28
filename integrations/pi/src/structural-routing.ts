@@ -1,3 +1,4 @@
+import { declarationSignals } from '../../../src/engine/declarations.ts';
 import { dispatchAdapter } from "./structural-dispatch.ts";
 import { parseToolResult, annotateResult } from "../../../src/engine/tool-result.ts";
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
@@ -13,9 +14,10 @@ import type { StructuralObservation } from "./structural-observation.ts";
 export const ROUTING_ENTRY = "mergewarden-structural-routing-v1";
 export const TEXT_TOOLS = ["read_diff", "read_source", "search_text", "submit_review"];
 export const STRUCTURAL_TOOLS = ["search_entity", "traverse_graph"];
-type State = "IDLE" | "RECOMMENDED" | "ACTIVE" | "VERIFIED" | "DEGRADED" | "SUPPRESSED" | "DISPATCHED";
+type State = "PENDING" | "IDLE" | "RECOMMENDED" | "ACTIVE" | "VERIFIED" | "DEGRADED" | "SUPPRESSED" | "DISPATCHED";
 interface Candidate { path: string; startLine: number; endLine: number }
 interface Route extends StructuralSignal {
+  lifecycle?: 'pending'|'in_progress'|'terminal'; terminalReason?: string;
   routeId: string; path: string; state: State; trigger: string; triggerToolOrdinal: number;
   activationOrdinal?: number; structuralCalls: number; verifiedPaths: string[];
   candidates: Candidate[]; suppressionReason?: string;
@@ -59,12 +61,15 @@ export function createStructuralRouting(context: RoutingContext, allowed: Readon
       transition(route, "SUPPRESSED", reason);
     };
     const propose = (signal: StructuralSignal, path: string, tool: string): string | undefined => {
-      const routeId = JSON.stringify([signal.routeType, signal.targetHint.trim(), path]);
+      const routeId = JSON.stringify([signal.routeType, signal.change?.id ?? signal.targetHint.trim(), path]);
       if (data.routes.some(r => r.routeId === routeId)) return;
       const route: Route = { ...signal, path, routeId, state: "IDLE", trigger: tool, triggerToolOrdinal: data.ordinal, structuralCalls: 0, verifiedPaths: [], candidates: [] };
       data.routes.push(route); data.metrics.triggered++;
       data.observation.episodes[routeId] = { R0: true, R1: false, R2: false, R3: false, R4: false };
       data.metrics.reasons[signal.reason] = (data.metrics.reasons[signal.reason] ?? 0) + 1;
+      if (context.declarationChanges) {
+        route.lifecycle = 'pending'; transition(route, 'PENDING'); pendingDispatch.push(route); return;
+      }
       if (!investigationAllowed()) { suppress(route, 'review_closing'); return; }
       const priorPaths = Object.hasOwn(data.searchPaths, signal.targetHint) ? data.searchPaths[signal.targetHint]! : [];
       const relevantText = signal.routeType === "STRUCTURAL_ESCALATION" ? data.textVerified.length > 0 : priorPaths.some(p => data.textVerified.includes(p));
@@ -157,7 +162,7 @@ export function createStructuralRouting(context: RoutingContext, allowed: Readon
           const page = data.pages[result.path] ??= { total: Number(result.totalLines), lines: {} };
           result.lines.forEach((line, index) => { if (typeof line === "string") page.lines[Number(result.offset) + index] = line; });
           if (Object.keys(page.lines).length === page.total) {
-            for (const signal of detectStructuralSignals(result.path, Array.from({ length: page.total }, (_, i) => page.lines[i]!))) {
+            for (const signal of context.declarationChanges ? declarationSignals(context.declarationChanges.filter(c=>c.path===result.path)) : detectStructuralSignals(result.path, Array.from({ length: page.total }, (_, i) => page.lines[i]!))) {
               if (signal.strength === "weak") { if (!data.weakSignals.some(s => JSON.stringify(s) === JSON.stringify(signal))) data.weakSignals.push(signal); }
               else { const hint = propose(signal, result.path, "read_diff"); if (hint) hints.push(hint); }
             }
@@ -171,7 +176,7 @@ export function createStructuralRouting(context: RoutingContext, allowed: Readon
           Object.defineProperty(data.searchPaths, query, { value: [...new Set([...prior, ...paths])], enumerable: true, configurable: true, writable: true });
           data.seenPaths = [...new Set([...data.seenPaths, ...paths])];
           const pressure = data.searches >= limits.searchPressure || (/^[A-Za-z_]\w*(?:\.\w+)*$/.test(query) && (result.truncated === true || paths.length >= limits.distinctPaths));
-          if (pressure && !data.enabled) {
+          if (pressure && !data.enabled && !context.declarationChanges) {
             const hint = propose({ routeType: "STRUCTURAL_ESCALATION", targetHint: "current-investigation", relationHint: "repository relationships", reason: "search_pressure", strength: "high" }, "", "search_text");
             if (hint) hints.push(hint);
           }
@@ -190,6 +195,19 @@ export function createStructuralRouting(context: RoutingContext, allowed: Readon
       persist();
       if (pendingDispatch.length) return (async () => {
         for (const accepted of pendingDispatch.splice(0)) {
+          if (context.declarationChanges) {
+            if (!investigationAllowed() || data.metrics.activated >= Math.min(5,limits.maxRouteEpisodes)) {
+              accepted.lifecycle='terminal'; accepted.terminalReason='budget_stopped'; suppress(accepted,'budget_exhausted'); continue;
+            }
+            accepted.lifecycle='in_progress'; accepted.activationOrdinal=data.ordinal; data.metrics.activated++;
+            data.metrics.firstActivationToolOrdinal ??= data.ordinal; data.enabled=true; transition(accepted,'ACTIVE');
+            const pack=deliver ? await deliver({routeId:accepted.routeId,routeType:accepted.routeType,targetHint:accepted.targetHint,
+              reason:accepted.reason,path:accepted.path,toolCallId:event.toolCallId,toolName:event.toolName,...(accepted.change?{change:accepted.change}:{})}) : undefined;
+            accepted.lifecycle='terminal'; accepted.terminalReason=!deliver?'not_applicable':pack?.terminal==='anchor_ambiguous'?'ambiguous'
+              :pack?.terminal==='anchor_missing'?'unresolved':pack?.terminal==='budget_exhausted'?'budget_stopped'
+              :pack?.terminal==='no_definite_relation'?'empty':pack?.terminal==='error'?'unresolved':'completed';
+            transition(accepted,'DISPATCHED'); continue;
+          }
           if (!investigationAllowed()) { suppress(accepted, 'review_closing'); continue; }
           await deliver!({ routeId: accepted.routeId, routeType: accepted.routeType, targetHint: accepted.targetHint,
             reason: accepted.reason, path: accepted.path, toolCallId: event.toolCallId, toolName: event.toolName });

@@ -7,7 +7,7 @@ export const DISPATCH_LIMITS = Object.freeze({ maxRouteEpisodes: 2, maxStructura
   sourceWindowLines: 80, generalHops: 3, maxTraversalNodes: 30, maxTraversalBytes: 8192,
   maxImportTargets: 4, maxAnchorHints: 32 });
 export type DispatchRoute = "CALLER_CHECK" | "INHERITANCE_CHECK" | "IMPORT_CHECK" | "STRUCTURAL_ESCALATION";
-export interface DispatchTrigger { routeId: string; routeType: DispatchRoute; targetHint: string; reason: string; path: string; toolCallId: string; toolName: string }
+export interface DispatchTrigger { change?: import('./declarations.ts').DeclarationChange; routeId: string; routeType: DispatchRoute; targetHint: string; reason: string; path: string; toolCallId: string; toolName: string }
 export interface AnchorHint { path: string; name?: string; qualifiedName?: string; kind?: "file" | "class" | "function"; startLine?: number; endLine?: number }
 export interface InvestigationRequest extends DispatchTrigger {
   requestId: string; runId: string; snapshotId: string; generationId?: string;

@@ -22,9 +22,16 @@ const controller=new AbortController();process.once('SIGINT',()=>controller.abor
 const prepared=new Map(experiment.cases.map(c=>[c.caseId,c]));
 // Validate every prepared generation without building in either arm.
 for(const c of experiment.cases){assert.equal((await readRun(join(output,'state'),c.seedId)).snapshotId,c.snapshotId);assert.equal(sha256(await readFile(await publishedGraphPath(join(output,'state'),c.snapshotId))),c.graphSha256);const store=await SnapshotStore.load(join(output,'state'),c.snapshotId),hot=await SqliteCodeGraph.openPublishedOnly(store,{scope:'core'});hot.graph.close();assert.equal(hot.manifest.generationId,c.generationId);}
-if(checkOnly){const catalog=await createModelRuntime();assert.equal(sha256(JSON.stringify(catalog.getModel(model.provider,model.modelId))),experiment.modelCapability.modelSha256);await writeJson(join(output,'preflight.json'),{status:'PASS',experimentSha256:experiment.experimentSha256,privateGoldDenied:true,preparedCases:experiment.cases.length,realProviderRequests:0,at:new Date().toISOString()});console.log('PASS: frozen code, 40 prepared snapshots/graphs, model identity, hidden-label isolation; zero provider requests');process.exit(0);}
+if(checkOnly){const catalog=await createModelRuntime();assert.equal(sha256(JSON.stringify(catalog.getModel(model.provider,model.modelId))),experiment.modelCapability.modelSha256);await writeJson(join(output,'preflight.json'),{status:'PASS',experimentSha256:experiment.experimentSha256,privateGoldDenied:true,preparedCases:experiment.cases.length,realProviderRequests:0,at:new Date().toISOString()});console.log('PASS: frozen code, prepared snapshots/graphs, model identity, hidden-label isolation; zero provider requests');process.exit(0);}
 const catalog=await createOAuthModelRuntime(model.provider,authPath);
-const runs=await executeBatch({output,plan:experiment.plan,identity:experiment,resume,signal:controller.signal,maxJobs,shouldStop:shouldPause,execute:async job=>{
+let mechanicalFaults=0;
+const stopPolicy=experiment.changeAware ? r=>{
+ const o=r.observation;
+ const unsafe=!r.delivered || !o || !o.requestAuditMatches || o.hotViolation || o.extensionErrors?.length || !o.requestOrderValid || o.unmatchedAssistantMessages;
+ if(unsafe)mechanicalFaults++;
+ return mechanicalFaults>=2;
+} : shouldPause;
+const runs=await executeBatch({output,plan:experiment.plan,identity:experiment,resume,signal:controller.signal,maxJobs,shouldStop:stopPolicy,execute:async job=>{
  await verifyLock(experiment,output);const c=prepared.get(job.task.case_id),raw=join(output,'observations',job.task.case_id,job.arm),payloads=[],calls=[],extensionErrors=[];let runDir;
  const emit=data=>console.log(JSON.stringify({caseId:job.task.case_id,arm:job.arm,...data}));emit({event:'started'});
  const started=performance.now();
@@ -33,7 +40,7 @@ const runs=await executeBatch({output,plan:experiment.plan,identity:experiment,r
   const tools=options.tools.map(tool=>({...tool,async execute(args){const row={name:tool.name,ordinal:calls.length+1,startMs:performance.now()-started};calls.push(row);emit({event:'tool',name:tool.name,ordinal:row.ordinal});try{return await tool.execute(args);}finally{row.endMs=performance.now()-started;}}}));
   return abRuntime({...options,tools},catalog,{arm:job.arm,onPayload:async p=>{payloads.push({ordinal:payloads.length+1,sha256:sha256(JSON.stringify(p)),atMs:performance.now()-started});await writeJson(join(raw,`request-${payloads.length}.json`),p);emit({event:'request',ordinal:payloads.length});},onExtensionError:()=>extensionErrors.push('extension_error')});
  });
- let result;try{result=await engine.run({repositoryPath:c.repositoryPath,stateDir:join(output,'state'),rerunId:c.seedId,model,timeoutMs:experiment.timeoutMs,maxToolCalls:experiment.maxTools,signal:controller.signal,evaluation:evaluationFor(job.arm)});}
+ let result;try{result=await engine.run({repositoryPath:c.repositoryPath,stateDir:join(output,'state'),rerunId:c.seedId,model,timeoutMs:experiment.timeoutMs,maxToolCalls:experiment.maxTools,signal:controller.signal,evaluation:evaluationFor(job.arm,experiment)});}
  finally{await writeJson(join(raw,'observations.json'),{payloads,calls,extensionErrors,runDir});}
  assert.equal(result.kind,'report');assert.equal(result.report.snapshot.id,c.snapshotId);
  const manifest=await read(join(runDir,'run.json')),jsonl=await readFile(join(runDir,'session.jsonl'),'utf8'),entries=jsonl.trim().split(/\r?\n/).map(JSON.parse),messages=entries.filter(e=>e.type==='message').map(e=>e.message);
@@ -43,7 +50,10 @@ const runs=await executeBatch({output,plan:experiment.plan,identity:experiment,r
  const classification=classifyRequests(entries,{termination:manifest.termination,report:result.report});
  const graph=manifest.metrics.graph??{},dispatch=manifest.metrics.dispatch??{};
  const hotViolation=!!(graph.buildMs||graph.extractedFiles||graph.resolvedFiles||graph.coldRequestMs?.length||(graph.generationId&&graph.generationId!==c.generationId));
- const observation={...classification,formalToolCalls:manifest.metrics.toolExecuted,observedHostRequests:calls.length,schemaRejectedAttempts:schemaErrors,requestAuditMatches:auditMatches,extensionErrors,hotViolation,packagesDelivered:dispatch.packagesDelivered??0,routeTriggers:manifest.metrics.routing?.triggered??0};
+ const deliveredIds=new Set(entries.filter(e=>e.customType==='mergewarden-host-dispatch-v2'&&e.data.type==='context_delivered').map(e=>e.data.requestId));
+ const deliveredPackages=entries.filter(e=>e.type==='custom_message'&&e.customType==='mergewarden-structural-context-v2').map(e=>JSON.parse(e.content)).filter(p=>deliveredIds.has(p.requestId));
+ const observation={candidatePackagesDelivered:deliveredPackages.filter(p=>p.investigations.some(i=>i.candidateCatalog.length)).length,
+ hostPrefetchDelivered:deliveredPackages.reduce((n,p)=>n+p.sources.length,0),...classification,formalToolCalls:manifest.metrics.toolExecuted,observedHostRequests:calls.length,schemaRejectedAttempts:schemaErrors,requestAuditMatches:auditMatches,extensionErrors,hotViolation,packagesDelivered:dispatch.packagesDelivered??0,routeTriggers:manifest.metrics.routing?.triggered??0};
  observation.mechanicalBlocker=!auditMatches||extensionErrors.length>0||hotViolation||classification.providerErrors>0||!classification.usageComplete||manifest.status!=='delivered'||result.report.status==='failed';
  observation.reviewRequired=result.report.status!=='completed';
  assert.equal(sha256(await readFile(result.reportPath)),manifest.reportSha256);assert.equal(sha256(await readFile(result.markdownPath)),manifest.markdownSha256);

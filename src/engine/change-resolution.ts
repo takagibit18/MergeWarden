@@ -12,6 +12,16 @@ export function resolveChangeHints(symbols: readonly SymbolFact[], snapshotId: s
     if (!hint.path || (hint.startLine !== undefined && (!Number.isSafeInteger(hint.startLine) || hint.startLine < 1
       || !Number.isSafeInteger(hint.endLine ?? hint.startLine) || (hint.endLine ?? hint.startLine) < hint.startLine))) throw Error('Invalid change hint');
     if (hint.deleted) return { inputIndex, status: 'deleted_head_unsupported' as const, items: [] };
+    if(hint.declaration?.head?.importItem) {
+      const d=hint.declaration.head, item=d.importItem!;
+      if(item.uncertain || hint.declaration.match!=='matched') return {inputIndex,status:'ambiguous' as const,items:[]};
+      const packageParts=hint.path.replace(/\/[^/]+$/,'').split('/');
+      const module=item.relativeLevel ? [...packageParts.slice(0,packageParts.length-item.relativeLevel+1),...item.module.split('.').filter(Boolean)].join('.') : item.module;
+      const stem=module.replaceAll('.','/');
+      const matches=symbols.filter(s=>s.snapshotId===snapshotId && [stem+'.py',stem+'/__init__.py'].includes(s.path)
+        && (item.importedName ? s.name===item.importedName && s.qualifiedName===module+'.'+item.importedName : s.kind==='file'));
+      return {inputIndex,status:matches.length===1?'resolved' as const:matches.length?'ambiguous' as const:'missing' as const,items:matches.map(dispatchEntity)};
+    }
     let matches = symbols.filter(s => s.snapshotId === snapshotId && s.path === hint.path
       && (hint.kind ? s.kind === hint.kind : ['function', 'class'].includes(s.kind))
       && (!hint.name || s.name === hint.name) && (!hint.qualifiedName || s.qualifiedName === hint.qualifiedName)
@@ -64,11 +74,11 @@ export function changeUnits(snapshotId: string, anchors: readonly ChangeHint[], 
     }
     if (!entities.length) throw Error('Resolved hint has no entity');
     for (const entity of entities) {
-      if (entity && (entity.snapshotId !== snapshotId || entity.path !== hint.path)) throw Error('Cross-snapshot/path resolution');
+      if (entity && (entity.snapshotId !== snapshotId || entity.path !== hint.path && !hint.declaration?.head?.importItem)) throw Error('Cross-snapshot/path resolution');
       const id = stableId('change_', [snapshotId, entity?.entityId ?? [hint, r.status]]);
       const unit: ChangeUnit = units.get(id) ?? { changeUnitId: id, snapshotId, path: hint.path,
         kind: (entity?.kind ?? hint.kind ?? 'file') as ChangeUnit['kind'], changedRanges: [],
-        ...(entity ? { entity } : {}), resolution: r.status, provenance: { inputIndices: [], source: 'immutable_head_diff' as const,
+        ...(entity ? { entity } : {}), ...(hint.declaration?{declaration:hint.declaration}:{}), resolution: r.status, provenance: { inputIndices: [], source: 'immutable_head_diff' as const,
           ...('omittedItems' in r && r.omittedItems ? { omittedEntityCount: r.omittedItems } : {}) } };
       if (hint.startLine !== undefined) unit.changedRanges = mergeRanges([...unit.changedRanges,
         { startLine: hint.startLine, endLine: hint.endLine ?? hint.startLine }]);

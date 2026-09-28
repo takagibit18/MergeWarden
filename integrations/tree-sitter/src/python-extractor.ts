@@ -3,11 +3,14 @@ import { Language, Parser, type Node } from "web-tree-sitter";
 import type { LanguageExtractor, SyntaxFacts, SymbolFact, SourceFact, ScopeFact } from "../../../src/graph/contracts.ts";
 import { pythonModuleName } from "../../../src/graph/scope-policy.ts";
 import { loadPinnedPythonGrammar } from "./pinned-grammar.ts";
+import { declarations, receiverCalls } from './declarations.ts';
 const idFor = (parts: unknown[]) => createHash("sha256").update(JSON.stringify(parts)).digest("hex");
 export const pythonModule = pythonModuleName;
 /** Only this adapter knows CST node types. No tree/node escapes extract(). */
 export class PythonTreeSitterExtractor implements LanguageExtractor {
   language = "python";
+  declarations(path: string, source: string) { return declarations(this.parser, path, source); }
+  receiverCalls(source:string) {return receiverCalls(this.parser,source);}
   private parser: Parser;
   private constructor(parser: Parser) { this.parser = parser; }
   static async create(vettedGrammarWasmPath?: string): Promise<PythonTreeSitterExtractor> {

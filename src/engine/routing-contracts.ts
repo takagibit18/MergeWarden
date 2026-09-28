@@ -9,6 +9,7 @@ export interface RoutingMetrics {
   firstActivationToolOrdinal?: number;
 }
 export interface RoutingContext {
+  declarationChanges?: import('./declarations.ts').DeclarationChange[];
   dispatch?: import("./dispatch-contracts.ts").DispatchBridge | import("./investigation-service.ts").ProgressiveInvestigation;
   variant?: Exclude<RoutingMode, "none">;
   /** Internal capability ablation: identical guidance, no structural tool exposure. */

@@ -27,11 +27,11 @@ export function candidateCard(requestId: string, candidate: PathCandidate, units
   return { candidateRefId: stableId('cand_', [requestId, candidate.terminalEntityId]), entity: dispatchEntity(candidate.terminalEntity),
     roots: candidate.rootEntityIds.map(id => { const u = units.find(u => u.entity?.entityId === id); if (!u?.entity) throw Error('Candidate has unknown investigation root');
       return { changeUnitId: u.changeUnitId, path: u.path, name: u.entity.name }; }), depth: candidate.depth,
-    structuralPaths: candidate.retainedPaths.map((p, i) => ({ relationSequence: candidate.relationSequences[i]!, directionSequence: p.directions })),
+    structuralPaths: candidate.retainedPaths.map((p, i) => ({ relationSequence: candidate.relationSequences[i]!, directionSequence: p.directions, entityIds: p.entityIds, edgeIds: p.edgeIds })),
     patternIds: candidate.patternIds, pathSupportCount: candidate.pathSupportCount, changed: candidate.changed,
     alreadyVisible: candidate.alreadyVisible, classification: candidate.classification, ...(preview ? { headerPreview: preview } : {}), explorationOnly: true };
 }
-export function sourceWindow(card: CandidateCard) { return { startLine: card.entity.startLine, endLine: Math.min(card.entity.endLine, card.entity.startLine + 79) }; }
+export function sourceWindow(card: CandidateCard) { const startLine=Math.max(card.entity.startLine,(card.sourceFocusLine??card.entity.startLine)-10); return { startLine, endLine: Math.min(card.entity.endLine, startLine + 79) }; }
 export function candidateSource(page: Record<string, unknown>, card: CandidateCard, snapshotId: string): CandidateSource {
   const range = sourceWindow(card);
   if (page.status !== 'ok' || page.snapshotId !== snapshotId || page.revision !== 'head' || page.path !== card.entity.path

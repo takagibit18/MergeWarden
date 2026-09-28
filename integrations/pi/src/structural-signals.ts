@@ -1,5 +1,5 @@
 export type RouteType = "CALLER_CHECK" | "INHERITANCE_CHECK" | "IMPORT_CHECK" | "STRUCTURAL_ESCALATION";
-export interface StructuralSignal { routeType: RouteType; targetHint: string; relationHint: string; reason: string; strength: "high" | "weak" }
+export interface StructuralSignal { change?: import('../../../src/engine/declarations.ts').DeclarationChange; routeType: RouteType; targetHint: string; relationHint: string; reason: string; strength: "high" | "weak" }
 const compact = (s: string) => s.replace(/\s+/g, "").replace(/,$/, "");
 /** Conservative, Python-only diff cues, not a parser or graph resolver. Call on a complete cached diff. */
 export function detectStructuralSignals(path: string, lines: string[]): StructuralSignal[] {

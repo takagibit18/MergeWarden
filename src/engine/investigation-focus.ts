@@ -55,7 +55,12 @@ export class InvestigationFocus {
   freeze(trigger: DispatchTrigger) {
     const existing = this.frozen.get(trigger.routeId); if (existing) return structuredClone(existing);
     let hints: ChangeHint[];
-    if (trigger.reason === 'callable_removal') hints = [{ path: trigger.path, kind: 'function', name: trigger.targetHint, deleted: true }];
+    if (trigger.change) {
+      const c=trigger.change,d=c.head??c.base!;
+      hints=[{path:c.path,name:d.name,...(!d.importItem?{kind:d.kind==='class'?'class' as const:'function' as const}:{}),
+        startLine:d.definitionLine,endLine:d.range.endLine,declaration:c,...(!c.head?{deleted:true}:{})}];
+    }
+    else if (trigger.reason === 'callable_removal') hints = [{ path: trigger.path, kind: 'function', name: trigger.targetHint, deleted: true }];
     else if (trigger.routeType === 'IMPORT_CHECK') hints = [{ path: trigger.path, kind: 'file' }];
     else if (trigger.routeType === 'STRUCTURAL_ESCALATION') hints = [...this.changes.entries()].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).flatMap(([, ranges]) => ranges);
     else hints = (this.changes.get(trigger.path) ?? [{ path: trigger.path }]).map(h => ({ ...h,
