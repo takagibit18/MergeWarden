@@ -15,7 +15,7 @@ export interface InvestigationAccess {
   neighbors(id: string, direction: TraversalStep['direction']): readonly RelationFact[];
   compare(a: SymbolFact, b: SymbolFact): number;
 }
-const step = (relation: 'CALLS' | 'IMPORTS' | 'INHERITS', direction: TraversalStep['direction']): TraversalStep => ({ relations: [relation], direction });
+const step = (relation: 'CONTAINS' | 'CALLS' | 'IMPORTS' | 'INHERITS', direction: TraversalStep['direction']): TraversalStep => ({ relations: [relation], direction });
 function routePatterns(route: DispatchRoute): readonly TraversalPattern[] {
   if (route === 'STRUCTURAL_ESCALATION') return STRUCTURAL_PATTERNS;
   if (route === 'CALLER_CHECK') return [{ id: 'CALLER_CHECK/upstream', steps: [step('CALLS', 'upstream')] }];
@@ -26,20 +26,32 @@ function routePatterns(route: DispatchRoute): readonly TraversalPattern[] {
 
 /** Shared product/eval implementation. Receives only public context and immutable graph access. */
 export function hostStructuralInvestigation(input: { roots: string[]; context: SelectionContext; route: DispatchRoute;
-  budget?: ExplorationBudget }, access: InvestigationAccess, signal?: AbortSignal) {
+  changeAware?: boolean; budget?: ExplorationBudget }, access: InvestigationAccess, signal?: AbortSignal) {
   const budget = input.budget ?? INVESTIGATION_BOUNDS;
   for (const key of ['maxVisitedNodes', 'maxVisitedEdges', 'maxExpandedStates'] as const)
     if (!Number.isSafeInteger(budget[key]) || budget[key] < 1 || budget[key] > INVESTIGATION_BOUNDS[key]) throw Error('Invalid shared investigation budget');
   if (!input.roots.length || input.roots.length > 5 || new Set(input.roots).size !== input.roots.length) throw Error('Expected 1..5 exact roots');
   const roots = input.roots.map(id => { const s = access.entity(id); if (!s || s.snapshotId !== input.context.snapshotId) throw Error('Unknown/cross-snapshot root'); return s; });
-  const patterns = routePatterns(input.route), observations: ProgressiveObservation[] = [];
+  const constructors=new Set(roots.filter(s=>s.name==='__init__' && s.functionKind==='method').map(s=>s.id));
+  const patterns: readonly TraversalPattern[] = input.changeAware && constructors.size ? [
+    ...routePatterns(input.route),
+    ...(['CALLS','INHERITS'] as const).flatMap(relation=>(relation==='CALLS'?['upstream']:['upstream','downstream']).map(direction=>({
+      id:'constructor-owner/'+relation+'/'+direction,steps:[step('CONTAINS','upstream'),step(relation,direction as TraversalStep['direction'])]})))
+  ] : input.changeAware && input.route==='IMPORT_CHECK' ? [
+    {id:'binding/consumers',steps:[step('IMPORTS','upstream')]},
+    {id:'binding/callers',steps:[step('CALLS','upstream')]}
+  ] : routePatterns(input.route);
+  const observations: ProgressiveObservation[] = [];
   // IMPORT_CHECK expands consumers of at most four export targets, as in v1.
   // All direct export targets remain candidates; only the second hop is capped.
   const importTargets = new Set<string>();
   const rootIds = new Set(input.roots);
   const boundedAccess = input.route !== 'IMPORT_CHECK' ? access : { ...access,
     neighbors: (id: string, direction: TraversalStep['direction']) => direction === 'upstream' && !rootIds.has(id) && !importTargets.has(id) ? [] : access.neighbors(id, direction) };
-  const search = deferredWalk(roots, patterns, budget, 4, boundedAccess, signal, e => {
+  const typedAccess=!input.changeAware ? boundedAccess : {...boundedAccess,neighbors:(id:string,direction:TraversalStep['direction'])=>
+    boundedAccess.neighbors(id,direction).filter(edge=>edge.relation!=='CONTAINS' || direction==='upstream' && constructors.has(id)
+      && access.entity(edge.fromId)?.kind==='class' && access.entity(id)?.parentSymbolId===edge.fromId)};
+  const search = deferredWalk(roots, patterns, budget, 4, typedAccess, signal, e => {
     observations.push(e);
     if (input.route === 'IMPORT_CHECK' && e.decision === 'REACHED' && e.state.depth === 1 && e.state.direction === 'downstream' && importTargets.size < 4) importTargets.add(e.state.entity.id);
   });
@@ -59,7 +71,12 @@ export function hostStructuralInvestigation(input: { roots: string[]; context: S
   const pool = describeCandidates(candidateUnits(retained), retained, input.context);
   const importOrder = search.discoveries.filter(d => d.depth > 0).map(d => d.entity.id);
   const selection = selectCandidateSet(pool.eligible, input.context, importOrder);
-  const priority = [...selection.selected.map(s => s.candidate.terminalEntityId), ...selection.omitted];
+  if(input.changeAware) pool.eligible=pool.eligible.filter(c=>!c.relationSequences.every(seq=>seq.every(r=>r==='CONTAINS')));
+  const compatible=(c:typeof pool.eligible[number])=>c.relationSequences.some(seq=>seq.some(r=>input.route==='CALLER_CHECK'?r==='CALLS'||r==='INHERITS':input.route==='IMPORT_CHECK'?r==='IMPORTS'||r==='CALLS':input.route==='INHERITANCE_CHECK'?r==='INHERITS':true));
+  const priority = input.changeAware ? [...pool.eligible].sort((a,b)=>Number(!compatible(a))-Number(!compatible(b))
+    ||a.depth-b.depth||Number(a.alreadyVisible)-Number(b.alreadyVisible)||Number(a.changed)-Number(b.changed)
+    ||Number(a.classification!=='production')-Number(b.classification!=='production')||access.compare(a.terminalEntity,b.terminalEntity)).map(c=>c.terminalEntityId)
+    : [...selection.selected.map(s => s.candidate.terminalEntityId), ...selection.omitted];
   return { roots, retained, pool, priority, metrics: { visitedNodes: search.visitedNodes, edgeInspections: search.visitedEdges,
     expandedStates: search.expandedStates, queueSize: search.schedulerMetrics.maxDeferredQueueSize,
     queueBytes: search.schedulerMetrics.peakDeferredQueueBytes, stopReason: search.stopReason },

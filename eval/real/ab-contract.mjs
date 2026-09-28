@@ -10,7 +10,7 @@ export const read=async path=>JSON.parse(await readFile(path,'utf8'));
 export const model={provider:'openai-codex',modelId:'gpt-5.6-luna'};
 export const inference={thinkingLevel:'max',maxOutputTokens:32768};
 export const referenceRun=(runId,snapshotId)=>({schemaVersion:1,runId,snapshotId,referenceOnly:true});
-export const evaluationFor=arm=>arm==='A'?{tools:'text-only',graphMode:'prepared_only'}:arm==='B'?{tools:'text+locagent',graphMode:'prepared_only',routing:'pi_structural_v1',executionStrategy:'dispatch_v2'}:(()=>{throw Error('Unknown arm');})();
+export const evaluationFor=(arm,experiment)=>experiment?.changeAware ? (arm==='A'?{tools:'text-only',graphMode:'prepared_only',routing:'pi_structural_v1',routingTextOnly:true,declarationAware:true}:{tools:'text+locagent',graphMode:'prepared_only',routing:'pi_structural_v1',executionStrategy:'dispatch_v2',declarationAware:true}) : arm==='A'?{tools:'text-only',graphMode:'prepared_only'}:arm==='B'?{tools:'text+locagent',graphMode:'prepared_only',routing:'pi_structural_v1',executionStrategy:'dispatch_v2'}:(()=>{throw Error('Unknown arm');})();
 export function pairedPlan(tasks){return tasks.flatMap((task,i)=>(i%2?['B','A']:['A','B']).map(arm=>({runKey:`${task.case_id}/0/${arm}`,task,taskSha256:digest(task),arm,repeat:0})));}
 export async function codeReceipt(){
  const files=[];

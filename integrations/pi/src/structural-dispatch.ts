@@ -14,5 +14,6 @@ export function dispatchAdapter(pi: ExtensionAPI, bridge: DispatchBridge | Progr
     else (bridge as DispatchBridge).queued(pack);
     pi.sendMessage({ customType: pack.version === 'structural-dispatch-2' ? INVESTIGATION_MESSAGE : DISPATCH_MESSAGE,
       content: pack.version === 'structural-dispatch-2' ? JSON.stringify(pack) : packageText(pack), display: true }, { deliverAs: "steer" });
+    return pack;
   };
 }

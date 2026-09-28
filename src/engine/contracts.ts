@@ -14,7 +14,7 @@ export interface ReviewOptions {
   repositoryPath: string; stateDir: string; input?: ReviewInput; rerunId?: string;
   model: ModelSelection; inference?: InferenceOptions; timeoutMs?: number; maxToolCalls?: number; signal?: AbortSignal;
   /** Internal ablation only; never exposed as a product mode. */
-  evaluation?: { executionStrategy?: import("./dispatch-contracts.ts").ExecutionStrategy; tools: "text-only" | "text+graph" | "text+locagent"; graphMode?: "lazy" | "prepared_only"; retrieval?: import("../experiments/locagent/contracts.ts").RetrievalConfig; routing?: import("./routing-contracts.ts").RoutingMode; routingBudget?: Partial<import("./routing-contracts.ts").RoutingBudget>; routingTextOnly?: boolean };
+  evaluation?: { declarationAware?: boolean; executionStrategy?: import("./dispatch-contracts.ts").ExecutionStrategy; tools: "text-only" | "text+graph" | "text+locagent"; graphMode?: "lazy" | "prepared_only"; retrieval?: import("../experiments/locagent/contracts.ts").RetrievalConfig; routing?: import("./routing-contracts.ts").RoutingMode; routingBudget?: Partial<import("./routing-contracts.ts").RoutingBudget>; routingTextOnly?: boolean };
 }
 export interface RuntimeTool { name: string; description: string; schema: Record<string, unknown>; execute(input: unknown): Promise<unknown> }
 export interface ReviewRuntime {

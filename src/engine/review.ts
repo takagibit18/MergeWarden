@@ -1,3 +1,4 @@
+import { snapshotChanges } from './snapshot-changes.ts';
 import { StructuralDispatch } from "./dispatch-service.ts";
 import { ProgressiveInvestigation } from "./investigation-service.ts";
 import { OperationGate } from "./operations.ts";
@@ -223,7 +224,8 @@ export class ReviewEngine {
             return (dispatch as ProgressiveInvestigation).expand(text(input.candidateRefId));
           }));
       }
-      runtime = await this.factory({ repositoryPath: repository, runDir, stateDir, model: options.model, budgetState: () => budget.state(), ...(options.inference ? { inference: options.inference } : {}), tools, ...(options.evaluation ? { evaluation: true } : {}), ...(routingEnabled ? { routing: { ...(dispatch ? { dispatch } : {}), ...(routingTextOnly ? { textOnly: true } : {}), variant: options.evaluation!.routing as Exclude<import("./routing-contracts.ts").RoutingMode, "none">, snapshotId: store.manifest.identity.id, changedPaths: [...store.manifest.changedPaths], ...(options.evaluation?.routingBudget ? { budget: options.evaluation.routingBudget } : {}), onBlockedCall } } : {}) });
+      const declarationChanges = dispatchV2 || options.evaluation?.declarationAware ? await snapshotChanges(store) : undefined;
+      runtime = await this.factory({ repositoryPath: repository, runDir, stateDir, model: options.model, budgetState: () => budget.state(), ...(options.inference ? { inference: options.inference } : {}), tools, ...(options.evaluation ? { evaluation: true } : {}), ...(routingEnabled ? { routing: { ...(declarationChanges ? {declarationChanges} : {}), ...(dispatch ? { dispatch } : {}), ...(routingTextOnly ? { textOnly: true } : {}), variant: options.evaluation!.routing as Exclude<import("./routing-contracts.ts").RoutingMode, "none">, snapshotId: store.manifest.identity.id, changedPaths: [...store.manifest.changedPaths], ...(options.evaluation?.routingBudget ? { budget: options.evaluation.routingBudget } : {}), onBlockedCall } } : {}) });
       if (runtime.configuration) manifest.runtimeConfiguration = runtime.configuration();
       abort.signal.throwIfAborted();
       controller = new ReviewController(runtime.journal, runId, store.manifest.identity);

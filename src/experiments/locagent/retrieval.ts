@@ -72,6 +72,32 @@ export class LocAgentRetrieval {
   resolveChangeUnits(input: {anchors: import('../../engine/investigation-contracts.ts').ChangeHint[]}) {
     return {...this.envelope(), resolutions: resolveChangeHints(this.symbols, this.data.snapshotId, input.anchors)};
   }
+  private receiverNavigation: {rootId:string;entity:SymbolFact;callerId:string;memberId:string;line:number}[]=[];
+  async prepareNavigation(input: Parameters<typeof hostStructuralInvestigation>[0]) {
+    this.receiverNavigation=[]; if(!input.changeAware)return;
+    const modulePath='../../../integrations/tree-sitter/src/python-extractor.ts';
+    const {PythonTreeSitterExtractor}=await import(modulePath),parser=await PythonTreeSitterExtractor.create();
+    try {
+      for(const path of new Set(input.roots.map(id=>this.byId.get(id)?.path).filter((x):x is string=>!!x))) {
+        for(const call of parser.receiverCalls(this.data.sources[path]??'')) {
+          const caller=this.symbols.find(s=>s.path===path&&s.kind==='function'&&s.startLine===call.callerLine);
+          const owner=this.symbols.find(s=>s.path===path&&s.kind==='class'&&s.startLine===call.classLine);
+          if(!caller||!owner||caller.parentSymbolId!==owner.id)continue;
+          let members=this.symbols.filter(s=>s.parentSymbolId===owner.id&&s.name===call.member&&s.kind==='function');
+          if(!members.length) {
+            const bases=(this.outgoingByEntity.get(owner.id)??[]).filter(e=>e.relation==='INHERITS').map(e=>e.toId);
+            members=this.symbols.filter(s=>bases.includes(s.parentSymbolId??'')&&s.name===call.member&&s.kind==='function');
+          }
+          if(members.length!==1)continue;
+          const member=members[0]!;
+          for(const rootId of input.roots)if(rootId===caller.id||rootId===member.id) {
+            const entity=rootId===caller.id?member:caller;
+            if(entity.id!==rootId)this.receiverNavigation.push({rootId,entity,callerId:caller.id,memberId:member.id,line:call.line});
+          }
+        }
+      }
+    }finally{parser.dispose();}
+  }
   investigate(input: Parameters<typeof hostStructuralInvestigation>[0]) {
     if (input.context.snapshotId !== this.data.snapshotId || input.context.generationId !== this.data.generationId) throw Error('Investigation identity mismatch');
     const result = hostStructuralInvestigation(input, {
@@ -83,7 +109,10 @@ export class LocAgentRetrieval {
       const preview = declarationPreview(this.data.sources[c.terminalPath] ?? '', c.terminalEntity.startLine, c.entityKind);
       if (preview) previews[c.terminalEntityId] = preview;
     }
-    return {...this.envelope(), ...result, previews};
+    const room=Math.max(0,(input.budget?.maxVisitedNodes??30)-result.metrics.visitedNodes);
+    const receiverCandidates=input.changeAware?[...new Map(this.receiverNavigation.map(c=>[c.rootId+':'+c.entity.id,c])).values()].slice(0,room):[];
+    result.metrics.visitedNodes+=new Set(receiverCandidates.map(c=>c.entity.id)).size;
+    return {...this.envelope(), ...result, previews, receiverCandidates};
   }
   /** Host-only exact metadata query. Uses the same frozen entities; never creates edges. */
   locate(input: { anchors: import('../../engine/dispatch-contracts.ts').AnchorHint[] }) {

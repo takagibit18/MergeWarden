@@ -6,7 +6,7 @@ import type { DispatchObservation, DispatchTrigger } from './dispatch-contracts.
 import type { DispatchOperation } from './dispatch-retrieval.ts';
 import type { RoutingBudget } from './routing-contracts.ts';
 import { InvestigationFocus, stableId } from './investigation-focus.ts';
-import { changeUnits } from './change-resolution.ts';
+import { dispatchEntity, changeUnits } from './change-resolution.ts';
 import type { resolveChangeHints } from './change-resolution.ts';
 import { INVESTIGATION_VERSION } from './investigation-contracts.ts';
 import type { CandidateCard, CandidateSource, ChangeUnit, ContextPackageV2, Investigation } from './investigation-contracts.ts';
@@ -27,6 +27,7 @@ export class ProgressiveInvestigation {
   readonly version = INVESTIGATION_VERSION;
   private options: Options; private focus: InvestigationFocus;
   private requested = new Set<string>();
+  private sharedRemaining = {maxVisitedNodes:30,maxVisitedEdges:200,maxExpandedStates:200};
   private built = new Map<string, string>();
   private pending = new Map<string, { pack: ContextPackageV2; text: string }>();
   private delivered = new Map<string, { card: CandidateCard; requestId: string; generationId: string }>();
@@ -105,7 +106,7 @@ export class ProgressiveInvestigation {
     const inv: Investigation = { investigationId: stableId('investigation_', [requestId]), routeId: trigger.routeId, routeType: trigger.routeType,
       reason: trigger.reason, snapshotId: this.options.snapshotId, changeUnits: [], status: 'planned', candidateCatalog: [], prefetchedSourceRefs: [],
       limitations: [], rootsResolved: 0, rootsExplored: 0, rootsOmittedByBudget: 0 };
-    const pack: ContextPackageV2 = { version: INVESTIGATION_VERSION, origin: 'host_dispatch', requestId, runId: this.options.runId,
+    const pack: ContextPackageV2 = { version: INVESTIGATION_VERSION, ...(trigger.change?{navigationVersion:'change-aware-structural-1' as const}:{}), origin: 'host_dispatch', requestId, runId: this.options.runId,
       snapshotId: this.options.snapshotId, route: { routeType: trigger.routeType, reason: trigger.reason }, investigations: [inv], sources: [],
       omitted: [], omittedCandidateCount: 0, limitations: ['Candidates and declaration previews are exploration only. Execution is not a finding or proof of absence.'], terminal: 'no_definite_relation' };
     this.metrics.requests++; this.record({ type: 'investigation_requested', requestId, trigger, focus, investigationId: inv.investigationId });
@@ -134,13 +135,22 @@ export class ProgressiveInvestigation {
         inv.rootsResolved = roots.length; this.metrics.rootsResolved += roots.length;
         for (const u of inv.changeUnits) if (u.resolution !== 'resolved') inv.limitations.push(`${u.changeUnitId}: ${u.resolution}`);
         if (!roots.length) pack.terminal = inv.changeUnits.some(u => u.resolution === 'ambiguous') ? 'anchor_ambiguous' : 'anchor_missing';
-        const remaining = { maxVisitedNodes: 30, maxVisitedEdges: 200, maxExpandedStates: 200 };
+        const remaining = trigger.change ? this.sharedRemaining : { maxVisitedNodes: 30, maxVisitedEdges: 200, maxExpandedStates: 200 };
         const cards = new Map<string, CandidateCard>();
+        for(const unit of roots)if(unit.declaration?.head?.importItem && unit.entity) {
+          const entity=unit.entity;
+          cards.set(entity.entityId,{candidateRefId:stableId('cand_',[requestId,entity.entityId]),entity,
+            roots:[{changeUnitId:unit.changeUnitId,path:unit.path,name:unit.declaration.head.name}],depth:1,
+            structuralPaths:[{relationSequence:['IMPORT_BINDING'],directionSequence:['downstream'],entityIds:[unit.declaration.id,entity.entityId]}],
+            patternIds:['exact-import-definition'],pathSupportCount:1,changed:this.options.changedPaths.includes(entity.path),
+            alreadyVisible:this.visible.some(r=>r.path===entity.path&&r.startLine<=entity.startLine&&r.endLine>=entity.endLine),classification:'production',explorationOnly:true});
+        }
+        inv.candidateCatalog=[...cards.values()];
         for (let offset = 0; offset < roots.length; offset += 5) {
           const batch = roots.slice(offset, offset + Math.min(5, remaining.maxVisitedNodes));
           if (!batch.length || remaining.maxVisitedEdges < 1 || remaining.maxExpandedStates < 1) break;
           inv.status = 'exploring';
-          const raw = await operation('host_structural_investigation', { roots: batch.map(u => u.entity!.entityId), route: trigger.routeType, budget: { ...remaining },
+          const raw = await operation('host_structural_investigation', { roots: batch.map(u => u.entity!.entityId), changeAware: !!trigger.change, route: trigger.routeType, budget: { ...remaining },
             context: { snapshotId: pack.snapshotId, generationId: pack.generationId, route: trigger.routeType, changedPaths: this.options.changedPaths, visibleRanges: this.visible } }); validate(raw);
           const result = raw as unknown as ReturnType<typeof hostStructuralInvestigation> & { previews?: Record<string, string> };
           inv.rootsExplored += batch.length;
@@ -150,12 +160,39 @@ export class ProgressiveInvestigation {
           if (result.coverageLimited) inv.limitations.push('Traversal stopped: ' + result.metrics.stopReason);
           for (const id of result.priority) {
             const candidate = result.pool.eligible.find(c => c.terminalEntityId === id); if (!candidate) throw Error('Unknown priority candidate');
-            const card = candidateCard(requestId, candidate, roots, result.previews?.[id]); if (!cards.has(id)) cards.set(id, card);
+            const card = candidateCard(requestId, candidate, roots, result.previews?.[id]);
+            if(trigger.change) {
+              const edge=result.inspectionTrace.find(e=>e.edge?.id===candidate.bestPath.edgeIds.at(-1))?.edge;
+              if(edge?.sourcePath===card.entity.path && edge.sourceLine>=card.entity.startLine && edge.sourceLine<=card.entity.endLine)card.sourceFocusLine=edge.sourceLine;
+            }
+            if (!cards.has(id)) cards.set(id, card);
+          }
+          const receivers=(raw.receiverCandidates??[]) as {rootId:string;entity:import('../graph/contracts.ts').SymbolFact;callerId:string;memberId:string;line:number}[];
+          for(const receiver of receivers) {
+            const unit=roots.find(u=>u.entity?.entityId===receiver.rootId);if(!unit)throw Error('Unknown receiver root');
+            if(!cards.has(receiver.entity.id))cards.set(receiver.entity.id,{candidateRefId:stableId('cand_',[requestId,receiver.entity.id]),entity:dispatchEntity(receiver.entity),
+              roots:[{changeUnitId:unit.changeUnitId,path:unit.path,name:unit.entity!.name}],depth:1,
+              structuralPaths:[{relationSequence:['RECEIVER_CANDIDATE'],directionSequence:[receiver.rootId===receiver.callerId?'downstream':'upstream']}],
+              ...(receiver.entity.id===receiver.callerId?{sourceFocusLine:receiver.line}:{}),navigationProvenance:{kind:'receiver_candidate',callerId:receiver.callerId,memberId:receiver.memberId,line:receiver.line,certainty:'candidate'},
+              patternIds:['bounded-local-receiver'],pathSupportCount:1,changed:this.options.changedPaths.includes(receiver.entity.path),
+              alreadyVisible:this.visible.some(r=>r.path===receiver.entity.path&&r.startLine<=receiver.entity.startLine&&r.endLine>=receiver.entity.endLine),
+              classification:'production',explorationOnly:true});
           }
           inv.candidateCatalog = [...cards.values()];
         }
-        if (inv.candidateCatalog.length) {
-          const card = inv.candidateCatalog[0]!, window = sourceWindow(card);
+        if(trigger.change) {
+          const semantic=(c:CandidateCard)=>Math.min(...c.structuralPaths.map(p=>trigger.routeType==='CALLER_CHECK'
+            ?p.relationSequence.some(r=>['CALLS','RECEIVER_CANDIDATE'].includes(r))?0:1
+            :trigger.routeType==='IMPORT_CHECK'?p.relationSequence.includes('IMPORT_BINDING')?0:p.relationSequence.includes('IMPORTS')?1:2
+            :p.relationSequence.includes('INHERITS')?0:1));
+          inv.candidateCatalog.sort((a,b)=>semantic(a)-semantic(b)||a.depth-b.depth||Number(a.alreadyVisible)-Number(b.alreadyVisible)
+            ||Number(a.changed)-Number(b.changed)||Number(a.classification!=='production')-Number(b.classification!=='production')
+            ||a.entity.path.localeCompare(b.entity.path)||a.entity.startLine-b.entity.startLine||a.entity.entityId.localeCompare(b.entity.entityId));
+        }
+        const prefetched = inv.candidateCatalog.find(c=>c.roots.length>0 && c.structuralPaths.some(p=>p.relationSequence.length>0)
+          && c.entity.startLine>0 && c.entity.endLine>=c.entity.startLine && !c.alreadyVisible);
+        if (prefetched) {
+          const card = prefetched, window = sourceWindow(card);
           const page = await operation('read_source', { revision: 'head', path: card.entity.path, ...window });
           const source = candidateSource(page, card, pack.snapshotId); pack.sources.push(source); inv.prefetchedSourceRefs.push(source.evidenceRefId);
           pack.terminal = 'context_returned';
