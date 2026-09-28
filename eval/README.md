@@ -1,5 +1,14 @@
 # Python retrieval evaluation
 
+## 最新结果：Code Graph 40例 A/B
+
+2026-09-28 已完成40对文本／Graph配置审查，统一语义审核后，全量F1为67.8%→77.4%。按全部跨文件任务12例、核心跨文件依赖9例、复杂依赖与跨文件审查10例三个场景展示质量与成本：
+
+- [完整 eval 文档：配置、分桶、样本、对比矩阵](../docs/experiments/CODE_GRAPH_EVAL.md)
+- [精简逐例数据与汇总](results/code-graph-20260928.json)
+
+下文为运行协议与历史语料说明；最新文档使用3次授权补跑后的成功配对口径，原始首轮记录保留。
+
 ## GPT 配对批次（独立后继协议）
 
 `real/ab-prepare.mjs` 和 `real/ab-launch.mjs` 使用现有 RealGolden40 全部公开任务，冻结

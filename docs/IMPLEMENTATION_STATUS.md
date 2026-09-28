@@ -1,4 +1,12 @@
-# 当前实现状态 · 2026-09-26
+# 当前实现状态 · 2026-09-28
+
+## 变更感知结构调查与真实 PR 评测
+
+变更区间已绑定到 Python 声明，结构调查按声明身份维护有界导航队列，并为候选选择保留调用、继承与导入关系上下文。该能力沿用 ADR 0017 的显式评测配置；CLI 默认导航策略不变。
+
+40 个真实 PR 的文本／Graph 配对评测已完成，包含 12 个 Python 仓库。统一语义审核后的全量 F1 为 67.8% → 77.4%；复杂依赖与跨文件审查场景的 10 例 F1 为 63.6% → 83.3%，Token 减少 18.3%。配置、审核方式、样本范围和成本口径见 [完整评测](experiments/CODE_GRAPH_EVAL.md)。
+
+README 以 CLI 产品工作流组织使用场景、图导航、证据读取、模型访问与报告管理。以下保留各阶段的实现与验证记录。
 
 ChangeUnit Semantic Intent Router 的 eval-only shadow 已完成到私有准入停止点，见
 [实验契约](experiments/SEMANTIC_INTENT_ROUTER.md)。公开准入为 7 defect + 13 clean；
