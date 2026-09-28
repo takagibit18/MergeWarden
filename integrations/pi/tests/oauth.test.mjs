@@ -8,7 +8,8 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { repositoryFixture } from '../../../tests/repository-fixture.mjs';
 import { ReviewEngine } from '../../../src/engine/review.ts';
-import { createOAuthModelRuntime, createPiRuntimeFactory } from '../src/runtime.ts';
+import { createModelRuntime, createOAuthModelRuntime, createPiRuntimeFactory } from '../src/runtime.ts';
+import { ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { loginOAuth, logoutOAuth, oauthStatus } from '../src/auth.ts';
 import { oauthLoginError } from '../src/auth-errors.ts';
 
@@ -16,6 +17,16 @@ const provider = 'openai-codex';
 const access = `e30.${Buffer.from(JSON.stringify({'https://api.openai.com/auth':{chatgpt_account_id:'offline-account'}})).toString('base64')}.fixture-signature`;
 const credential = {type:'oauth',access,refresh:'offline-refresh-secret',expires:Date.now()+3_600_000,accountId:'offline-account'};
 const json = value => new Response(JSON.stringify(value),{headers:{'content-type':'application/json'}});
+test('catalog initialization never launches background provider/auth refreshes',async t=>{
+ const f=await fixture(t,credential);let refreshes=0;
+ t.mock.method(ModelRuntime.prototype,'refresh',async()=>{refreshes++;return {aborted:false,errors:new Map()};});
+ fetchMock(t,async()=>assert.fail('catalog initialization must not contact providers'));
+ const api=await createModelRuntime('bigmodel','offline-key'),oauth=await createOAuthModelRuntime(provider,f.authPath);
+ assert.equal(api.getModel('bigmodel','glm-5.3-flash').baseUrl,'https://open.bigmodel.cn/api/paas/v4/');
+ assert(oauth.getModel(provider,'gpt-5.6-luna'));
+ assert.equal(refreshes,0,'registration must not launch an unawaited all-provider credential scan');
+ assert.equal((await api.getAuth('bigmodel')).auth.apiKey,'offline-key');
+});
 async function fixture(t, value) {
   const f = await repositoryFixture(t), authPath = join(f.state,'auth','auth.json');
   await mkdir(join(f.state,'auth'));

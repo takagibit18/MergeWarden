@@ -14,20 +14,20 @@ import type { RuntimeFactory } from "../../../src/engine/contracts.ts";
 import { createReviewExtension } from "./extension.ts";
 import { createBudgetExtension } from './budget-extension.ts';
 import { createStructuralRouting, TEXT_TOOLS, STRUCTURAL_TOOLS } from "./structural-routing.ts";
-import { registerModelAdditions } from "./model-catalog.ts";
+import { modelCatalogOptions } from "./model-catalog.ts";
 import { resolveModelPolicy, requestHash } from "./model-policy.ts";
 import { PiSessionJournal } from "./journal.ts";
 import { BASE_SYSTEM_PROMPT, GRAPH_CAPABILITY_PROMPT, NAVIGATION_POLICY_PROMPT } from "../../../src/engine/prompt.ts";
 import { LOCAGENT_CAPABILITY_PROMPT } from "../../../src/experiments/locagent/contracts.ts";
 export async function createModelRuntime(provider?: string, key?: string): Promise<ModelRuntime> {
   initializeProviderNetwork();
-  const runtime = await ModelRuntime.create({ modelsPath: null, allowModelNetwork: false, refreshOnCreate: false,
+  const runtime = await ModelRuntime.create({ ...modelCatalogOptions(),
     credentials: {
       async read(id) { return id === provider && key ? { type: "api_key", key } : undefined; },
       async list() { return provider && key ? [{ providerId: provider, type: "api_key" }] : []; },
       async modify() { throw new Error("Credential writes and OAuth are disabled"); }, async delete() { throw new Error("Credential writes are disabled"); },
     } });
-  registerModelAdditions(runtime);
+  if (runtime.getError()) throw Error('Invalid application model catalog');
   return runtime;
 }
 export async function listModels(provider?: string): Promise<{ provider: string; id: string; name: string }[]> {
@@ -45,8 +45,8 @@ export async function createOAuthModelRuntime(provider: string, authPath: string
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw Error("Cannot read the OAuth credential file");
   }
-  const runtime = await ModelRuntime.create({ authPath, modelsPath: null, allowModelNetwork: false, refreshOnCreate: false });
-  registerModelAdditions(runtime);
+  const runtime = await ModelRuntime.create({ authPath, ...modelCatalogOptions() });
+  if (runtime.getError()) throw Error('Invalid application model catalog');
   if (!runtime.getProvider(provider)?.auth.oauth) throw Error("Selected provider does not support Pi OAuth login");
   let credential;
   // A signal makes Pi propagate storage errors instead of serving a stale cache.

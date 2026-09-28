@@ -7,6 +7,8 @@ import {microRuntime} from '../../../../eval/microeval/runtime.mjs';
 import {analyzeInvestigation} from '../../../../src/eval/provenance/investigation.ts';
 const input=JSON.parse(await readFile(process.argv[2],'utf8'));
 assert(process.permission);assert.equal(process.permission.has('fs.read',input.deniedAncestor),false);
+assert.equal(process.permission.has('fs.write',input.options.stateDir),true);
+assert.equal(process.permission.has('fs.write',input.deniedAncestor),false);
 let requests=0,pack,runDir;
 globalThis.fetch=async(url,init)=>{
  const body=await new Request(url,init).json();requests++;const call=(name,args)=>({name,args});let actions=[];
