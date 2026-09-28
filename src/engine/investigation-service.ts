@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { BudgetClosingError } from './budget.ts';
 import { PersistenceFailure } from '../ports/journal.ts';
 import { DISPATCH_LIMITS } from './dispatch-contracts.ts';
 import type { DispatchObservation, DispatchTrigger } from './dispatch-contracts.ts';
@@ -162,7 +163,7 @@ export class ProgressiveInvestigation {
       }
     } catch (error) {
       if (error instanceof PersistenceFailure) throw error;
-      pack.terminal = this.options.signal.aborted ? (/budget/i.test(String(this.options.signal.reason)) ? 'budget_exhausted' : 'cancelled') : error instanceof BudgetStop ? 'budget_exhausted' : 'error';
+      pack.terminal = this.options.signal.aborted ? (/budget/i.test(String(this.options.signal.reason)) ? 'budget_exhausted' : 'cancelled') : error instanceof BudgetStop || error instanceof BudgetClosingError ? 'budget_exhausted' : 'error';
       inv.limitations.push(String(error).slice(0, 512));
     }
     inv.rootsOmittedByBudget = inv.rootsResolved - inv.rootsExplored;

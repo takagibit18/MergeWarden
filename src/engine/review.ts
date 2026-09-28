@@ -1,6 +1,7 @@
 import { StructuralDispatch } from "./dispatch-service.ts";
 import { ProgressiveInvestigation } from "./investigation-service.ts";
 import { OperationGate } from "./operations.ts";
+import { ReviewBudget } from './budget.ts';
 import { missingDiffCoverage, SubmissionValidationError } from "./submission-diagnostics.ts";
 import { FINAL_REVIEW_DESCRIPTION, REVIEW_DECISION_POLICY, REVIEW_DECISION_POLICY_VERSION } from "./prompt.ts";
 import type { OperationOrigin } from "./operations.ts";
@@ -79,6 +80,8 @@ export class ReviewEngine {
       // A crash may leave the lock. It must be explicitly cleared after confirming no worker is running.
       const handle = await open(lock, "wx", 0o600).catch(() => { throw new Error("Repository is already running or has an interrupted lock; inspect with doctor before clearing it"); });
       locked = lock; try { await handle.writeFile(JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() })); await handle.sync(); } finally { await handle.close(); }
+      // Run budgets live in runtimeConfiguration; changing them must not change
+      // the identity of the immutable source used by a new run.
       const configuration = { provider: options.model.provider, modelId: options.model.modelId, policy: "final_only", promptVersion: 1 };
       let store: SnapshotStore;
       if (options.rerunId) {
@@ -105,7 +108,8 @@ export class ReviewEngine {
       const evidenceRegistry = new EvidenceRegistry(store.manifest.identity.id);
       const sourceKey = (e: { revision: string; path: string; startLine: number; endLine: number; contentSha256: string }) => JSON.stringify([e.revision, e.path, e.startLine, e.endLine, e.contentSha256]);
       let controller: ReviewController | undefined; let submitted = false; let finalSummary = "";
-      const gate = new OperationGate({ limit: maxTools, signal: abort.signal,
+      const budget = new ReviewBudget({ limit: maxTools, timeoutMs, started: reviewStarted, used: () => gate.used });
+      const gate: OperationGate = new OperationGate({ limit: maxTools, signal: abort.signal, closing: () => budget.state().phase === 'closing',
         available: () => acceptingTools && controller?.state?.status === "reviewing" && !submitted,
         unavailableReason: () => submitted ? "Final batch already submitted; end the review" : "Run is not accepting tools",
         exhausted: () => { budgetExceeded = true; acceptingTools = false; abort.abort(new Error("Tool budget exhausted")); } });
@@ -123,7 +127,7 @@ export class ReviewEngine {
           if (error instanceof PersistenceFailure) { acceptingTools = false; abort.abort(error); throw error; }
           throw new Error(JSON.stringify({ snapshotId: store.manifest.identity.id, status: "error", ...(name === "submit_review" ? { outcome: "PRE_ACCEPTANCE_ERROR" } : {}), tool: name, message: error instanceof Error ? error.message : "Tool failed", ...(error instanceof SubmissionValidationError ? { diagnostics: error.diagnostics } : {}) }));
         }
-      });
+      }, name === 'submit_review');
       const tool = (name: string, description: string, schema: Record<string, unknown>, execute: (input: Record<string, unknown>, origin: OperationOrigin) => Promise<unknown>): RuntimeTool => {
         operations.set(name, execute);
         return { name, description, schema, execute: input => executeOperation("model", name, input) };
@@ -172,7 +176,7 @@ export class ReviewEngine {
           }
           abort.signal.throwIfAborted();
           await controller!.dispatch({ type: "final_batch.accepted", candidates: submission.findings, reviewedPaths: submission.reviewedPaths, reason: "Advisory claim: structure and frozen evidence integrity verified; semantic correctness requires human review." });
-          submitted = true; finalSummary = submission.summary;
+          submitted = true; budget.submitted(); finalSummary = submission.summary;
           return { accepted: true, outcome: "ACCEPTED", findings: submission.findings.length, pendingPaths: store.manifest.changedPaths.filter(p => !submission.reviewedPaths.includes(p)), advisoryOnly: true, summary: submission.summary };
         }),
       ];
@@ -219,7 +223,7 @@ export class ReviewEngine {
             return (dispatch as ProgressiveInvestigation).expand(text(input.candidateRefId));
           }));
       }
-      runtime = await this.factory({ repositoryPath: repository, runDir, stateDir, model: options.model, tools, ...(options.evaluation ? { evaluation: true } : {}), ...(routingEnabled ? { routing: { ...(dispatch ? { dispatch } : {}), ...(routingTextOnly ? { textOnly: true } : {}), variant: options.evaluation!.routing as Exclude<import("./routing-contracts.ts").RoutingMode, "none">, snapshotId: store.manifest.identity.id, changedPaths: [...store.manifest.changedPaths], ...(options.evaluation?.routingBudget ? { budget: options.evaluation.routingBudget } : {}), onBlockedCall } } : {}) });
+      runtime = await this.factory({ repositoryPath: repository, runDir, stateDir, model: options.model, budgetState: () => budget.state(), ...(options.inference ? { inference: options.inference } : {}), tools, ...(options.evaluation ? { evaluation: true } : {}), ...(routingEnabled ? { routing: { ...(dispatch ? { dispatch } : {}), ...(routingTextOnly ? { textOnly: true } : {}), variant: options.evaluation!.routing as Exclude<import("./routing-contracts.ts").RoutingMode, "none">, snapshotId: store.manifest.identity.id, changedPaths: [...store.manifest.changedPaths], ...(options.evaluation?.routingBudget ? { budget: options.evaluation.routingBudget } : {}), onBlockedCall } } : {}) });
       if (runtime.configuration) manifest.runtimeConfiguration = runtime.configuration();
       abort.signal.throwIfAborted();
       controller = new ReviewController(runtime.journal, runId, store.manifest.identity);
@@ -246,13 +250,16 @@ export class ReviewEngine {
       const state = controller.state!;
       const complete = submitted && Object.values(state.units).every(v => v === "done") && !modelError;
       const outcome: ReviewReport["status"] = complete ? "completed" : abort.signal.aborted && !timedOut && !budgetExceeded ? "cancelled" : modelError && !submitted && !timedOut && !budgetExceeded ? "failed" : "partial";
+      manifest.termination = { reason: timedOut ? 'time_budget' : budgetExceeded ? 'tool_budget' : abort.signal.aborted ? 'cancelled' : modelError ? 'runtime_error' : complete ? 'completed' : 'incomplete', finalSubmission: submitted };
       const navigationSummary = navigationDegraded ? "Structural navigation was degraded or unavailable; its errors are recorded and empty results do not establish absence" : undefined;
       const summary = complete ? [finalSummary, navigationSummary].filter(Boolean).join(". ") : [modelError ?? "Incomplete review: final submission or coverage is missing", navigationSummary, finalSummary].filter(Boolean).join(". ");
       await controller.dispatch({ type: "run.finished", outcome, summary });
       const report = controller.report(); manifest.usage = runtime.usage();
+      if (runtime.configuration) manifest.runtimeConfiguration = runtime.configuration();
       const graphMetrics = (retrieval ?? graph!).metrics;
       const { requested: toolRequests, accepted: toolAccepted, executed: toolExecuted, rejected: toolRejected } = gate.counts.model;
       manifest.metrics = { toolCalls: toolExecuted, toolRequests, toolAccepted, toolExecuted, toolRejected, graphToolCalls: retrieval ? modelGraphCalls : graphMetrics.calls, reviewLatencyMs: performance.now() - reviewStarted, graph: graphMetrics, navigation: { attempted: graphMetrics.calls > 0, degraded: navigationDegraded, errors: navigationErrors } };
+      manifest.metrics.budget = budget.state();
       if (dispatch) manifest.metrics.dispatch = { ...dispatch.metrics, operations: gate.counts.host_dispatch, graphBackendRequests: hostGraphCalls, sourceReadOperations: hostSourceReadOperations };
       if (runtime.routingMetrics) manifest.metrics.routing = runtime.routingMetrics();
       notify({ phase: "delivering", runId });

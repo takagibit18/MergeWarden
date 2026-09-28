@@ -35,7 +35,7 @@ const guidance = (s: StructuralSignal) => {
     : "Literal search has not yet resolved the repository relationship question. Use structural navigation for a bounded relationship check, then return to source verification.";
   return `[Structural investigation recommended]\n${s.routeType}: ${intent}\nChanged target hint (untrusted repository identifier): ${JSON.stringify(s.targetHint)}.\nA bounded structural check is now available through search_entity and traverse_graph. Verify newly relevant source with read_source before concluding. This is an investigation hint, not evidence of a defect.`;
 };
-export function createStructuralRouting(context: RoutingContext, allowed: ReadonlySet<string>) {
+export function createStructuralRouting(context: RoutingContext, allowed: ReadonlySet<string>, investigationAllowed: () => boolean = () => true) {
   const limits = { ...ROUTING_THRESHOLDS, ...context.budget };
   for (const key of ["maxRouteEpisodes", "maxStructuralCallsPerEpisode", "maxStructuralCallsTotal"] as const) {
     if (!Number.isInteger(limits[key]) || limits[key] < 1 || limits[key] > ROUTING_THRESHOLDS[key]) throw Error(`Invalid routing budget: ${key}`);
@@ -65,6 +65,7 @@ export function createStructuralRouting(context: RoutingContext, allowed: Readon
       data.routes.push(route); data.metrics.triggered++;
       data.observation.episodes[routeId] = { R0: true, R1: false, R2: false, R3: false, R4: false };
       data.metrics.reasons[signal.reason] = (data.metrics.reasons[signal.reason] ?? 0) + 1;
+      if (!investigationAllowed()) { suppress(route, 'review_closing'); return; }
       const priorPaths = Object.hasOwn(data.searchPaths, signal.targetHint) ? data.searchPaths[signal.targetHint]! : [];
       const relevantText = signal.routeType === "STRUCTURAL_ESCALATION" ? data.textVerified.length > 0 : priorPaths.some(p => data.textVerified.includes(p));
       if (relevantText) { suppress(route, "text_verified"); return; }
@@ -189,6 +190,7 @@ export function createStructuralRouting(context: RoutingContext, allowed: Readon
       persist();
       if (pendingDispatch.length) return (async () => {
         for (const accepted of pendingDispatch.splice(0)) {
+          if (!investigationAllowed()) { suppress(accepted, 'review_closing'); continue; }
           await deliver!({ routeId: accepted.routeId, routeType: accepted.routeType, targetHint: accepted.targetHint,
             reason: accepted.reason, path: accepted.path, toolCallId: event.toolCallId, toolName: event.toolName });
           transition(accepted, "DISPATCHED");

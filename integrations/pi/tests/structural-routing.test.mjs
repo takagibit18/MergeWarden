@@ -91,10 +91,11 @@ test('prepared-only missing graph degrades once and review still completes',asyn
  const r=await run(t,{...signature,prepare:false,steps:[diff(),entity(),entity(),search(),submit()]});
  assert.equal(r.result.report.status,'completed');assert.equal(r.manifest.metrics.routing.degraded,1);assert.equal(r.manifest.metrics.graphToolCalls,1);
 });
-test('routing rejections consume the outer budget and cannot keep a review alive indefinitely',async t=>{
+test('routing rejections consume investigation budget but cannot spend the final submission reserve',async t=>{
  const r=await run(t,{...signature,maxTools:4,budget:{maxStructuralCallsPerEpisode:1},steps:[diff(),entity(),entity(),entity(),submit()]});
- assert.equal(r.result.report.status,'partial');assert.match(r.result.report.summary,/tool budget exhausted/);
- assert.equal(r.manifest.metrics.graphToolCalls,1);assert.equal(r.manifest.metrics.toolRequests,5);assert.equal(r.manifest.metrics.toolRejected,3);
+ assert.equal(r.result.report.status,'completed');assert.equal(r.manifest.metrics.budget.operationsUsed,4);
+ assert.equal(r.manifest.metrics.graphToolCalls,1);assert.equal(r.manifest.metrics.toolRequests,5);assert.equal(r.manifest.metrics.toolRejected,2);
+ assert.equal(r.manifest.metrics.toolExecuted,3);assert.equal(r.manifest.termination.reason,'completed');
 });
 test('active routing cancellation stops new tools and bounded Pi/worker cleanup',async t=>{
  const abort=new AbortController();const started=Date.now();
