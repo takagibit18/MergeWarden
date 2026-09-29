@@ -1,0 +1,6 @@
+import {readFile,readdir} from 'node:fs/promises';
+import {join,resolve} from 'node:path';
+const root=resolve(process.argv[2]),dir=join(root,'execution'),read=async p=>JSON.parse(await readFile(p,'utf8')),rows=[];
+for(const f of await readdir(join(dir,'reviews'))){const r=await read(join(dir,'reviews',f));if(r.phase==='pilot')rows.push({caseId:r.caseId,arm:r.arm,status:r.status,findings:r.report?.findings.length??null,elapsedMs:r.elapsedMs??null});}
+const active=[];for(const arm of ['A','B','C'])for(const id of await readdir(join(dir,arm,'runs'))){const m=await read(join(dir,arm,'runs',id,'run.json'));if(m.status==='running'){const text=await readFile(join(dir,arm,'runs',id,'session.jsonl'),'utf8'),es=text.split('\n').filter(Boolean).flatMap(l=>{try{return [JSON.parse(l)];}catch{return [];}});active.push({arm,runId:id,requests:es.filter(e=>e.customType==='mergewarden.provider-request.v1').length,toolResults:es.filter(e=>e.message?.role==='toolResult').length,lastRecordAt:es.at(-1)?.timestamp});}}
+console.log(JSON.stringify({started:rows.length,completed:rows.filter(r=>r.status==='completed').length,partial:rows.filter(r=>r.status==='partial').length,failed:rows.filter(r=>['failed','execution_error'].includes(r.status)).length,active,rows:process.argv.includes('--full')?rows:undefined}));

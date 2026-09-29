@@ -27,7 +27,8 @@ Before a real review release, perform recovery and security fault-injection test
 
 ## Scope
 Prefer one vertical slice. Do not introduce multi-agent orchestration, a hosted platform, a graph UI,
-self-evolving online skills, or a mandatory router as foundational cleanup.
+in-review self-modifying rules, or a mandatory router as foundational cleanup.
+Host-controlled experience data may evolve between reviews; each review freezes a read-only knowledge package.
 Remote repository creation or pushing requires explicit user authorization.
 Original architecture DOCX/Markdown are historical records; implementation status and validation are current.
 
