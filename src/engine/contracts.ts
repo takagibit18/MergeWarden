@@ -11,10 +11,13 @@ export interface InferenceOptions {
   topP?: number;
 }
 export interface ReviewOptions {
+  skills?: 'auto' | 'off' | 'replay'; learn?: 'auto' | 'off';
+  /** Host-controlled mapping only: never inferred from origin or reviewed configuration. */
+  skillRepositoryKey?: string;
   repositoryPath: string; stateDir: string; input?: ReviewInput; rerunId?: string;
   model: ModelSelection; inference?: InferenceOptions; timeoutMs?: number; maxToolCalls?: number; signal?: AbortSignal;
   /** Internal ablation only; never exposed as a product mode. */
-  evaluation?: { declarationAware?: boolean; executionStrategy?: import("./dispatch-contracts.ts").ExecutionStrategy; tools: "text-only" | "text+graph" | "text+locagent"; graphMode?: "lazy" | "prepared_only"; retrieval?: import("../experiments/locagent/contracts.ts").RetrievalConfig; routing?: import("./routing-contracts.ts").RoutingMode; routingBudget?: Partial<import("./routing-contracts.ts").RoutingBudget>; routingTextOnly?: boolean };
+  evaluation?: { contextCwd?: string; declarationAware?: boolean; executionStrategy?: import("./dispatch-contracts.ts").ExecutionStrategy; tools: "text-only" | "text+graph" | "text+locagent"; graphMode?: "lazy" | "prepared_only"; retrieval?: import("../experiments/locagent/contracts.ts").RetrievalConfig; routing?: import("./routing-contracts.ts").RoutingMode; routingBudget?: Partial<import("./routing-contracts.ts").RoutingBudget>; routingTextOnly?: boolean };
 }
 export interface RuntimeTool { name: string; description: string; schema: Record<string, unknown>; execute(input: unknown): Promise<unknown> }
 export interface ReviewRuntime {
@@ -28,11 +31,13 @@ export interface ReviewRuntime {
     authentication?: { type: "api_key" | "oauth" };
     inference?: { catalogRevision: string; modelSha256: string; requested: InferenceOptions; resolved: InferenceOptions; capabilities: { contextWindow: number; maxOutputTokens: number }; requestCount: number; lastRequestSha256?: string } };
 }
-export type RuntimeFactory = (options: { repositoryPath: string; runDir: string; stateDir: string; model: ModelSelection; inference?: InferenceOptions; tools: RuntimeTool[]; evaluation?: boolean; budgetState?(): import('./budget.ts').BudgetState; routing?: import("./routing-contracts.ts").RoutingContext }) => Promise<ReviewRuntime>;
+export type RuntimeFactory = (options: { repositoryPath: string; runDir: string; stateDir: string; model: ModelSelection; inference?: InferenceOptions; tools: RuntimeTool[]; skillsEnabled?: boolean; contextCwd?: string; evaluation?: boolean; budgetState?(): import('./budget.ts').BudgetState; routing?: import("./routing-contracts.ts").RoutingContext }) => Promise<ReviewRuntime>;
 export interface FinalSubmission { summary: string; reviewedPaths: string[]; findings: FindingCandidate[] }
 /** Model transport; normalization produces the unchanged self-contained domain contract. */
 export interface FinalSubmissionInput { summary: string; reviewedPaths: string[]; findings: import("../application/evidence-registry.ts").FindingInput[] }
 export interface RunManifest {
+  skills?: import('../skills/contracts.ts').SkillBinding;
+  learningPolicy?: 'auto' | 'off';
   schemaVersion: 1; runId: string; snapshotId: string; repositoryPath: string; model: ModelSelection;
   configurationFingerprint: string; limits: { timeoutMs: number; maxToolCalls: number };
   /** Run-level policy identity; historical snapshots and reports remain immutable. */
@@ -53,5 +58,5 @@ export interface RunManifest {
   toolExposure?: "text-only" | "text+graph" | "text+locagent";
   runtimeConfiguration?: ReturnType<NonNullable<ReviewRuntime["configuration"]>>;
 }
-export type ReviewResult = { kind: "no_changes"; snapshotId: string } | { kind: "report"; runId: string; report: ReviewReport; reportPath: string; markdownPath: string };
+export type ReviewResult = { kind: "no_changes"; snapshotId: string } | { kind: "report"; runId: string; report: ReviewReport; reportPath: string; markdownPath: string; learning?: {status:string; jobs?:import('../skills/contracts.ts').LearningJob[]} };
 export type ReviewProgress = { phase: "preparing" | "reviewing" | "tool" | "delivering"; runId?: string; tool?: string; toolCalls?: number };

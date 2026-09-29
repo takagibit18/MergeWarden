@@ -14,6 +14,17 @@ export function validateTask(task) {
  if(task.language!=='Python')throw Error('Real corpus supports Python only');
  return task;
 }
+/** Scope mapping is admitted by the host's frozen public-task lock, never origin alone. */
+export async function skillRepositoryKeyForTask(task,repositoryPath,admittedTaskHashes) {
+ validateTask(task);const taskSha256=sha256(JSON.stringify(task));
+ if(!Array.isArray(admittedTaskHashes)||!admittedTaskHashes.includes(taskSha256))throw Error('Task is outside the host admission lock');
+ const receipt=JSON.parse(await readFile(join(repositoryPath,'.git','real-task.json'),'utf8'));
+ if(receipt.taskSha256!==taskSha256||sha256(JSON.stringify(receipt.task))!==taskSha256)throw Error('Task receipt identity drift');
+ const origin=(await objectGit(repositoryPath,['remote','get-url','origin'])).toString().trim();
+ if(origin!==task.repository_url)throw Error('Origin identity drift');
+ for(const sha of [task.base_sha,task.reviewed_sha])await objectGit(repositoryPath,['cat-file','-e',sha+'^{commit}']);
+ return 'github:'+task.repository.toLowerCase();
+}
 /** Controlled Git only; no checkout, filters, hooks, Python or project instructions. */
 export async function objectGit(directory,args,signal) {
  signal?.throwIfAborted();

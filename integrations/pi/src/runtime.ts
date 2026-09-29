@@ -1,3 +1,4 @@
+import { SKILL_RULES } from '../../../src/skills/context.ts';
 import { INVESTIGATION_EVENT } from '../../../src/engine/investigation-contracts.ts';
 import { DISPATCH_EVENT } from "../../../src/engine/dispatch-service.ts";
 import { annotateResult, isObject } from "../../../src/engine/tool-result.ts";
@@ -96,7 +97,7 @@ export async function createPiRuntime(options: Parameters<RuntimeFactory>[0], mo
     () => !['closing','submitted'].includes(options.budgetState?.().phase ?? 'investigating')) : undefined;
   const structuralCapability = routing ? undefined : allowlist.has("graph_lookup") ? GRAPH_CAPABILITY_PROMPT : allowlist.has("search_entity") || allowlist.has("traverse_graph") ? LOCAGENT_CAPABILITY_PROMPT : undefined;
   const resourceLoader = await reviewResources({ cwd: options.runDir,
-    systemPrompt: BASE_SYSTEM_PROMPT + (options.routing?.declarationChanges || options.routing?.dispatch && "version" in options.routing.dispatch ? "\nRepository navigation context: Host packages are investigation context, not findings. Catalogs and declaration previews are exploration only. Inspect prefetched source first; use expand_structural_candidate if the question remains unanswered. Depend only on actual source evidence and explicitly select its EvidenceRef. Stop when sufficient evidence exists; do not read every candidate by default." : options.routing?.dispatch ? "\nRepository navigation context: the host executes bounded structural retrieval after existing rules trigger. Native host_dispatch context packages contain immutable source; explicitly select their evidenceRefId when a finding depends on it. Execution completion and candidate ordering are not semantic conclusions." : "") + (structuralCapability ? "\n" + NAVIGATION_POLICY_PROMPT + "\n" + structuralCapability : ""),
+    systemPrompt: BASE_SYSTEM_PROMPT + (options.skillsEnabled ? "\n" + SKILL_RULES : "") + (options.routing?.declarationChanges || options.routing?.dispatch && "version" in options.routing.dispatch ? "\nRepository navigation context: Host packages are investigation context, not findings. Catalogs and declaration previews are exploration only. Inspect prefetched source first; use expand_structural_candidate if the question remains unanswered. Depend only on actual source evidence and explicitly select its EvidenceRef. Stop when sufficient evidence exists; do not read every candidate by default." : options.routing?.dispatch ? "\nRepository navigation context: the host executes bounded structural retrieval after existing rules trigger. Native host_dispatch context packages contain immutable source; explicitly select their evidenceRefId when a finding depends on it. Execution completion and candidate ordering are not semantic conclusions." : "") + (structuralCapability ? "\n" + NAVIGATION_POLICY_PROMPT + "\n" + structuralCapability : ""),
     extensionFactories: [createReviewExtension(allowlist), ...(routing ? [routing.extension] : []), ...(options.budgetState ? [createBudgetExtension(options.budgetState)] : []), ...(evaluation?.extensions ?? []), audit] });
   await resourceLoader.reload();
   // Opening an exclusively created empty file sets Pi's flushed state via its public API.
@@ -105,7 +106,7 @@ export async function createPiRuntime(options: Parameters<RuntimeFactory>[0], mo
   const manager = SessionManager.open(file, options.runDir, options.repositoryPath);
   // Pi appends cwd to custom prompts. A/B runs use the same isolated state cwd so
   // random run IDs cannot silently change the system prompt between arms.
-  const result = await createAgentSession({ cwd: options.evaluation ? options.stateDir : options.runDir, agentDir: options.runDir, modelRuntime, model, thinkingLevel,
+  const result = await createAgentSession({ cwd: options.evaluation ? options.contextCwd ?? options.stateDir : options.runDir, agentDir: options.runDir, modelRuntime, model, thinkingLevel,
     sessionManager: manager, settingsManager, resourceLoader, noTools: "builtin", tools: [...allowlist],
     customTools: options.tools.map(t => ({ name: t.name, label: t.name, description: t.description, parameters: t.schema as TSchema, executionMode: "sequential" as const,
       async execute(_id, params) { if (!allowlist.has(t.name)) throw Error("Tool is outside the immutable review allowlist"); const value = await t.execute(params); return { content: [{ type: "text" as const, text: JSON.stringify(isObject(value) ? annotateResult(value) : value) }], details: value }; } })) });

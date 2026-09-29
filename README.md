@@ -8,6 +8,8 @@ MergeWarden 在终端中完成代码审查：读取提交差异、暂存区或�
 
 [快速开始](#quick-start) · [性能表现](#performance) · [完整评测](docs/experiments/CODE_GRAPH_EVAL.md) · [常用命令](#commands)
 
+Review Skills 可在审查之间从已交付运行和反馈中提炼仓库级检查方法，供后续审查按需读取；质量收益须另行评测。默认行为、反馈、停用、回滚及恢复命令见 [Review Skills 接口](docs/REVIEW_SKILLS.md)。
+
 ## 为什么使用 MergeWarden
 
 代码审查不止是检查修改的几行。一次参数调整可能影响调用方，一次继承变化可能破坏子类约定，一次返回值修改可能改变其他模块的行为。MergeWarden 围绕这些依赖关系寻找上下文，并将结论关联到可直接核查的源码。
