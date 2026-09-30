@@ -21,6 +21,18 @@ const finish=async t=>{await t.read_diff({path:'app.py'});await t.submit_review(
 async function fixture(t){const f=await repositoryFixture(t),head=await f.change();const options={repositoryPath:f.repository,stateDir:f.state,input:{kind:'commits',base:f.base,head},model:{provider:'fixture',modelId:'offline'},evaluation:{tools:'text-only'},skills:'auto',learn:'auto'};const run=await new ReviewEngine(runtime(finish)).run(options);return {...f,options,run,bank:new SkillBank(f.state)};}
 const learn=(transform=input=>({operations:[{op:'add',id:'sk_denominator',expectedRevision:0,sourceIds:[input.source.id],reason:'Conditional investigation from frozen source',content:procedure}]}))=>async input=>({result:transform(input),usage:{input:10,output:20,total:30},requests:1});
 const processJobs=(f,learner,extra={})=>learnPending(f.state,learner,{model:f.options.model,...extra});
+test('serial learning reads the just-published bank and refuses a second worker',async t=>{
+ const f=await fixture(t);await feedback(f.state,{runId:f.run.runId,comment:'Explicit zero remains valid.',range:{path:'app.py',startLine:1,endLine:2}});let calls=0,previous;
+ const learner=async input=>{calls++;assert.equal(input.bankSnapshotId,(await f.bank.current()).id);if(calls===1){await assert.rejects(processJobs(f,learn()),/worker locked/);previous=input.bankSnapshotId;return learn()(input);}assert.notEqual(input.bankSnapshotId,previous);assert(input.relevantSkills.some(s=>s.id==='sk_denominator'));assert(input.existingSkills.catalog.some(s=>s.id==='sk_denominator'&&s.bodyProvided));return {result:{operations:[{op:'noop',reason:'Existing method covers this source'}]},requests:1,usage:null};};
+ const jobs=await processJobs(f,learner,{maxJobs:2});assert.equal(calls,2);assert.deepEqual(jobs.map(j=>j.status),['applied','noop']);
+});
+test('attach_source preserves old dependency checks and repeated source support is idempotent',async t=>{
+ const f=await fixture(t),store=await SnapshotStore.load(f.state,f.run.report.snapshot.id),dependency={path:'app.py',hash:store.manifest.head['app.py'].hash};
+ await processJobs(f,learn(input=>({operations:[{op:'add',id:'sk_denominator',expectedRevision:0,sourceIds:[input.source.id],reason:'Bound method',content:{...procedure,dependencies:[dependency]}}]})));
+ const fb=await feedback(f.state,{runId:f.run.runId,comment:'The same boundary remains relevant.',range:{path:'app.py',startLine:1,endLine:2}}),input=await buildInput(f.state,fb.job.sourceId),s=(await f.bank.skills())[0],op={op:'attach_source',id:s.id,expectedRevision:s.revision,sourceIds:[input.source.id],reason:'New contextual source'};
+ const before=(await f.bank.current()).id;await assert.rejects(f.bank.apply('missing-dependency',{...input,sourcePages:[]},{operations:[op]}),/Dependency is absent/);assert.equal((await f.bank.current()).id,before);
+ await f.bank.apply(fb.job.id,input,{operations:[op]});const attached=(await f.bank.skills())[0];assert.equal(attached.sources.length,2);const again=await buildInput(f.state,fb.job.sourceId);assert(again.existingSkills.catalog.find(s=>s.id==='sk_denominator').support.currentSource);const receipt=await f.bank.apply('repeat-same-source',again,{operations:[{...op,expectedRevision:attached.revision}]});assert.equal(receipt.outcome,'noop');assert.deepEqual(await f.bank.skills(),[attached]);
+});
 test('feedback relations preserve simulated provenance and reject forged report or human status',async t=>{
  const f=await fixture(t),m=await readRun(f.state,f.run.runId),range={path:'app.py',startLine:1,endLine:2};
  for(const relationToReview of ['supports','contradicts','adds_missing_issue','adds_context']){

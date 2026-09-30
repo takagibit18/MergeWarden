@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile,readdir } from 'node:fs/promises';
+import { readFile,readdir,mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createModelRuntime,createPiRuntime } from '../src/runtime.ts';
-import { runPiLearning,LEARNING_PROMPT } from '../src/learning.ts';
+import { runPiLearning,LEARNING_PROMPT,LEARNING_PROMPT_VERSION,LEARNING_PROMPT_SHA256 } from '../src/learning.ts';
+import { selectLearningContext } from '../../../src/skills/learning-context.ts';
 import { ReviewEngine } from '../../../src/engine/review.ts';
 import { repositoryFixture } from '../../../tests/repository-fixture.mjs';
 import { SkillBank } from '../../../src/skills/bank.ts';
@@ -14,6 +15,15 @@ async function provider(script) {
  runtime.registerProvider('fixture',{api:'openai-completions',baseUrl:'https://offline.invalid',apiKey:'offline-key',models:[{id:'offline',name:'offline',reasoning:false,input:['text'],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:100000,maxTokens:4096}],streamSimple(model,context){const stream=createAssistantMessageEventStream(),content=script(context,++turn);const message={role:'assistant',api:model.api,provider:model.provider,model:model.id,content,timestamp:Date.now(),stopReason:content.some(c=>c.type==='toolCall')?'toolUse':'stop',usage:{input:10,output:5,cacheRead:0,cacheWrite:0,totalTokens:15,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}}};queueMicrotask(()=>{stream.push({type:'start',partial:message});stream.push({type:'done',reason:message.stopReason,message});});return stream;}});return runtime;
 }
 const call=(name,args)=>[{type:'toolCall',id:'c-'+name,name,arguments:args}];
+test('native learning preserves selected catalog/bodies and checks actual UTF-8 artifacts before one request',async t=>{
+ const f=await repositoryFixture(t),directory=join(f.state,'aware');await mkdir(directory);const source={id:'run:fixture',repositoryKey:'repo:a',snapshotId:'a'.repeat(64),independenceKey:'b'.repeat(64)};
+ const skills=Array.from({length:5},(_,i)=>({id:'sk_'+i,revision:1,repositoryKey:'repo:a',owner:'learner',state:'trial',sources:[],type:'review_procedure',scopeType:'review_method',title:'Inspect scoring',conditions:['When scoring changes'],steps:['Read callers','Inspect empty values'],counterexamples:['Caller validates input'],stopConditions:['Stop after verification'],paths:['app.py'],languages:['Python'],keywords:['score'],dependencies:[]}));
+ const input=selectLearningContext({policy:'fixture',source,report:{summary:'score empty input'},sourcePages:[{path:'app.py',text:'score("边界")',fileHash:'c'.repeat(64)}],toolEvents:[],fixedRules:'Evidence rules remain fixed.',bankSnapshotId:'d'.repeat(64)},skills);const before=structuredClone(input);let calls=0;
+ const runtime=await provider(context=>{calls++;const content=context.messages[0].content;const visible=JSON.parse(typeof content==='string'?content:content.filter(c=>c.type==='text').map(c=>c.text).join(''));assert.equal(visible.existingSkills.catalog.length,5);assert.equal(visible.relevantSkills.length,3);assert.equal(visible.existingSkills.catalog.filter(c=>c.bodyProvided).length,3);assert(visible.existingSkills.catalog.filter(c=>!c.bodyProvided).every(c=>c.readOnly));return [{type:'text',text:JSON.stringify({operations:[{op:'noop',reason:'Synthetic already-covered fixture'}]})}];});
+ const options={directory,model:{provider:'fixture',modelId:'offline'},signal:new AbortController().signal};await runPiLearning(runtime)(input,options);assert.equal(calls,1);assert.deepEqual(input,before);
+ const host=await readFile(join(directory,'input.json')),model=await readFile(join(directory,'model-input.json')),meta=JSON.parse(await readFile(join(directory,'learning-input-meta.json'),'utf8'));assert.equal(meta.inputBytes,host.byteLength);assert.equal(meta.modelInputBytes,model.byteLength);assert(meta.inputBytes<=40000&&meta.modelInputBytes<=40000&&meta.existingKnowledgeBytes<=12000);assert.equal(meta.promptVersion,LEARNING_PROMPT_VERSION);assert.equal(meta.promptSha256,LEARNING_PROMPT_SHA256);assert.equal(meta.bodyCount,3);
+ const tooLarge={...input,fixedRules:'界'.repeat(14000)};await assert.rejects(runPiLearning(runtime)(tooLarge,{...options,directory:join(f.state,'never-started')}),/UTF-8 byte limit/);assert.equal(calls,1);
+});
 test('native Pi review → separate learning session → next review consumes frozen Skill and still reads source for evidence',async t=>{
  const f=await repositoryFixture(t),head=await f.change();await f.write('AGENTS.md','MALICIOUS_AMBIENT_MARKER');let learningCalls=0,observed,skillId;
  const learningRuntime=await provider(context=>{learningCalls++;assert.deepEqual(context.tools??[],[]);assert.ok(context.systemPrompt.startsWith(LEARNING_PROMPT));assert.doesNotMatch(context.systemPrompt,/MALICIOUS_AMBIENT_MARKER/);const input=JSON.parse(typeof context.messages[0].content==='string'?context.messages[0].content:context.messages[0].content.filter(c=>c.type==='text').map(c=>c.text).join(''));skillId='sk_'+input.newTargets[0].split('_')[1]+'_1';return [{type:'text',text:JSON.stringify({operations:[{op:'add',targetRef:input.newTargets[0],sourceRefs:[input.source.ref],reason:'Synthetic mechanism test',content:{type:'review_procedure',title:'Check explicit denominator inputs',conditions:['When count is supplied by a caller.'],steps:['Read call sites and inspect allowed count values.','Check division guards for explicit zero.'],counterexamples:['Positive validation excludes zero.'],stopConditions:['Stop after source establishes the allowed range.'],paths:['app.py'],languages:['Python'],keywords:['count'],scopeType:'review_method',symbols:[],dependencyRefs:[]}}]})}];});

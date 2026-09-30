@@ -6,6 +6,9 @@ export function learningIdentity(input: LearningInput) {
   const frozen = structuredClone(input), inputHash = digest(frozen), scope = inputHash.slice(0, 16);
   const sourceRef = `src_${scope}_001`;
   const skills = new Map(frozen.relevantSkills.map((s, i) => [`skill_${scope}_${i + 1}`, s]));
+  const bodyRefs = new Map([...skills].map(([ref,s])=>[s.id,ref]));
+  const context = frozen.existingSkills;
+  if(context && (new Set(context.catalog.map(c=>c.id)).size!==context.catalog.length || context.catalog.some(c=>c.bodyProvided!==bodyRefs.has(c.id)||c.readOnly===c.bodyProvided) || frozen.relevantSkills.some(s=>!context.catalog.some(c=>c.id===s.id&&c.revision===s.revision))))throw Error('Learning catalog/body identity mismatch');
   const pages = new Map((frozen.sourcePages as Array<Record<string, unknown>>).map((p, i) => [`evidence_${scope}_${i + 1}`, p]));
   const newTargets = Array.from({length: 3}, (_, i) => `new_${scope}_${i + 1}`);
   const strip = (value: unknown): unknown => {
@@ -17,6 +20,8 @@ export function learningIdentity(input: LearningInput) {
     policy: frozen.policy, source: {...strip(frozen.source) as object, id: sourceRef, ref: sourceRef},
     report: strip(frozen.report), sourcePages: [...pages].map(([ref,p]) => ({...strip(p) as object,ref})),
     relevantSkills: [...skills].map(([ref,s]) => ({ref, state:s.state, ...strip(contentOf(s)) as object, dependencies: s.dependencies.map(d => ({path:d.path, historical:true}))})),
+    ...(context?{existingSkills:{version:context.version,limits:context.limits,bankCount:context.bankCount,candidateCount:context.candidateCount,rankedCount:context.rankedCount,catalogOmittedCount:context.catalogOmittedCount,bodyOmittedCount:context.bodyOmittedCount,
+      catalog:context.catalog.map(({id,revision:_revision,...entry},i)=>({...entry,ref:bodyRefs.get(id)??`catalog_${scope}_${i+1}`}))}}:{}),
     newTargets, toolEvents: strip(frozen.toolEvents), fixedRules:frozen.fixedRules,
   };
   return { visible, inputHash, resolve(output: unknown, currentInput = input): LearningResult {
@@ -36,6 +41,7 @@ export function learningIdentity(input: LearningInput) {
       const target = op.targetRef as string, old = skills.get(target);
       if (touched.has(target)) throw Error('Duplicate target ref'); touched.add(target);
       if (op.op === 'add' ? !newTargets.includes(target) : !old) throw Error('Unknown or cross-input target ref');
+      if(old&&(old.owner!=='learner'||old.repositoryKey!==frozen.source.repositoryKey||!['trial','active'].includes(old.state)))throw Error('Target is not mutable managed knowledge');
       let content: SkillContent | undefined;
       if (op.content) {
         const c = op.content as Record<string, unknown>;
