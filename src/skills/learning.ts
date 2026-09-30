@@ -9,6 +9,7 @@ import { readReport, readRun, runPath } from '../engine/reports.ts';
 import { SnapshotStore } from '../snapshot/store.ts';
 import { writeJson } from '../infrastructure/files.ts';
 import { BASE_SYSTEM_PROMPT } from '../engine/prompt.ts';
+import { selectLearningContext } from './learning-context.ts';
 const jobId=(sourceId:string)=>digest([sourceId,SKILL_POLICY]);
 export async function enqueue(state:string,sourceId:string):Promise<LearningJob> {
   const id=jobId(sourceId),path=join(state,'skills','jobs',id+'.json');
@@ -54,14 +55,13 @@ export async function buildInput(state:string,ref:string):Promise<LearningInput>
   const targets=ranges.length?ranges:store.manifest.changedPaths.slice(0,3).map(path=>({path,startLine:1,endLine:60}));
   const sourcePages=[];let byteBudget=14000;
   for(const range of targets.slice(0,4)) {const page=await store.source('head',range.path,range.startLine,Math.min(range.endLine,range.startLine+59));const record={...page,fileHash:store.manifest.head[range.path]?.hash};const bytes=Buffer.byteLength(JSON.stringify(record));if(bytes<=byteBudget){sourcePages.push(record);byteBudget-=bytes;}}
-  const relevantSkills=(await bank.skills(current.snapshot)).filter(s=>s.repositoryKey===source.repositoryKey&&(s.scopeType==='review_method'||s.paths.some(p=>targets.some(r=>r.path===p||r.path.startsWith(p+'/'))))).sort((a,b)=>a.id.localeCompare(b.id)).slice(0,8);
   // Only bounded visible tool outcomes; no assistant thinking or arbitrary session replay.
   const toolEvents:unknown[]=[];
   try {const session=await open(join(runPath(state,source.runId),'session.jsonl'),'r');try {const b=Buffer.alloc(64000);const {bytesRead}=await session.read(b,0,b.length,0);const lines=b.subarray(0,bytesRead).toString('utf8').split('\n');lines.pop();for(const line of lines){try{const row=JSON.parse(line),msg=row.message;if(msg?.role==='toolResult'&&toolEvents.length<6)toolEvents.push({tool:msg.toolName,isError:msg.isError===true,observation:JSON.stringify(msg.content).slice(0,500)});}catch{/* partial row */}}}finally{await session.close();}}catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e;}
   const boundedReport={status:report.status,summary:report.summary.slice(0,2000),findings:report.findings.filter(f=>!source.findingId||f.id===source.findingId).slice(0,3)};
-  const input:LearningInput={policy:SKILL_POLICY,source,report:boundedReport,sourcePages,toolEvents,relevantSkills,fixedRules:BASE_SYSTEM_PROMPT,bankSnapshotId:current.id};
-  while(Buffer.byteLength(JSON.stringify(input))>SKILL_LIMITS.inputBytes&&input.relevantSkills.length)input.relevantSkills.pop();
-  if(Buffer.byteLength(JSON.stringify(input))>SKILL_LIMITS.inputBytes)throw Error('Learning input exceeds bounded byte limit');return input;
+  const skills=await bank.skills(current.snapshot),supportSources:Record<string,SkillSource>={};
+  for(const ref of new Set(skills.filter(s=>s.repositoryKey===source.repositoryKey).flatMap(s=>s.sources)))supportSources[ref]=await bank.source(ref);
+  return selectLearningContext({policy:SKILL_POLICY,source,report:boundedReport,sourcePages,toolEvents,fixedRules:BASE_SYSTEM_PROMPT,bankSnapshotId:current.id},skills,supportSources);
 }
 export async function learnPending(state:string,learner:Learner,options:{model:ModelSelection;inference?:InferenceOptions;maxJobs?:number;retryFailed?:boolean;feedbackOnly?:boolean;repositoryKey?:string;timeoutMs?:number}):Promise<LearningJob[]> {
   const max=options.maxJobs??1;if(!Number.isInteger(max)||max<1||max>3)throw Error('Learning batch must contain 1..3 jobs');

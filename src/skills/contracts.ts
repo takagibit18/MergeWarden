@@ -38,6 +38,22 @@ export interface BankSnapshot {
 export interface LearningInput {
   policy: string; source: SkillSource; report: unknown; sourcePages: unknown[]; toolEvents: unknown[];
   relevantSkills: Skill[]; fixedRules: string; bankSnapshotId: string;
+  /** Learning-only knowledge coverage. Catalog entries do not grant mutation authority. */
+  existingSkills?: LearningContext;
+}
+export interface LearningCatalogEntry {
+  id: string; revision: number; title: string; conditions: string[]; summaryTruncated: boolean;
+  scopeType?: SkillContent['scopeType']; type: SkillContent['type']; state: SkillState; owner: Skill['owner'];
+  bodyProvided: boolean; readOnly: boolean; score: number; selectionReason: string;
+  support: { currentSource: boolean; sameSnapshot: boolean; sameIndependenceKey: boolean };
+  dependenciesAvailable: boolean;
+}
+export interface LearningContext {
+  version: string; policySha256: string;
+  limits: { catalog: number; bodies: number; contextBytes: number };
+  bankCount: number; candidateCount: number; rankedCount: number;
+  catalogOmittedCount: number; bodyOmittedCount: number;
+  catalog: LearningCatalogEntry[];
 }
 export type LearningOperation = { op: 'noop'; reason: string } | {
   op: 'add' | 'revise' | 'attach_source' | 'retire'; id: string; expectedRevision: number;
