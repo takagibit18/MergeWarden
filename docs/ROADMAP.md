@@ -31,6 +31,6 @@ MVP 固定一个 Pi 会话、final_only 输出。中断后保留实际状态和�
 
 LocAgent retrieval 是已完成一轮受控挑战的内部实验入口，见[冻结协议](experiments/LOCAGENT_REPLICATION.md)。r2 的 8 × T0/G0/G1 没有出现新的 Graph 路径转化或 assisted finding，因此按预注册门槛停止，未扩大到 20 × 3，也不将 G1 替换为默认产品工具。该结果不证明底层 Graph 在真实大仓库无价值；新的语料、模型或其他论文机制需要另立实验，不能混入本轮结果。
 
-增量图更新、其他语言、SSH/容器、原会话续审、增量结果、Jev shadow、PR 发布和 MCP/ACP 独立立项。仓库继续私有；不选择公共许可证、不发布 Marketplace、不实现自动修复或自动合并。
+本地 Codex STDIO MCP V1 已增加薄入口，沿用现有 Pi 引擎；见 [MCP 接口](../integrations/mcp/README.md)。远程 MCP、ACP、增量图更新、其他语言、SSH/容器、原会话续审、增量结果、Jev shadow 和 PR 发布仍须独立立项。仓库继续私有；不选择公共许可证、不发布 Marketplace、不实现自动修复或自动合并。
 
 RealGolden40 已完成 18/18 reserve，并以 READY 锁启动正式 T0/G0/G1。全部 120 个 first-attempt 均已保全；第 5 次运行起供应商持续返回余额/资源包不足，故仅 4 次 completed，其余 116 次失败。本轮锁和输出不可恢复为“成功实验”，也不得充值后覆盖重跑。若继续，必须创建独立 successor lock、全新输出目录并将新结果与本轮并列报告；在取得可比较结果前不进入 repeated runs 或 v0.2 标签。新版本或替换样本需要新 corpus hash；Controlled Golden r2、既有 Graph/LocAgent 和历史结果保持独立。

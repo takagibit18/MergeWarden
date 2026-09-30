@@ -14,4 +14,4 @@ ADR、状态表和实施计划是另外维护的文档，需要与同源正文�
 
 ## 仓库安装
 
-根目录运行 npm run setup，由 setup.mjs 按三个 lockfile 安装开发依赖；无需单独进入适配器目录。原始设计文件保留为历史快照，最新实现与实测见 docs/IMPLEMENTATION_STATUS.md 和 docs/VALIDATION.md。
+根目录运行 npm run setup，由 setup.mjs 按四个 lockfile 安装开发依赖；无需单独进入适配器目录。原始设计文件保留为历史快照，最新实现与实测见 docs/IMPLEMENTATION_STATUS.md 和 docs/VALIDATION.md。

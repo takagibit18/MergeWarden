@@ -10,6 +10,8 @@ MergeWarden 在终端中完成代码审查：读取提交差异、暂存区或�
 
 Review Skills 可在审查之间从已交付运行和反馈中提炼仓库级检查方法，供后续审查按需读取；质量收益须另行评测。默认行为、反馈、停用、回滚及恢复命令见 [Review Skills 接口](docs/REVIEW_SKILLS.md)。
 
+Codex 可通过本地 STDIO MCP 调用同一套 Pi 审查引擎：启动审查后返回 taskId，查询原生状态与结构化报告，读取 finding 的冻结证据，并查询历史或取消任务。配置与工具说明见 [Codex MCP 接入](integrations/mcp/README.md)。
+
 ## 为什么使用 MergeWarden
 
 代码审查不止是检查修改的几行。一次参数调整可能影响调用方，一次继承变化可能破坏子类约定，一次返回值修改可能改变其他模块的行为。MergeWarden 围绕这些依赖关系寻找上下文，并将结论关联到可直接核查的源码。

@@ -19,8 +19,8 @@ Read README.md, docs/DECISIONS.md, docs/IMPLEMENTATION_STATUS.md and the relevan
 
 ## Validation
 `npm test` runs zero-dependency core tests. `npm run demo` is explicitly synthetic.
-`npm run setup` installs all three locked packages with lifecycle scripts disabled.
-`npm run verify` runs core and adapter typechecks, native Pi smoke, real grammar tests, demo and status.
+`npm run setup` installs all four locked packages with lifecycle scripts disabled.
+`npm run verify` runs core and adapter typechecks, native Pi smoke, real grammar tests, MCP tests, demo and status.
 When updating dependencies, commit generated lockfiles. Grammar changes require source, hash and ABI updates.
 Pi 0.84.1 may defer a new JSONL file until the first assistant message. Never interpret append as fsync.
 Before a real review release, perform recovery and security fault-injection tests and validate report delivery.

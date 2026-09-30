@@ -1,4 +1,8 @@
-# 当前实现状态 · 2026-09-30
+# 当前实现状态 · 2026-10-01
+
+## 本地 Codex MCP
+
+`integrations/mcp` 使用官方 TypeScript SDK v2 的 STDIO 入口与五个工具，直接调用现有 ReviewEngine/Pi。启动快速返回 taskId，后续查询复用原生 run/Report 与交付 hash 校验；证据经原 SnapshotStore/checkEvidence 读取。薄任务 receipt 仅保存启动与 run 关联，关闭连接请求取消，硬中断不升级为成功。仓库/state/模型/认证由宿主固定，MCP 不暴露凭据、任意文件或写代码能力。自动化验证包含新旧协议、实际 STDIO、真实 Pi SDK 的脚本 provider 与持久化故障；脚本响应不代表模型质量。安装、配置、状态与恢复边界见 [Codex MCP 接口](../integrations/mcp/README.md)。
 
 ## Review Skills
 
