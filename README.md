@@ -6,13 +6,13 @@ MergeWarden 在终端中完成代码审查：读取提交差异、暂存区或�
 
 基于 Pi 的 Agent 运行时，MergeWarden 将代码导航、审查预算、证据校验和报告管理整合在同一条 CLI 工作流中。
 
-[快速开始](#quick-start) · [性能表现](#performance) · [完整评测](docs/experiments/CODE_GRAPH_EVAL.md) · [常用命令](#commands) · [项目主页](https://merge-warden.vercel.app)
+[Codex 插件安装](#codex-plugin) · [CLI 快速开始](#quick-start) · [性能表现](#performance) · [完整评测](docs/experiments/CODE_GRAPH_EVAL.md) · [常用命令](#commands) · [项目主页](https://merge-warden.vercel.app)
 
 本仓库现采用 **MergeWarden V2** 的 Pi / TypeScript 实现，包含 Python CodeGraph、Review Skills 和本地 Codex MCP 接口。原 Python CLI、FastAPI 服务、Docker 部署和 GitHub 自动评论入口已由当前实现取代；旧实现保留在 Git 历史中。升级后请按下方 Node.js 命令安装和运行，原 `python cli.py` 命令及 `.env` 配置不再作为入口。已有 V2 用户继续使用原来的 `MergeWarden2` 默认数据目录，登录凭据、快照和报告无需搬迁。
 
 Review Skills 可在审查之间从已交付运行和反馈中提炼仓库级检查方法，供后续审查按需读取；质量收益须另行评测。默认行为、反馈、停用、回滚及恢复命令见 [Review Skills 接口](docs/REVIEW_SKILLS.md)。
 
-Codex 可通过本地 STDIO MCP 调用同一套 Pi 审查引擎：启动审查后返回 taskId，查询原生状态与结构化报告，读取 finding 的冻结证据，并查询历史或取消任务。配置与工具说明见 [Codex MCP 接入](integrations/mcp/README.md)。
+Codex 可通过本地 STDIO MCP 调用同一套 Pi 审查引擎：启动审查后返回 taskId，查询原生状态与结构化报告，读取 finding 的冻结证据，并查询历史或取消任务。可安装带有审查 skill 的 [Codex 插件](#codex-plugin)，也可手动配置 [Codex MCP 接入](integrations/mcp/README.md)。
 
 ## 为什么使用 MergeWarden
 
@@ -135,6 +135,64 @@ npm run cli -- review --repo /path/to/repository --base BASE_SHA --head HEAD_SHA
 ```
 
 API Key 从明确指定的环境变量读取。OAuth 凭据独立保存在应用数据目录中，并通过 `--auth oauth` 选择使用。
+
+<a id="codex-plugin"></a>
+
+## Codex 插件
+
+插件 `mergewarden` 包含审查 skill 和本地 STDIO MCP，使用相同的 Pi 引擎与证据交付规则。需要 Node.js 22.19+、Git、npm，以及支持 `codex plugin add` 的本地 Codex 客户端。命令安装流程使用 Codex CLI 0.159.2 验证；桌面端需在安装及配置后重启或打开新会话。
+
+### 安装与首次配置
+
+从 GitHub 安装固定的插件版本。下面的命令使用 `codex-plugin-v0.1.0`，不依赖默认分支的合并进度：
+
+```sh
+codex plugin marketplace add takagibit18/MergeWarden --ref codex-plugin-v0.1.0
+codex plugin add mergewarden@mergewarden
+```
+
+若旧版 Codex 无法识别插件命令或当前推理配置，可安装本次验证使用的 CLI，再执行上述命令：
+
+```sh
+npm install -g @openai/codex@0.159.2
+```
+
+本地开发或从 [GitHub Release](https://github.com/takagibit18/MergeWarden/releases/tag/codex-plugin-v0.1.0) 下载 ZIP 后，先解压，再用插件目录替代 Git 地址：
+
+```sh
+codex plugin marketplace add /absolute/MergeWarden
+codex plugin add mergewarden@mergewarden
+codex plugin list --json
+```
+
+安装后打开新的 Codex 会话，输入 **“使用 $mergewarden-review 帮我完成首次配置，审查当前仓库，使用 openai-codex OAuth，先列出可用模型供我选择。”** skill 会定位安装目录，安装运行依赖并引导配置。仓库或模型已确定时可以直接指定。Pi OAuth 登录需要按终端提示完成，安装不会自动继承 Codex 登录。
+
+也可以在 `codex plugin list --json` 显示的安装目录中手动运行：
+
+```sh
+node --experimental-strip-types scripts/codex-plugin.mjs models --provider openai-codex
+node --experimental-strip-types scripts/codex-plugin.mjs setup --repo /absolute/my-repo --provider openai-codex --model MODEL_ID --auth oauth
+node --experimental-strip-types scripts/codex-plugin.mjs login
+node --experimental-strip-types scripts/codex-plugin.mjs doctor
+```
+
+`setup` 通过四份 lockfile 安装依赖，禁用生命周期脚本，并保存固定的仓库/模型配置。已有同一数据目录的 MergeWarden Pi OAuth 登录可继续使用。API Key 用户用 `--api-key-env MERGEWARDEN_API_KEY` 替代 `--auth oauth`，在启动 Codex 的环境中设置该变量；插件配置只保存变量名。模型目录不代表账号额度或模型访问权限。
+
+默认配置是 Windows `%LOCALAPPDATA%/MergeWarden2/plugin.json`，其他平台 `~/MergeWarden2/plugin.json`，数据目录继续兼容 `MergeWarden2`。可用 `MERGEWARDEN_PLUGIN_CONFIG` 指定外部绝对配置路径，`--state` 指定外部数据目录。二者必须与审查 checkout 分离。MCP 启动不会自动安装依赖；插件更新后必要时在新的安装目录运行 `prepare`，然后重启会话。一个配置绑定一个 checkout；跨仓库时重新 `setup` 并重启。插件显式传递 `MERGEWARDEN_API_KEY`、配置路径及大小写代理变量名；自定义 API Key 变量名请使用独立 MCP 配置。
+
+当前包使用官方支持的 `.codex-plugin/plugin.json` / `.mcp.json` Codex 格式，以显式设置 `env_vars`、启动和工具超时。Portable Agent Plugins MCP 格式不定义环境变量转发清单；在实际 Codex 宿主中，未显式转发的代理及 API Key 会被过滤。
+
+配置完成后输入 **“用 MergeWarden 审查暂存区变更”** 或 **“用 MergeWarden 比较提交 BASE_SHA 和 HEAD_SHA，并核查 finding 证据”**。PR 需要其本地 checkout 和真实 base/head 提交。插件会启动任务、轮询状态、读取冻结证据；`no_changes`、未完成和交付失败均不会被当作成功审查。MCP 会写入本地状态，首次工具调用可能需要 Codex 审批。若之前手动注册了同名 MCP，请禁用旧配置以免重复运行。
+
+### 打包与分发
+
+```sh
+npm run package:plugin -- --out /absolute/output-outside-MergeWarden
+```
+
+生成 `mergewarden-codex-plugin-0.1.0.zip` 和逐文件 SHA-256 清单。ZIP 根目录就是插件目录，解压后可作为本地 marketplace 安装。版本 Release 提供 ZIP、清单和 `SHA256SUMS.txt`；下载后可用 `sha256sum`，或在 PowerShell 中用 `Get-FileHash -Algorithm SHA256` 核对 ZIP。包保留四份锁定依赖、TypeScript 源码和 grammar 元数据，首次配置再下载依赖；不包含 node_modules、Git 历史、登录凭据、运行状态或评测数据。请从 Git 安装或解压到普通目录：Node 的原生 TypeScript stripping 不支持把此源码运行包直接作为 node_modules 下的 npm 依赖执行。
+
+Git/local marketplace 分发与官方公共插件目录上架是不同流程。当前本地 STDIO 插件可走前者；[官方公共提交说明](https://developers.openai.com/plugins/build/plugins)要求 MCP 提交远程 HTTPS 端点，本地 MCP 支持须另与 OpenAI 联系。本仓库不包含托管服务或自动发布步骤。
 
 <a id="commands"></a>
 

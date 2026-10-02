@@ -1,0 +1,24 @@
+{
+  "name": "mergewarden",
+  "version": "0.1.0",
+  "description": "Review Git changes with frozen source, evidence and durable review tasks.",
+  "author": { "name": "takagibit18", "url": "https://github.com/takagibit18" },
+  "repository": "https://github.com/takagibit18/MergeWarden",
+  "license": "MIT",
+  "keywords": ["code-review", "git", "mcp"],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "MergeWarden",
+    "shortDescription": "Evidence-first review of Git changes",
+    "longDescription": "Run a local, asynchronous review of a configured Git checkout. Inspect saved findings and evidence through MCP. Requires Node.js 22.19+, Git, dependency setup and a separately configured Pi model login.",
+    "developerName": "takagibit18",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"],
+    "websiteURL": "https://github.com/takagibit18/MergeWarden",
+    "defaultPrompt": ["Use MergeWarden to review my staged changes.", "Use MergeWarden to review a pull request and inspect its evidence."],
+    "brandColor": "#196B58",
+    "composerIcon": "./assets/mergewarden.svg",
+    "logo": "./assets/mergewarden.svg"
+  }
+}
