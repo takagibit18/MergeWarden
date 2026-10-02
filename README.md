@@ -6,7 +6,7 @@ MergeWarden 在终端中完成代码审查：读取提交差异、暂存区或�
 
 基于 Pi 的 Agent 运行时，MergeWarden 将代码导航、审查预算、证据校验和报告管理整合在同一条 CLI 工作流中。
 
-[快速开始](#quick-start) · [性能表现](#performance) · [完整评测](docs/experiments/CODE_GRAPH_EVAL.md) · [常用命令](#commands)
+[快速开始](#quick-start) · [性能表现](#performance) · [完整评测](docs/experiments/CODE_GRAPH_EVAL.md) · [常用命令](#commands) · [项目主页](https://merge-warden.vercel.app)
 
 本仓库现采用 **MergeWarden V2** 的 Pi / TypeScript 实现，包含 Python CodeGraph、Review Skills 和本地 Codex MCP 接口。原 Python CLI、FastAPI 服务、Docker 部署和 GitHub 自动评论入口已由当前实现取代；旧实现保留在 Git 历史中。升级后请按下方 Node.js 命令安装和运行，原 `python cli.py` 命令及 `.env` 配置不再作为入口。已有 V2 用户继续使用原来的 `MergeWarden2` 默认数据目录，登录凭据、快照和报告无需搬迁。
 

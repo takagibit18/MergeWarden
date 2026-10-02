@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f5f7">
+  <meta name="description" content="MergeWarden 2：以源码证据为中心的 AI 代码审查 CLI。连接 Python 跨文件依赖，保留不可变证据，让审查经验持续积累。">
+  <title>MergeWarden 2 — 看见变更之外</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231d1d1f'/%3E%3Cpath d='M9 8v6q0 5 7 5m7-11v6q0 5-7 5v5' stroke='white' stroke-width='2.5' fill='none'/%3E%3Ccircle cx='9' cy='8' r='2' fill='white'/%3E%3Ccircle cx='23' cy='8' r='2' fill='white'/%3E%3Ccircle cx='16' cy='24' r='2' fill='white'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="./style.css">
+  <script defer src="./app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到正文</a>
+  <header class="site-header">
+    <a class="brand" href="#" aria-label="MergeWarden 首页">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M9 6v8q0 6 7 6m7-14v8q0 6-7 6v6"/><circle cx="9" cy="6" r="2.2"/><circle cx="23" cy="6" r="2.2"/><circle cx="16" cy="26" r="2.2"/></svg>
+      <span>MergeWarden<span class="brand-version">2</span></span>
+    </a>
+    <nav class="desktop-nav" aria-label="主要导航"><a href="#graph">CodeGraph</a><a href="#evidence">源码证据</a><a href="#skills">Review Skills</a><a href="#performance">评测</a></nav>
+    <a class="header-cta" href="#start">快速开始</a>
+  </header>
+  <main id="main">
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <p class="eyebrow">EVIDENCE-FIRST CODE REVIEW</p>
+        <h1 id="hero-title">MergeWarden <span>2</span></h1>
+        <p class="hero-statement">看见变更之外。</p>
+        <p class="hero-description"><span>连接跨文件依赖。</span><span>让每条审查结论，回到源码。</span></p>
+        <div class="hero-actions"><a class="button button-dark" href="#graph">探索 CodeGraph</a><a class="button button-light" href="#start">在终端中开始</a></div>
+      </div>
+      <div class="hero-graph" role="img" aria-label="结构导航示意：从变更函数连接调用方、继承关系和导入关系，再回到源码证据">
+        <svg viewBox="0 0 1200 300" fill="none" aria-hidden="true">
+          <g stroke="#d3d5d9" stroke-width="1.2">
+            <path d="M60 180H210Q250 180 270 150L300 110H455Q520 110 570 150"/>
+            <path d="M180 45H350Q400 45 425 70L500 135Q540 165 600 165"/>
+            <path d="M120 270H325Q365 270 390 240L445 190Q485 165 600 165"/>
+            <path d="M600 165H710Q755 165 785 135L840 80H1050"/>
+            <path d="M600 165H880Q920 165 945 195L980 230H1150"/>
+            <path d="M750 165L825 255H985"/>
+            <path d="M840 80L880 35H1160"/>
+            <path d="M425 70V20H550"/>
+          </g>
+          <path class="signal-path" d="M180 45H350Q400 45 425 70L500 135Q540 165 600 165H710Q755 165 785 135L840 80H1050" stroke="#1d1d1f" stroke-width="1.7"/>
+          <g class="graph-quiet" fill="#f5f5f7" stroke="#b6bbc3" stroke-width="1.2">
+            <circle cx="180" cy="45" r="5"/><circle cx="350" cy="45" r="5"/><circle cx="60" cy="180" r="5"/><circle cx="300" cy="110" r="5"/><circle cx="120" cy="270" r="5"/><circle cx="390" cy="240" r="5"/><circle cx="1050" cy="80" r="5"/><circle cx="1150" cy="230" r="5"/><circle cx="985" cy="255" r="5"/><circle cx="1160" cy="35" r="5"/><circle cx="550" cy="20" r="5"/>
+          </g>
+          <circle cx="600" cy="165" r="37" fill="#f5f5f7" stroke="#dadce0"/>
+          <circle cx="600" cy="165" r="22" fill="#1d1d1f"/>
+          <path d="M592 156v8q0 5 8 5m8-13v8q0 5-8 5v7" stroke="#fff" stroke-width="1.8"/>
+          <g fill="#777b83" font-family="Consolas, monospace" font-size="13"><text x="174" y="27">CALLER</text><text x="280" y="94">IMPORT</text><text x="1030" y="64">CALLEE</text><text x="965" y="212">INHERITS</text><text x="564" y="225" fill="#1d1d1f">CHANGE</text></g>
+        </svg>
+        <p class="diagram-caption">一次变更，连接完整上下文。<span>结构导航示意</span></p>
+      </div>
+      <div class="hero-foot"><span>READ-ONLY BY DESIGN</span><span>POWERED BY Pi</span><span>BUILT FOR YOUR TERMINAL</span></div>
+    </section>
+    <section class="intro" aria-labelledby="intro-title"><div class="reveal"><p class="eyebrow">BEYOND THE DIFF</p><h2 id="intro-title">改动只有几行。<br><span>影响，可能在别处。</span></h2><p class="section-body">一次参数变化，可能影响调用方；一次继承调整，可能改变子类行为。<br class="desktop-break">MergeWarden 从 Git 变更出发，查找关联代码，核对实际行为。</p></div></section>
+
+    <section class="graph-section dark-section" id="graph" aria-labelledby="graph-title">
+      <div class="section-wrap">
+        <div class="section-heading reveal"><p class="eyebrow">01 / PYTHON CODEGRAPH</p><h2 id="graph-title">顺着关系，<br><span>找到关键代码。</span></h2><p class="section-body">用 Tree-sitter 理解 Python 结构，将调用、继承与导入关系连接起来。<br class="desktop-break">文本搜索与图导航协同，最终仍回到源码核验。</p></div>
+        <div class="graph-explorer reveal">
+          <div class="segmented dark-segmented" role="tablist" aria-label="探索代码关系">
+            <button type="button" role="tab" id="relation-calls" aria-selected="true" aria-controls="relation-panel" data-relation="calls">调用 Calls</button>
+            <button type="button" role="tab" id="relation-inherits" aria-selected="false" aria-controls="relation-panel" tabindex="-1" data-relation="inherits">继承 Inherits</button>
+            <button type="button" role="tab" id="relation-imports" aria-selected="false" aria-controls="relation-panel" tabindex="-1" data-relation="imports">导入 Imports</button>
+          </div>
+          <div id="relation-panel" role="tabpanel" aria-labelledby="relation-calls" class="relation-panel">
+            <div class="flow-labels"><span>变更声明</span><span>关联上下文</span><span>源码核验</span></div>
+            <svg class="relation-diagram" viewBox="0 0 1000 268" role="img" aria-labelledby="relation-diagram-title">
+              <title id="relation-diagram-title">调用关系示意：从修改的 normalize 函数定位 import_data 调用方，再读取调用位置的源码</title>
+              <path class="dim-route" d="M200 134H320Q360 134 380 105L420 62H610Q650 62 680 95L710 134H800"/>
+              <path class="dim-route" d="M200 134H320Q360 134 380 165L420 211H610Q650 211 680 175L710 134H800"/>
+              <path class="active-route" d="M200 134H800"/>
+              <circle cx="200" cy="134" r="44" class="root-ring"/><circle cx="200" cy="134" r="9" class="root-dot"/>
+              <circle cx="500" cy="62" r="5" class="quiet-dot"/><circle cx="500" cy="211" r="5" class="quiet-dot"/>
+              <circle cx="500" cy="134" r="10" class="root-dot"/>
+              <circle cx="800" cy="134" r="28" class="source-ring"/><path d="M790 134l7 7 14-15" class="source-check"/>
+              <g class="svg-label"><text x="200" y="215" text-anchor="middle" id="graph-root">normalize()</text><text x="500" y="176" text-anchor="middle" id="graph-target">import_data()</text><text x="800" y="215" text-anchor="middle">read_source</text><text x="500" y="30" text-anchor="middle" class="quiet-label">related context</text><text x="500" y="251" text-anchor="middle" class="quiet-label">related context</text></g>
+            </svg>
+            <div class="relation-explanation" aria-live="polite"><h3 id="relation-title">参数改了，调用方跟上了吗？</h3><p id="relation-description">沿 incoming call 查找调用位置，读取未修改文件，核对参数约定与实际行为。</p></div>
+          </div>
+          <p class="small-note">导航原理示意。图提供线索，源码提供证据。</p>
+        </div>
+        <div class="graph-principles reveal"><div><span class="principle-number">01</span><h3>按需构建</h3><p>以源码快照为单位，复用 SQLite 图索引。</p></div><div><span class="principle-number">02</span><h3>保守解析</h3><p>明确呈现未知关系与覆盖范围。</p></div><div><span class="principle-number">03</span><h3>有界探索</h3><p>时间、工具与结构调查预算共同约束。</p></div></div>
+      </div>
+    </section>
+
+    <section class="evidence-section" id="evidence" aria-labelledby="evidence-title">
+      <div class="section-wrap evidence-layout">
+        <div class="evidence-copy reveal"><p class="eyebrow">02 / IMMUTABLE EVIDENCE</p><h2 id="evidence-title">每一条结论，<br><span>都有据可查。</span></h2><p class="section-body">代码会继续变化，审查依据留在当时。<br>每条证据绑定代码版本、文件、行号与内容摘要，随时回到原始源码。</p><div class="evidence-detail"><span>固定源码快照</span><span>校验引用与内容</span><span>历史报告与同快照重跑</span></div></div>
+        <div class="evidence-visual reveal" aria-label="证据关联结构：代码快照、源码位置与内容 hash">
+          <div class="evidence-orbit"><span>VERSION</span><div class="evidence-core"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M8 6h11l5 5v15H8Z"/><path d="M19 6v6h5M12 17h8M12 21h6"/></svg><strong>Evidence</strong><span>源码证据</span></div><span>FILE · LINES</span><span>CONTENT HASH</span></div>
+          <div class="evidence-caption"><span>可定位。</span><span>可核查。</span><span>可重读。</span></div>
+        </div>
+      </div>
+      <div class="delivery-strip section-wrap reveal"><div><p class="eyebrow">LOCAL DELIVERY</p><h3>从审查，到完整交付。</h3></div><p>JSON / Markdown 报告、源码证据与运行记录一同保存。<br>只有通过覆盖、提交和持久化检查，审查才算完成。</p></div>
+    </section>
+
+    <section class="skills-section" id="skills" aria-labelledby="skills-title">
+      <div class="section-wrap">
+        <div class="section-heading reveal"><p class="eyebrow">03 / REVIEW SKILLS <span class="new-label">NEW</span></p><h2 id="skills-title">经验留下。<br><span>每次，重新求证。</span></h2><p class="section-body">从已交付审查与反馈中提炼仓库级检查方法。<br class="desktop-break">下一次审查，按需读取相关经验，继续核对当前源码。</p></div>
+        <div class="skills-journey reveal">
+          <div class="journey-steps" role="tablist" aria-label="Review Skills 工作过程">
+            <button type="button" role="tab" id="skill-source" aria-controls="skill-panel" aria-selected="true" data-skill="source"><span class="step-symbol">01</span><span>审查与反馈</span></button>
+            <button type="button" role="tab" id="skill-learn" aria-controls="skill-panel" aria-selected="false" tabindex="-1" data-skill="learn"><span class="step-symbol">02</span><span>提炼检查方法</span></button>
+            <button type="button" role="tab" id="skill-version" aria-controls="skill-panel" aria-selected="false" tabindex="-1" data-skill="version"><span class="step-symbol">03</span><span>版本化知识</span></button>
+            <button type="button" role="tab" id="skill-review" aria-controls="skill-panel" aria-selected="false" tabindex="-1" data-skill="review"><span class="step-symbol">04</span><span>下一次审查</span></button>
+          </div>
+          <div class="skill-panel" id="skill-panel" role="tabpanel" aria-labelledby="skill-source" aria-live="polite"><p class="eyebrow" id="skill-kicker">DELIVERED REVIEW + FEEDBACK</p><h3 id="skill-title">让纠正，有后续。</h3><p id="skill-description">已交付运行与开发者反馈成为学习来源。来源与失败尝试保留，经验可以追溯。</p></div>
+        </div>
+        <div class="skill-controls reveal"><div><h3>冻结只读</h3><p>每次审查绑定固定知识包。历史经验提出检查方向，当前源码决定结论。</p></div><div><h3>可停用，可回滚</h3><p>经验带有版本与来源。反馈撤回、停用与回滚均保留记录。</p></div></div>
+        <p class="small-note">Review Skills 已实现；对审查质量的增益仍待独立评测。</p>
+      </div>
+    </section>
+
+    <section class="performance-section" id="performance" aria-labelledby="performance-title">
+      <div class="section-wrap">
+        <div class="section-heading reveal"><p class="eyebrow">MEASURED ON REAL PULL REQUESTS</p><h2 id="performance-title">让结果说话。</h2><p class="section-body">40 个真实 PR，12 个 Python 仓库。<br>同一 Pi 审查流程，对比文本基线与变更感知 CodeGraph 配置。</p></div>
+        <div class="benchmark reveal">
+          <div class="segmented benchmark-tabs" role="tablist" aria-label="选择评测范围">
+            <button type="button" role="tab" id="bench-all" aria-selected="true" aria-controls="benchmark-panel" data-benchmark="all">全量 · 40</button>
+            <button type="button" role="tab" id="bench-cross" aria-selected="false" aria-controls="benchmark-panel" tabindex="-1" data-benchmark="cross">跨文件 · 12</button>
+            <button type="button" role="tab" id="bench-core" aria-selected="false" aria-controls="benchmark-panel" tabindex="-1" data-benchmark="core">核心依赖 · 9</button>
+            <button type="button" role="tab" id="bench-complex" aria-selected="false" aria-controls="benchmark-panel" tabindex="-1" data-benchmark="complex">复杂场景 · 10</button>
+          </div>
+          <div id="benchmark-panel" role="tabpanel" aria-labelledby="bench-all">
+            <div class="metric-grid" aria-live="polite"><div class="metric-main"><p class="metric-label">F1 · 缺陷检出综合表现</p><div class="metric-value" id="metric-f1">77.4<span>%</span></div><p class="metric-change" id="metric-f1-change">从 67.8% 提升 · +9.6 个百分点</p></div><div><p class="metric-label">Precision · 报告准确率</p><div class="metric-value" id="metric-precision">85.7<span>%</span></div><p class="metric-change" id="metric-precision-change">文本基线 80.0%</p></div><div><p class="metric-label">Token 用量变化</p><div class="metric-value" id="metric-token">+19.6<span>%</span></div><p class="metric-change" id="metric-rounds">探索轮次 +6.5%</p></div></div>
+            <div class="bar-chart" aria-label="F1 对比"><div class="bar-row"><span>Pi 文本基线</span><div class="bar-track"><div class="bar baseline" id="bar-baseline" style="width:67.8%"></div></div><strong id="bar-baseline-label">67.8%</strong></div><div class="bar-row"><span>CodeGraph 配置</span><div class="bar-track"><div class="bar graph" id="bar-graph" style="width:77.4%"></div></div><strong id="bar-graph-label">77.4%</strong></div></div>
+            <p id="benchmark-scope-note" class="benchmark-scope-note" aria-live="polite">全量 40 例，80 次配对结果。质量提升伴随更多 Token 投入。</p>
+          </div>
+          <details class="method-details"><summary>评测口径与适用范围 <span aria-hidden="true">+</span></summary><div><p>2026-09-28 评测；模型为 openai-codex / gpt-5.6-luna，推理档位 max。两臂使用同一审查提示词、文本工具与预算。Graph 的变更感知结构调查使用显式评测配置，CLI 默认导航策略未改变。</p><p>缺陷由 AI 结合源码逐条进行语义审核，F1 采用 micro 汇总。场景成员有交集；复杂场景的 10 例按已完成评测的任务特征与表现选取，属于事后分析，不替代全量结果。</p><p>Token 为成功运行的累计输入与输出用量；成本数据不含前置构图及连接失败的额外重试。Review Skills 未纳入本次评测。</p><a class="text-link" href="https://github.com/takagibit18/MergeWarden/blob/main/docs/experiments/CODE_GRAPH_EVAL.md" target="_blank" rel="noopener noreferrer">阅读完整评测与逐例矩阵</a></div></details>
+        </div>
+      </div>
+    </section>
+
+    <section class="start-section dark-section" id="start" aria-labelledby="start-title">
+      <div class="section-wrap">
+        <div class="section-heading reveal"><p class="eyebrow">YOUR CODE. YOUR TERMINAL.</p><h2 id="start-title">从下一次提交开始。</h2><p class="section-body">审查提交、暂存区或已保存的工作区。<br>以只读方式，融入你已有的开发流程。</p></div>
+        <div class="start-content reveal">
+          <div class="segmented dark-segmented start-tabs" role="tablist" aria-label="选择审查方式"><button type="button" role="tab" id="start-staged" aria-selected="true" aria-controls="command-panel" data-command="staged">暂存区</button><button type="button" role="tab" id="start-commits" aria-selected="false" aria-controls="command-panel" tabindex="-1" data-command="commits">提交对比</button><button type="button" role="tab" id="start-worktree" aria-selected="false" aria-controls="command-panel" tabindex="-1" data-command="worktree">工作区</button></div>
+          <div class="command-block" id="command-panel" role="tabpanel" aria-labelledby="start-staged"><div class="command-topline"><span>在 MergeWarden 项目目录中运行</span><button class="copy-button" type="button" id="copy-command" aria-label="复制当前审查命令">复制命令</button></div><pre><code id="review-command">npm run cli -- review \
+  --repo /path/to/repository \
+  --scope staged \
+  --provider openai-codex \
+  --model MODEL_ID --auth oauth</code></pre></div>
+          <p class="copy-status" role="status" id="copy-status" aria-live="polite"></p>
+          <div class="setup-note"><span>Node.js 22.19+ · Git · npm</span><p>首次使用运行 <code>npm run setup</code>，通过 <code>login</code> 完成授权，<br class="desktop-break">再从 <code>models</code> 目录选择账号可用的模型。</p></div>
+          <div class="start-actions"><a class="button button-white" href="https://github.com/takagibit18/MergeWarden" target="_blank" rel="noopener noreferrer">查看项目与使用指南</a><a class="text-link" href="https://github.com/takagibit18/MergeWarden/blob/main/docs/REVIEW_SKILLS.md" target="_blank" rel="noopener noreferrer">了解 Review Skills</a></div>
+          <p class="small-note">当前为 CLI 产品。Python 结构导航已实现，VS Code 界面在后续路线中。</p>
+        </div>
+      </div>
+    </section>
+  </main>
+  <footer><span>MergeWarden 2</span><span>以源码证据为中心。</span><span class="footer-date">实现资料更新至 2026.10.02</span><a href="#">回到顶部</a></footer>
+</body>
+</html>

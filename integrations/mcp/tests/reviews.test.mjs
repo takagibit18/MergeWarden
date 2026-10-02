@@ -92,13 +92,17 @@ test('server shutdown aborts work and reconnect cannot invent success', async t 
 
 test('dead owner with a running native manifest is interrupted, never completed', async t => {
   const f = await fixture(t); const { taskId } = await f.tasks.start({}); const done = await terminal(f.tasks, taskId);
+  // Native delivery can precede the owner's final receipt write and active-map cleanup.
+  // Finish that owner before simulating interruption and reconnecting to persisted state.
+  await f.tasks.close();
+  const restarted = f.track(await ReviewTasks.create(f.host, scriptedRuntime(submitFinding)));
   const taskPath = join(f.state, 'mcp', 'tasks', taskId, 'task.json');
   const receipt = JSON.parse(await readFile(taskPath, 'utf8')); receipt.owner = { id: randomUUID(), pid: process.pid };
   delete receipt.finishedAt; await writeFile(taskPath, JSON.stringify(receipt));
   const runPath = join(f.state, 'runs', done.runId, 'run.json');
   const run = JSON.parse(await readFile(runPath, 'utf8')); run.status = 'running'; delete run.outcome; await writeFile(runPath, JSON.stringify(run));
-  const status = await f.tasks.get(taskId); assert.equal(status.status, 'interrupted'); assert.equal(status.done, true); assert.equal(status.report, undefined);
-  assert.equal((await f.tasks.get(done.runId)).liveness, 'unknown');
+  const status = await restarted.get(taskId); assert.equal(status.status, 'interrupted'); assert.equal(status.done, true); assert.equal(status.report, undefined);
+  assert.equal((await restarted.get(done.runId)).liveness, 'unknown');
 });
 
 for (const [name, script, options, expected, reason] of [
