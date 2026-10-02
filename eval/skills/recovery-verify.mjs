@@ -1,0 +1,21 @@
+import assert from 'node:assert/strict';
+import {readFile,readdir} from 'node:fs/promises';
+import {join,resolve} from 'node:path';
+import {SkillBank,digest} from '../../src/skills/bank.ts';
+import {writeJson,sha256} from '../../src/infrastructure/files.ts';
+const root=resolve(process.argv[2]),repo=resolve(import.meta.dirname,'../..'),dir=join(root,'execution'),read=async p=>JSON.parse(await readFile(p,'utf8')),ex=await read(join(dir,'experiment.json')),checks=[];
+for(const f of ex.code)assert.equal(sha256(await readFile(join(repo,f.path))),f.sha256,f.path);
+const lock=await read(join(root,'corpus/corpus.lock.json'));assert.equal(sha256(await readFile(join(root,'corpus/corpus.lock.json'))),ex.corpusLockSha256);for(const f of lock.files)assert.equal(sha256(await readFile(join(root,'corpus',f.path))),f.sha256);
+checks.push('Frozen runtime, corpus, gold and split unchanged');
+for(const f of await read(join(root,'recovery/historical-files.json')))assert.equal(sha256(await readFile(f.path)),f.sha256,f.path);checks.push('Historical raw runs unchanged');
+const completed=[];for(const c of ex.cases.filter(c=>c.split==='source')){const r=await read(join(dir,'reviews',c.caseId+'-A.json'));if(r.status==='completed'&&r.manifest.termination.finalSubmission)completed.push(r.runId);}
+for(const arm of ['B','C']){const state=join(dir,arm),bank=new SkillBank(state),f=await read(join(dir,arm+'-frozen.json'));assert.equal((await bank.current()).id,f.bankSnapshotId);assert.equal(digest(await bank.skills()),f.catalogSha256);
+for(const name of await readdir(join(state,'skills/jobs'))){const j=await read(join(state,'skills/jobs',name)),s=await bank.source(j.sourceId);if(!completed.includes(s.runId))assert.equal(j.status,'ineligible_source');if(j.attempts){assert(completed.includes(s.runId));assert.equal(s.kind,arm==='B'?'run':'feedback');const input=await read(join(state,'skills/attempts',j.id,String(j.attempts),'input.json'));assert.equal(input.source.reportSha256,s.reportSha256);assert.equal(input.report.status,'completed');for(const c of ex.cases.filter(c=>c.split==='pilot'))assert(!JSON.stringify(input).includes(c.caseId));}}
+checks.push(arm+' frozen; only completed-source permitted attempt kinds');}
+const B=await read(join(dir,'B-frozen.json')),C=await read(join(dir,'C-frozen.json')),feedback=await read(join(root,'evaluation/comments-validated.json'));
+for(const c of await read(join(root,'evaluation/comments-generated.json'))){const start=await read(join(c.directory,'started.json'));assert(start.at>B.at);assert(completed.includes(c.runId));const input=await read(join(c.directory,'input.json'));assert.equal(input.report.status,'completed');assert.equal(input.reference.id,c.caseId);for(const p of ex.cases.filter(c=>c.split==='pilot'))assert(!JSON.stringify(input).includes(p.caseId));}
+if(!feedback.comments.length)assert.equal(B.bankSnapshotId,C.bankSnapshotId);assert.equal(feedback.humanReviewed,false);checks.push('B frozen before comment calls; generator inputs limited to current source; C cloned B');
+const bindings=await read(join(dir,'pilot-bindings.json'));assert.deepEqual(bindings.order,ex.pilotOrder);assert(bindings.at>=C.at);
+for(const c of ex.cases.filter(c=>c.split==='pilot'))for(const arm of ['A','B','C']){let r;try{r=await read(join(dir,'reviews',c.caseId+'-'+arm+'.json'));}catch(e){if(e.code==='ENOENT')continue;throw e;}if(!r.runId)continue;assert(r.manifest.createdAt>=bindings.at);assert.deepEqual(r.manifest.model,ex.model);assert.equal(r.manifest.snapshotId,c.snapshotId);assert.equal(r.manifest.learningPolicy,'off');if(arm!=='A'){const b=bindings.bindings.find(b=>b.caseId===c.caseId&&b.arm===arm),pkg=await read(join(dir,arm,'runs',r.runId,'skills.json'));assert.equal(r.manifest.skills.catalogSha256,b.skills.catalogSha256);assert.equal(r.manifest.skills.bankSnapshotId,b.skills.bankSnapshotId);assert.equal(pkg.mode,'replay');}}
+checks.push('Pilot frozen order and per-run snapshot/model/catalog/replay/learning-off identities verified');
+await writeJson(join(root,'summary/recovery-integrity.json'),{status:'PASS',checks,at:new Date().toISOString(),limitations:['Input isolation established by bounded constructors, process read restrictions for B, no model tools, and saved input inspection; no claim of independent human validation']});console.log('PASS: '+checks.join('; '));

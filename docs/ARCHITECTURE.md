@@ -1,0 +1,369 @@
+# MergeWarden 2.0 顶层设计与决策记录
+
+
+## Current Runtime Contract · 2026-09-24
+
+此节描述当前实现；后面的 0.1 架构基线保留为设计历史。具体契约见 [ADR 0015](adr/0015-evidence-attribution-contract.md)。
+
+SnapshotStore 冻结 base/head。ReviewEngine 管理工具预算、源码读取证明、每个 run 独立的 Evidence Registry、提交预检与交付。Pi Runtime 负责唯一模型/工具循环以及原生会话；MergeWarden 工具结果是单个 JSON object，宿主 notice 和 evidenceRefId 放在 `_mergewarden` namespace。Routing extension 只控制激活、调查卡、预算和 telemetry；默认 routing 仍是 none，A/B/C 共用原触发逻辑。
+
+```mermaid
+flowchart TD
+  S[Immutable Snapshot / SnapshotStore] --> E[ReviewEngine]
+  E --> P[Pi session]
+  P --> T[Text / structural tools]
+  R[Routing control plane] --> T
+  T --> Read[read_source: source observation]
+  Read --> Registry[Run-scoped Evidence Registry]
+  Registry --> Input[Model-selected submit_review input]
+  Input --> Normalize[Normalize explicit Evidence IDs]
+  Normalize --> Preflight[Complete coverage / candidate / integrity / read-proof preflight]
+  Preflight --> Accept[ReviewController: atomic final_batch.accepted]
+  Accept --> Report[Self-contained ReviewReport / verified delivery]
+  P --> Journal[PiSessionJournal / native session.jsonl]
+  Accept --> Journal
+  Journal --> Attr[Offline Attribution v3]
+  Report --> Attr
+  Attr --> Provenance[Finding-level discovery provenance]
+```
+
+Evidence IDs 是六个不可变字段的确定性 hash。模型可以选择 `{evidenceRefId}` 或旧完整 EvidenceRef；Engine 展开 ID 并稳定去重，FindingCandidate 与 report.json/report.md 仍保存完整引用。本轮没有读取过的 ID、外部 snapshot 引用和不完整证据在业务状态变化之前被拒绝。
+
+final_only 用一个 composite event 同时接受候选批次与更新 coverage。输入错误属于 PRE_ACCEPTANCE_ERROR，可修正；ACCEPTED 之后禁止第二次 final submission；PERSISTENCE_FAILURE 使 controller/run 失效，不能当作参数错误重试，也不能确认 completed 交付。历史 candidates.submitted / candidate.decided / unit.finished 与 incremental_candidates reducer 路径保持兼容。单事件持久化不等于跨崩溃 exactly-once 保证。
+
+Attribution v3 只消费 active native Pi branch 的 assistant toolCall、toolResult content 和最终 accepted Finding evidence。它共享 G0/G1 的时序、状态、exposure、novelty、source matching 与 normalized submission matching。details、Graph DB、Router CustomEntry、private thinking 和 reference labels 不提供 discovery credit。普通工具错误是 call-local；真实时间线损坏仍阻止严格归因。partial 的确定关系可提供带 coverageLimited 的正证据，不能提供缺失关系的反证。
+
+三个明确边界：Evidence Registry 不决定 finding 是否正确；Routing 不自动给 finding 填 evidence；Attribution 不反馈进运行时模型决策。Graph 是导航，read_source 是观察，Finding 是模型选择的 claim，ReviewController 是业务接受真值。
+
+## Historical architecture baseline
+
+版本：0.1 | 日期：2026-09-20
+
+## MergeWarden 2.0
+
+顶层设计、关键决策与仓库骨架说明
+
+版本 0.1  |  2026-09-20  |  状态：架构基线 / 待验证方案并存
+
+> 一个证据优先的 Review Engine：Pi 负责运行，CodeGraph 负责关系检索，业务层负责审查边界和交付。
+
+### 文档目的
+
+记录本轮讨论中已经明确的方向、仍需验证的假设和暂缓能力，为新仓库实施与 Agent 交接提供共同依据。本文不是完整产品规格，也不是已完成功能清单。
+
+| 明确方向 | 仍需决策 / 验证 |
+| --- | --- |
+| 新仓库；保留 Pi runtime harness | Finding 最终一次提交，还是增量提交成熟候选 |
+| 真实 AST / Tree-sitter 路线；按需图工具 | Jev 对工具、Skill、检索策略的实际增量 |
+| 通过 Hook 接入集中业务控制；JSONL 持久化 | IDE 优先是当前建议，产品入口尚未最终锁定 |
+| Jev 最后进入 shadow；预留可扩展判断点 | 语言范围、图 store、强恢复与服务部署细节 |
+
+### 本次交付边界
+
+提供可离线运行的 TypeScript 核心、测试、图与 runtime 接口、真实解析器起点、ADR 和本文。未接真实审查闭环、Jev API、IDE 界面、PR 发布。所有示例均明确标记 synthetic。
+
+阅读顺序：决策登记 → 架构与代码图 → runtime / finding → Jev → 产品形态 → 验收与实施。
+
+## 01  决策登记
+
+“已确定”表示用户明确方向；“建议”表示当前架构取舍；“待验证”不得被默认写成产品优势。每条决策均在 docs/adr 中保留独立记录。
+
+| ADR | 议题 | 当前状态 |
+| --- | --- | --- |
+| 0001 | 单一 Agentic Review 与按需图工具 | 已确定（用户方向） |
+| 0002 | 真实语法分析与可核验代码关系 | 已确定（路线）；细节待实现 |
+| 0003 | Pi runtime 与集中业务 Controller | 已确定（底座）；接入待联调 |
+| 0004 | 原生 JSONL 与恢复边界 | 已确定（持久化方向）；强保证待验收 |
+| 0005 | Finding 提交协议仍需对照 | 待验证；不采纳强制假设草稿 |
+| 0006 | Jev 后置与 DecisionAdvisor 扩展点 | 已确定（后置 shadow）；用途待验证 |
+| 0007 | 独立引擎与可替换产品入口 | 已确定（解耦）；IDE 优先待确认 |
+| 0008 | 不可变快照与版本化证据 | 建议采纳；核心已有契约 |
+| 0009 | 安全与 advisory-only 发布边界 | 建议采纳；发布暂缓 |
+| 0010 | 分阶段验收与有限实现范围 | 已确定（交付范围）；产品功能待实现 |
+
+### 本轮修订
+
+上一版“每出现一个怀疑就提前保存 finding 草稿”的建议已收回，不列为核心必做。保留成熟候选的增量提交作为对照选项，并用原生会话记录承接运行历史。
+
+> 不要把上一轮助手的推荐，升级成用户已经确认的最终产品决策。IDE 首选、Python 先行、SQLite 与 final_only 基线均仍可调整。
+
+## 02  总体架构与职责
+
+采用一个主审查 Agent、一个集中业务 Controller 与独立 CodeGraph 模块。先保持单进程可组合边界，不为展示“平台化”提前拆微服务。
+
+| 层 | 负责 | 不负责 |
+| --- | --- | --- |
+| 入口适配 | CLI / IDE / PR / MCP / ACP 的输入与展示 | 复制审查循环、另起一套 finding 规则 |
+| Review Engine | 快照与 run 编排、预算、取消、完成与结果 | 直接绑定某个编辑器生命周期 |
+| Pi runtime | 模型交互、工具循环、会话、压缩、运行事件 [S1] | 决定审查证据是否充分或允许发布 |
+| ReviewController | 集中状态迁移、候选处理、覆盖与完成条件 | 在每个 Hook 中分散维护业务状态 |
+| CodeGraph | 语法事实、显式关系解析、版本化查询 | 依靠 LLM 猜图边或自动证明运行时行为 |
+| DecisionAdvisor | 可选的局部建议与观测 | 权限授予、最终真伪、静默改写工具调用 |
+
+### 主数据流
+
+固定输入快照 → 建立 run / 原生 session → Agent 用源码、文本与图工具探索 → 按选定协议提交结果 → 验证与归并 → 可靠保存报告 → 对入口返回结果。对外发布另行处理。
+
+### 依赖方向
+
+src/domain 和 src/application 不导入 Pi、Jev、VS Code。integrations 层实现领域端口。src/protocol 只定义产品事件，不声称已经实现 MCP、ACP 或 JSON-RPC。
+
+> Hook 是调用边界，不是第二套 harness。图查询工具是 Agent 能力，不是另一种产品模式。
+
+## 03  CodeGraph 语义与实现路线
+
+Tree-sitter 提供具体语法树（CST）；其结果经过语言提取规则转成统一 AST / 语法事实，再由作用域与导入解析器建立关系。语法解析不自动等于跨文件语义分析。[S4]
+
+| 对象 / 阶段 | 要求 |
+| --- | --- |
+| Entity | directory/file/class/function 的路径、作用域与快照内身份；不能只用 save 这样的短名称当键 |
+| Dependency site | 保存 call/import/inherit 表达式、源码位置和所属作用域；候选/未解析目标仍保留但不成为边 |
+| 关系 | CONTAINS / IMPORTS / CALLS / INHERITS；普通引用走文本搜索，候选不成为可遍历边 |
+| resolution | resolved_scoped / resolved_import_alias / candidate / unresolved |
+| provenance | 来源位置、使用的 resolver 规则、版本、快照 |
+| 动态场景 | 反射、动态注册、依赖注入等允许未解析；不能用近似同名目标冒充确定事实 |
+
+### 同名符号示例
+
+storage/local.py::LocalStore.save 与 storage/remote.py::RemoteStore.save 是两个定义。store.save(...) 的接收对象类型不明时，先记录调用点，不能自动把两者都写成已解析调用关系。
+
+### RepoGraph 的借鉴边界
+
+借鉴仓库级关系导航与局部子图查询。论文的软件修复结果不直接证明本项目 PR 审查收益；公开实验实现也不是无需安全审查即可搬运的生产组件。[S5]
+
+> 当前仓库只有真实 Python Tree-sitter 提取起点；尚无完整 resolver、图索引和查询 store。所有调用目标保持 unresolved，绝不使用正则伪装完成。
+
+## 04  快照、索引和工具契约
+
+### 输入身份
+
+每个 run 固定 repositoryId、comparison base、head、inputFingerprint 和 configurationFingerprint。证据标明 base/head、路径、行范围与内容 hash。图实例必须对应同一个不可变源码版本；跨版本符号匹配另建映射，不以行号当稳定身份。
+
+### 增量策略
+
+按需读图不等于按需构图。调用方查询需要仓库范围引用覆盖。建议初次全量建立受支持文件索引，后续按内容 hash 与反向依赖失效更新；导出、导入绑定改变时，未改文本的文件也可能需要重解析关系。删除旧边、原子切换 ready 快照与全量等价测试均属于实现门槛。
+
+| 工具 | 职责 |
+| --- | --- |
+| read_diff / read_source | 返回明确版本与范围的差异/源码，不偷读变化中的工作区 |
+| search_text | 搜索配置键、错误消息、注册名和其他文本协议；不是伪图替代 |
+| graph_lookup | 名称或位置 → 候选符号，先消歧 |
+| graph_neighbors | 指定关系与方向的邻接查询；限制数量、深度与分页 |
+
+### 共同返回边界
+
+返回 snapshotId、status、items、coverage、warnings、truncated 和 nextCursor。必须区分：正常无结果、未索引、语言不支持、解析不完整、查询失败。短结果不是全部结果。优先返回关系和位置，再按需读取源码。
+
+> 图边服务于导航和可限定的静态陈述。严重级别、真实运行触发与缺陷成立，必须结合源码和验证，不由一条图边直接推导。
+
+## 05  Pi、状态机与 JSONL
+
+保留 Pi 原生 SDK 与会话机制，避免 Python 包一层 CLI 再解析终端输出。当前官方源码包为 @earendil-works/pi-coding-agent；读取版本 0.84.1，要求 Node >=22.19.0。此处是源码观察，不是安装验证。[S1][S3]
+
+### 状态机
+
+业务状态建议为 preparing → reviewing → completed，另有 partial / failed / cancelled 终态。骨架开始事件进入 reviewing；prepared 快照由未来 SnapshotProvider 保证。Pi agent_end 不代表业务成功，零 finding 也不能代表范围已完整审查。
+
+| 保存内容 | 保存位置 / 约束 |
+| --- | --- |
+| 会话消息与运行事件 | Pi 原生 Session JSONL；不另写一套模型消息日志 |
+| 业务事件 | Pi CustomEntry；默认不进入模型上下文 [S2] |
+| 图索引 | 可重建 SQLite 草案；不拿 JSONL 充当图查询数据库 |
+| 最终报告 / 大证据 | 独立 artifact；写入成功后再确认完整交付 |
+| 测试与 demo | MemoryJournal；绝不等同于生产持久化 |
+
+### 恢复约束
+
+仅重建当前 session 分支对应的 run；核对 run、base/head、输入和配置指纹。拒绝错误 schema、顺序缺口和串版本。并发状态变更串行处理，append 失败不改变可见业务状态。重复请求幂等和强持久性仍待集成验证。
+
+> JSONL 是格式，不是 fsync、exactly-once 或 token 级不丢失承诺。Pi append 接受与操作系统落盘的边界必须实测；不将未联调适配器写成“已支持断点恢复”。
+
+## 06  Finding：保留结果，不强制登记猜测
+
+阿里 OCR 的 code_comment 支持过程中提交结构化评论，其恢复机制另有已完成审查单元 checkpoint；Codex 被核对的原生 review 路径则以完成时的最终消息解析结果。它们是不同可行实例，不是强制草稿优越性的对照证据。[S6][S7]
+
+| 层次 | 例子 | 当前策略 |
+| --- | --- | --- |
+| 调查假设 | 缓存键可能缺少租户字段，需要继续查 | 留在会话/必要摘要，不强制建 finding |
+| 成熟候选 | 触发条件、影响和源码证据已足够供人复核 | 可按实验协议结构化提交；仍允许驳回/撤销 |
+| 最终 finding | 符合本次审查要求，已完成必要验证 | 进入最终结果；发布是另一个权限边界 |
+
+### 两种可测试输出协议
+
+final_only：主审查任务一次提交最终候选批次，作为简单对照基线。incremental_candidates：过程中提交已有证据的成熟候选，由宿主保存，不要求再调用一个 save 工具。两者采用相同的证据和完成标准；最终产品默认尚未确定。
+
+### 不采纳的做法
+
+不要求每个念头登记为草稿；不从自由聊天自动挖掘缺陷并标记成立；不把模型私有推理原文做持久化目标；不将 JSON schema 通过当成语义验真；不把候选提交直接变成 PR 评论。
+
+### 实验的真实边界
+
+增量提交主要降低“已输出有效结果在后续失败中丢失”的风险。它不能保存模型尚未生成的有效工具调用。验证应关注中断后的有效结果、完整交付、额外工具成本、误报和撤回率。
+
+> emit ≠ accept ≠ publish。候选生命周期只覆盖可复核结果，不强制管理所有探索假设。
+
+## 07  Jev 可扩展判断层
+
+以 DecisionAdvisor 作为领域端口，Noop / Rule 先行，Jev 最后接入。默认 off。Jev 适合候选集合内的局部判断；不能将应用 jev-router 的模型路由范围，误认为 Jev 模型的全部用途。[S8]
+
+| 判断点 | 适合的作用 | 硬边界 |
+| --- | --- | --- |
+| 检索 / 工具 shortlist | 建议读源码、搜字符串或追踪调用方 | 不禁用其余合法工具，不静默改写调用 |
+| Skill 选择 | 筛选缓存、权限、异常恢复等关注点 | 多标签；不以未选中为跳过理由 |
+| 上下文排序 | 优先阅读已召回候选中的相关片段 | 保留完整入口，不证明低分无关 |
+| 升级 / 模型档位 | 局部停滞后升级证据、策略或模型 | 任务边界切换；总预算由代码控制 |
+| 候选关系 | 提示重复根因或矛盾，交给复核 | 不独立合并、驳回、判真或发布 |
+
+### 接口信息
+
+请求含 decisionPoint、run/snapshot/stateVersion、catalogVersion、已知事实、允许候选和超时。响应含选择或 abstain、provider/version 与判断信号。过期、越权候选、格式错误、服务失败均弃用，保留原流程。
+
+### Shadow 的语义
+
+Shadow 只记录，不改变 prompt、工具可见性、参数或结果；需隔离有界队列才能控制主路径延迟。骨架 coordinator 可等待，测试证明行为隔离，不证明没有时延。confidence 不是端到端正确率，一致率也不是效果指标。
+
+> 只预留判断点、可替换提供者与观测，不提前打造通用路由平台。当前没有 Jev API 调用，本次访问其 live docs 失败，真实接入时必须重新核对接口。
+
+## 08  产品形态与第一入口
+
+先区分入口与运行位置：IDE / PR / MCP / Web 是入口；本机 / 远程工作区 / 自托管 / 云是部署方式。独立 Review Engine 允许组合，而不是绑定某一种界面。[S9]
+
+| 形态 | 价值 | 主要代价 |
+| --- | --- | --- |
+| IDE + 工作区引擎 | 修改前后快速复查；源码和跨文件证据同屏 | 版本漂移、Remote/WSL、工作进程与插件分发 |
+| PR / GitHub App | 进入团队协作；结果绑定提交 | 授权、队列、隔离、幂等、旧任务与评论管理 |
+| MCP review 服务 | 已有编程 Agent 调用独立 reviewer | 宿主体验不可控、双层成本与权限边界 |
+| ACP 编辑器接入 | 编辑器连接你的 Agent | 协议版本与宿主兼容；不自动提供证据 UI |
+| Web / 自托管工作台 | 历史、复核、反馈与审计 | 账户权限、数据保留、运维和多租户复杂度 |
+| CLI / CI | 适合工程验证与流水线复用 | 单独使用时交互证据浏览较弱 |
+
+### 当前建议：证据型 IDE 插件
+
+先做一次快照审查、进度/取消、问题卡片、跨文件源码跳转、误报标记与复查。不要先做通用聊天助手、仓库全图大屏或自动修复。阿里扩展的薄客户端思路可以参考，但用户尚未最终锁定 IDE 首选。[S9]
+
+### 输入与版本
+
+一期建议支持暂存区、已保存磁盘变更与提交比较，不混入未保存 buffer。引擎跟随真实工作区位置；新编辑使旧结论 stale。版本化 IPC 不解析终端日志。客户端关闭或重载不能破坏引擎和结果身份。
+
+## 09  安全、可信边界与交付
+
+### 代码与配置
+
+被审查仓库是分析对象，不是可信执行环境。不得为构图执行 import，不自动启用仓库 .pi 扩展、包脚本或 AGENTS 指令。静态解析有资源限制；真正运行测试需要独立的 CPU、内存、时间和网络边界。
+
+| 边界 | 应保证的条件 |
+| --- | --- |
+| 源码工具 | 不可变快照、路径规范化、realpath/symlink 防逃逸与限额 |
+| runtime | 只安装可信扩展；Hook 不是沙箱；执行时再校验 |
+| 凭据 | 发布凭据不交给任意命令工具；模型与 Jev 数据发送需明示 |
+| 状态日志 | 可能含私有源码；定义脱敏、留存、权限与删除 |
+| 最终报告 | 语义完成与 artifact 持久化成功分开；写失败不能报完整交付 |
+| PR 发布 | 明确授权、绑定 commit、幂等键、重试核对与旧结果处理 |
+
+### 禁止误导性的成功
+
+运行超时、日志丢失、工具不可用、图为空、模型说“完成”，都不自动意味着 clean review。partial / failed / cancelled 必须保持可见；没有结果的运行不能进入零误报统计。
+
+### 当前代码范围
+
+骨架未实现真实 source access 和沙箱。Pi 接入起点工具集故意为空，避免依赖缺失时开放默认 bash/write。状态目录的初步路径检查不是完整准入策略；真实运行前补齐 realpath、权限与跨环境测试。
+
+> 本地引擎 ≠ 代码不出设备。配置远程主模型或 Jev 时，实际发送内容必须符合使用者许可和项目数据策略。
+
+## 10  验收与实验设计
+
+| 实验 | 配置 | 目的 |
+| --- | --- | --- |
+| 图 A / B | Pi 源码文本基线 / 基线 + 图工具 | 识别图查询的净收益 |
+| 建议 C / D | 图 + 规则 / 图 + Jev | 验证模型建议相对简单规则的增量 |
+| Finding A / B | final_only / incremental_candidates | 验证中断保留、交付与工具成本 |
+| 冷 / 热索引 | cold build / warm incremental | 计入真实构图成本，防止只报查询开销 |
+
+### 冻结条件与指标
+
+固定快照、主模型与参数、提示规则、工具输出限制、token/时间预算、验证协议和黄金集。报告有效召回、clean PR 误报、证据有效性、重复、完整交付、总成本与延迟。路由和模型升级消耗都计入总量；小样本结果不包装成普遍优势。
+
+### 图的确定性门槛
+
+同名跨作用域、相对/别名导入、动态调用未解析、语法错误、删除重命名、Unicode 行列与版本一致性。增量索引结果必须可与全量重建比较。
+
+### 故障注入门槛
+
+首次完整输出前、中途成熟候选后、压缩前后、最终报告写入时中断；追加失败、截断 JSONL、重复工具、候选撤销、旧 Jev 建议迟到、并发工具与 PR 更新。恢复验收看状态正确和交付诚实，不只是“还能继续聊天”。
+
+> 当前 39 项离线测试不是端到端模型评测。它们验证领域不变量，不证明实际 review 效果或 Pi 崩溃恢复能力。
+
+## 11  仓库布局与实测范围
+
+| 目录 | 内容 / 状态 |
+| --- | --- |
+| src/domain · application | 事件 reducer、Controller、候选协议、完整性检查；离线通过 |
+| src/ports · protocol | 源码/快照/会话和引擎接口；无真实 transport |
+| src/graph | 语法事实和图查询契约；未索引明确报出 |
+| src/advisor | Noop / Rule、模式与新鲜度检查；无 Jev |
+| integrations/pi | SDK / Hook / CustomEntry 起点；依赖未安装联调 |
+| integrations/tree-sitter | 真实 Python CST 提取起点；grammar 测试未执行 |
+| integrations/vscode 等 | 入口边界说明；不是已实现或可发布插件 |
+| schemas · tests · docs | SQL 草案、39 项测试、ADR、设计和验收记录 |
+
+### 本次执行
+
+Node.js 22.16.0：39 passed / 0 failed / 0 skipped。核心通过本地 TypeScript 5.8.3 严格检查（使用现有 @types/node 25.1.0）；全部 TS 语法可剥离；synthetic demo 与状态命令成功；SQLite 草案建表通过。
+
+### 本次未执行
+
+npm DNS 不可用，未安装项目声明依赖，未伪造 lockfile。Pi / grammar / Jev / IDE / PR / MCP / ACP 未联调，真实仓库没有被审查。源码读取版本不代表 npm 发布或安装成功。详见 docs/VALIDATION.md。
+
+> 请先运行 npm test、npm run demo 和 npm run status。真实 review 命令故意报未实现，不能把 demo 的 completed 当作真实审查成功。
+
+## 12  实施顺序与开放问题
+
+| 阶段 | 交付 | 验收点 |
+| --- | --- | --- |
+| M0 | 依赖/许可证/第一入口确认 | 目标机器核心通过；真实 lockfile |
+| M1 | Pi + 固定快照 + 只读工具 + 本地报告 | 真实小变更；取消/失败不伪装成功 |
+| M2 | 完整语法解析链、resolver、store 与图工具 | 真实 grammar；同名与增量一致性 |
+| M3 | 证据型 IDE 最小闭环（待确认） | 快照 stale、进度取消、证据跳转 |
+| M4 | 规则对照与 Jev shadow | 质量/完成率/总成本；再决定 advisory |
+
+### 需要保留的开放决策
+
+第一主入口是否最终采用 IDE？一期语言是 Python 还是 Python + TypeScript？成熟候选的增量提交是否优于 final-only？Pi 持久化需要哪些额外耐久边界？首个 Jev 试验点选工具 shortlist 还是 Skill 选择？公共许可证与后续部署形态是什么？
+
+### 迁移原则
+
+迁移旧版黄金集、审查字段语义、证据规则、根因归并经验和 advisory-only 边界；不搬旧 harness、双模式分支与重复 checkpoint。未来 Skill 演化放在离线评估/批准流程，不在一次审查中自改规则。
+
+### 暂缓
+
+多 Agent 平台、多租户 SaaS、整仓库图可视化、自动修复与自动合并、在线自进化、强制模型路由。没有必要为了骨架而一次建完所有服务。
+
+> 下一次实施应只拿一个真实固定快照跑通 Pi 审查闭环；不要先补满目录，也不要先把 Jev 接进全部工具调用。
+
+## 13  参考来源与版本边界
+
+以下资料用于架构对照，不表示复制其实现或复现其性能。完整 URL 与核对范围保存在 docs/SOURCES.md。前两轮已核对源码记录与本次网页观察分别标明。
+
+[S1] Pi SDK / ResourceLoader / Extension 接口。本次网页核对。SDK 底座、资源加载、原生 session 接入的设计依据。
+
+[S2] Pi session format / CustomEntry。本次网页核对。原生 JSONL、分支以及不进入 LLM 上下文的 custom entries。
+
+[S3] Pi coding-agent package manifest。本次读到 0.84.1 / @earendil-works / Node >=22.19.0；不是 npm 安装结果。
+
+[S4] Tree-sitter static node types / binding manifest。本次网页核对；binding 源码版本 0.27.0，registry 与 grammar ABI 尚未验证。
+
+[S5] RepoGraph v1。本次读取 HTML。借鉴仓库图与工具查询；不将修复实验当作本项目 review 效果。
+
+[S6] Alibaba Open Code Review。前两轮源码讨论参照；核对版本 a003b9341a65130b024829101ea35494b56569e1。重点 code_comment 与 session/resume，不是恢复能力实测。
+
+[S7] Codex 原生 review 实现。前两轮源码讨论参照。结论仅限该原生 review 路径，不推断所有 Codex 产品。
+
+[S8] TypeSafe 官方开发 Skill。前两轮核对资料。Jev 局部有类型判断的设计参照。本次 TypeSafe 在线文档访问失败，API 留待集成时重查。
+
+[S9] Alibaba VS Code 扩展架构。前两轮源码讨论参照。只借鉴引擎与薄客户端分层，不复制其实现。
+
+### 版本及交付说明
+
+根目录测试不依赖外部包。Pi 与 Tree-sitter 包版本来自本次源码 manifest 观察；首次联网需确认 registry 可用版本及 ABI。不要将动态 main 文档视作发布包永久契约，后续应以 lockfile 与真实集成测试固定。
+
+本文与 docs/ARCHITECTURE.md 由同一份 design-source.json 生成。状态改变时先修改同源正文及相关 ADR，再重新生成 DOCX 并核对页排版。未向 GitHub 创建远程仓库，未产生对外评论或服务部署。

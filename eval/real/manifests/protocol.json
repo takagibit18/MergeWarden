@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "corpus_id": "mergewarden-real-python40-v1",
+  "status": "construction_protocol_not_materialized_corpus",
+  "target_count": 40,
+  "positive_count": 24,
+  "negative_count": 16,
+  "negative_source": "SWRBench change_introduced=false; independent label/snapshot review required",
+  "positive_source": "c-CRAB retained-comment candidates; prioritize Stage 3 membership without requiring Stage 4 repair success",
+  "minimum_repositories": 6,
+  "maximum_cases_per_repository": 6,
+  "maximum_cases_per_pr": 1,
+  "seed": "mergewarden-real-python40-v1-20260921",
+  "pilot_repositories": [
+    "scrapy/scrapy",
+    "python-poetry/poetry"
+  ],
+  "source_files_unchanged": true,
+  "requires_python_issue_anchors": true,
+  "target_language": "Python",
+  "graph_selection_rule": "Do not condition admission on T0 failure or G0/G1 graph coverage. Tag semantic context requirement before reviewing model results.",
+  "context_requirement_values": [
+    "local",
+    "untouched_file",
+    "multi_hop",
+    "project_invariant",
+    "unknown"
+  ],
+  "review_inputs": [
+    "opaque_case_id",
+    "repository_workspace",
+    "base_sha",
+    "reviewed_sha"
+  ],
+  "hidden_inputs": [
+    "source_record",
+    "review_comments",
+    "fix_commit",
+    "gold_findings",
+    "human_rationale",
+    "expected_label",
+    "tests_added_after_review"
+  ],
+  "preflight_limits": {
+    "max_paths": 10000,
+    "max_total_bytes": 104857600,
+    "max_file_bytes": 1048576,
+    "max_changed_paths": 200
+  },
+  "reporting": {
+    "public_benchmark_leaderboard_comparable": false,
+    "source_clean_is_proven_absence": false,
+    "source_stage3_equals_local_reproduction": false,
+    "mapping_unmatched_is_automatically_false_positive": false,
+    "severity_scored_separately": true,
+    "partial_predictions_and_completion_separate": true,
+    "missing_usage_is_zero": false
+  },
+  "scoring_gate": "All final cases require a bound audit record; unknown cases remain candidates; fail instead of inventing replacements.",
+  "runtime": "Reuse current MergeWarden SnapshotStore and ReviewEngine. This package does not install a second agent runtime or execute Python repositories."
+}

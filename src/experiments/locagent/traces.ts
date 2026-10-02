@@ -1,0 +1,32 @@
+import {type ToolCall} from '../../eval/provenance/decode.ts';
+import {observe, rows, end, usable} from '../../eval/provenance/observations.ts';
+import type {FindingCandidate} from '../../domain/contracts.ts';
+type Row=Record<string,any>;
+/** G1 metrics over the shared model-visible provenance contract. */
+export function analyzeRetrieval(input:{runKey:string;snapshotId:string;findings:FindingCandidate[];jsonl:string;changedPaths?:readonly string[]}){
+ const observation=observe(input),trace=observation.trace,calls=trace.calls,findings=observation.findings;
+ const ok=(c:ToolCall)=>usable(c,input.snapshotId);
+ const search=calls.filter(c=>['search_entity','graph_lookup'].includes(c.name));
+ const traversal=calls.filter(c=>['traverse_graph','graph_neighbors'].includes(c.name));
+ const graphs=[...search,...traversal].sort((a,b)=>a.ordinal-b.ordinal);
+ const searchLinks:Row[]=[];
+ for(const c of traversal){
+  const roots=c.name==='traverse_graph'?c.args.startEntities:[c.args.symbolId];
+  const prior=search.findLast(s=>ok(s)&&end(s)<c.callEvent&&rows(s.response?.items).some(i=>Array.isArray(roots)&&roots.some(r=>[i.entityId,i.entityName,i.qualifiedName,i.id].includes(r))));
+  if(prior)searchLinks.push({searchCallId:prior.id,traverseCallId:c.id});
+ }
+ const searchDiscoveries=observation.discoveries.filter(d=>d.location.mode==='entity_search').map(d=>({searchCallId:d.graphCall.id,entityId:d.location.id,path:d.location.path,novelPath:d.novelPath,novelEntity:d.novelEntity}));
+ const discoveries=observation.discoveries.filter(d=>d.location.mode==='traversal').map(d=>({traverseCallId:d.graphCall.id,entityId:d.location.id,path:d.location.path,novelPath:d.novelPath,novelEntity:d.novelEntity,location:d.location,coverageLimited:d.coverageLimited}));
+ const sourceLinks=observation.sourceLinks.filter(d=>d.location.mode==='traversal').map(d=>({traverseCallId:d.graphCall.id,entityId:d.location.id,path:d.location.path,novelPath:d.novelPath,novelEntity:d.novelEntity,location:d.location,coverageLimited:d.coverageLimited,sourceCallId:d.sourceCall.id,strictNovel:d.strictNovel,competingExposureCallIds:[],retrievalOrigin:d.graphCall.name==='traverse_graph'?'locagent_graph':'current_graph'}));
+ const count=(name:string)=>calls.filter(c=>c.name===name).length;
+ const distribution=(field:string)=>Object.fromEntries([...new Set(traversal.map(c=>JSON.stringify(c.args[field]??null)))].map(v=>[v,traversal.filter(c=>JSON.stringify(c.args[field]??null)===v).length]));
+ const stages=search.flatMap(c=>rows(c.response?.stages));
+ const sum=(field:string)=>stages.reduce((n,s)=>n+Number(s[field]??0),0);
+ const usage=trace.usage,available=usage.assistantResponses>0&&!usage.incompleteUsage;
+ const extraMetrics={searchNovelEntities:searchDiscoveries.filter(d=>d.novelEntity).length,searchNovelPaths:new Set(searchDiscoveries.filter(d=>d.novelPath).map(d=>d.path)).size,
+  invalidRootHintQueries:traversal.reduce((n,c)=>n+rows(c.response?.hints).length,0),multiHopDiscoveryTraversals:traversal.filter(c=>ok(c)&&rows(c.response?.items).some(i=>Number(i.depth)>=2)).length,
+  returnedDepthDistribution:Object.fromEntries([...new Set(traversal.map(c=>Math.max(0,...rows(c.response?.items).map(i=>Number(i.depth??0)))))].map(depth=>[String(depth),traversal.filter(c=>Math.max(0,...rows(c.response?.items).map(i=>Number(i.depth??0)))===depth).length]))};
+ return {version:'trace-attribution-3',runKey:input.runKey,traceSha256:trace.sha256,traceIssues:trace.issues,findings,searchLinks,searchDiscoveries,discoveries,sourceLinks,
+  metrics:{submissionAttempts:observation.submissionAttempts,submissionValidationFailures:observation.submissionValidationFailures,...extraMetrics,toolCalls:calls.length,firstGraphToolOrdinal:graphs[0]?.ordinal??null,searchTextCalls:count('search_text'),readSourceCalls:count('read_source'),graphCalls:graphs.length,searchEntityCalls:count('search_entity'),traverseCalls:count('traverse_graph'),searchCalls:search.length,searchHits:search.filter(c=>ok(c)&&rows(c.response?.items).length).length,exactIdHits:sum('exactIdHits'),exactNameHits:sum('exactNameHits'),bm25EntityCalls:sum('bm25EntityCalls'),bm25ContentCalls:sum('bm25ContentCalls'),fuzzyCalls:sum('fuzzyCalls'),noResultCalls:search.filter(c=>ok(c)&&!rows(c.response?.items).length).length,resultCount:search.reduce((n,c)=>n+rows(c.response?.items).length,0),searchResponseBytes:search.reduce((n,c)=>n+Buffer.byteLength(c.resultText),0),traverseResponseBytes:traversal.reduce((n,c)=>n+Buffer.byteLength(c.resultText),0),renderModeDistribution:Object.fromEntries([...new Set(search.map(c=>String(c.response?.renderMode)))].map(m=>[m,search.filter(c=>String(c.response?.renderMode)===m).length])),hopDistribution:distribution('maxHops'),directionDistribution:distribution('direction'),relationFilterDistribution:distribution('relationTypeFilter'),nodeTypeFilterDistribution:distribution('entityTypeFilter'),returnedNodes:traversal.reduce((n,c)=>n+rows(c.response?.items).length,0),returnedEdges:traversal.reduce((n,c)=>n+rows(c.response?.edges??c.response?.items).length,0),multiHopTraversals:traversal.filter(c=>Number(c.args.maxHops)>1).length,novelEntities:discoveries.filter(d=>d.novelEntity).length,novelPaths:new Set(discoveries.filter(d=>d.novelPath).map(d=>d.path)).size,novelNeighborRate:discoveries.length?discoveries.filter(d=>d.novelEntity).length/discoveries.length:null,searchToTraverse:new Set(searchLinks.map(l=>l.searchCallId)).size,traverseToNovelEntity:new Set(discoveries.filter(d=>d.novelEntity).map(d=>d.traverseCallId)).size,novelEntityToSource:new Set(sourceLinks.filter(l=>l.strictNovel).map(l=>l.entityId)).size,sourceToAcceptedFinding:findings.filter(f=>f.discoveryPath==='graph_assisted').length,graphAssistedFindings:findings.filter(f=>f.discoveryPath==='graph_assisted').length,graphResponseBytes:graphs.reduce((n,c)=>n+Buffer.byteLength(c.resultText),0),rough_payload_estimate:Math.ceil(graphs.reduce((n,c)=>n+[...c.resultText].length,0)/4),inputTokens:available?usage.reportedInputTokens:null,outputTokens:available?usage.reportedOutputTokens:null,cacheReadTokens:available?usage.cacheReadTokens:null,totalTokens:available?usage.reportedTotalTokens:null},reportedPartialUsage:usage,
+  calls:calls.map(c=>({id:c.id,name:c.name,ordinal:c.ordinal,args:c.args,response:c.response,callEvent:c.callEvent,resultEvent:c.resultEvent,isError:c.isError,responseBytes:Buffer.byteLength(c.resultText)}))};
+}

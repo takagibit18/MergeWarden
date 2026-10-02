@@ -1,0 +1,13 @@
+{
+ "$schema":"https://json-schema.org/draft/2020-12/schema",
+ "title":"MergeWarden frozen Python evaluation corpus",
+ "type":"object","required":["schemaVersion","corpusId","cases"],"additionalProperties":false,
+ "properties":{"schemaVersion":{"const":1},"corpusId":{"type":"string"},"cases":{"type":"array","minItems":20,"maxItems":20,"items":{"$ref":"#/$defs/case"}}},
+ "$defs":{
+  "location":{"type":"object","required":["path","startLine","endLine"],"properties":{"path":{"type":"string"},"startLine":{"type":"integer","minimum":1},"endLine":{"type":"integer","minimum":1}}},
+  "finding":{"allOf":[{"$ref":"#/$defs/location"},{"type":"object","required":["id","severity","behavior"],"properties":{"id":{"type":"string"},"severity":{"enum":["critical","high","medium","low"]},"behavior":{"type":"string"}}}]},
+  "case":{"type":"object","additionalProperties":false,"required":["id","repositoryIdentity","baseSha","headSha","expected","category","crossFile","severity","relevantLocation","behavior","humanRationale","annotationProvenance","expectedFindings","baseFiles","headFiles"],"properties":{
+   "id":{"type":"string","pattern":"^[a-z0-9-]+$"},"repositoryIdentity":{"type":"string"},"baseSha":{"type":"string","pattern":"^[a-f0-9]{40}$"},"headSha":{"type":"string","pattern":"^[a-f0-9]{40}$"},"expected":{"enum":["defect","clean"]},"category":{"enum":["single-file","cross-file","multi-hop","import-scope","hard-negative"]},"crossFile":{"type":"boolean"},"severity":{"enum":["critical","high","medium","low","none"]},"relevantLocation":{"$ref":"#/$defs/location"},"behavior":{"type":"string"},"humanRationale":{"type":"string"},"annotationProvenance":{"type":"string"},"expectedFindings":{"type":"array","items":{"$ref":"#/$defs/finding"}},"baseFiles":{"type":"object","additionalProperties":{"type":"string"}},"headFiles":{"type":"object","additionalProperties":{"type":"string"}}
+  }}
+ }
+}

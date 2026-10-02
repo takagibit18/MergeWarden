@@ -1,0 +1,17 @@
+import { readFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import { materializeCase } from './materialize.mjs';
+import { SnapshotStore } from '../src/snapshot/store.ts';
+import { LazyCodeGraph } from '../src/graph/lazy-graph.ts';
+import { isolatedState, writeJson } from '../src/infrastructure/files.ts';
+import { fileURLToPath } from 'node:url';
+if(!process.argv[2])throw Error('Pass an output directory outside the checkout');
+const output=await isolatedState(resolve(process.argv[2]),fileURLToPath(new URL('../',import.meta.url)));
+const corpus=JSON.parse(await readFile(new URL('./cases.json',import.meta.url),'utf8'));const item=corpus.cases.find(c=>c.id==='cross-key');
+const repository=join(output,'repository');await materializeCase(item,repository);
+const store=await SnapshotStore.freeze({repositoryPath:repository,stateDir:join(output,'state'),input:{kind:'commits',base:item.baseSha,head:item.headSha},configuration:{purpose:'real-snapshot-graph-smoke'}});
+const graph=new LazyCodeGraph(store.stateDir,store.manifest.identity.id);
+const lookup=await graph.lookup({snapshotId:store.manifest.identity.id,query:'user_record',limit:10});if(lookup.status!=='ok'||lookup.items.length!==1)throw Error('Lookup smoke failed');
+const neighbors=await graph.neighbors({snapshotId:store.manifest.identity.id,symbolId:lookup.items[0].id,relation:'CALLS',direction:'incoming',limit:10});if(neighbors.items.length!==1||neighbors.items[0].sourcePath!=='view.py')throw Error('Caller smoke failed');
+const source=await store.source('head','view.py',1,3);
+const result={kind:'real-git-snapshot-on-controlled-fixture',repositoryIdentity:item.repositoryIdentity,snapshot:store.manifest.identity,lookup,neighbors,source,metrics:graph.metrics};await writeJson(join(output,'smoke.json'),result);console.log(JSON.stringify({output,metrics:graph.metrics},null,2));

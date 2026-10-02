@@ -1,0 +1,494 @@
+{
+  "schemaVersion": 1,
+  "selectionBeforeModelRuns": true,
+  "sourceCodeExecuted": false,
+  "humanReviewed": false,
+  "pilotReserved": [
+    "RG-C006",
+    "RG-C034",
+    "RG-N-876d774b3723",
+    "RG-N-01caff1dd76a"
+  ],
+  "records": [
+    {
+      "candidate_id": "RG-C001",
+      "source_row_sha256": "a963465f2b7e3d128a9307f87556c759a767a661d41f54a9a6e17c05b6cd0eac",
+      "decision": "exclude_supplied_reference",
+      "reason": "Deprecation message guidance; no concrete functional regression established.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C002",
+      "source_row_sha256": "05cac4a18bc7e89fcf07c7aee0a83b234da1a2bc42cf61cc1877ecdbe0087abd",
+      "decision": "exclude_supplied_reference",
+      "reason": "Documentation API example question; no Python issue anchor.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C003",
+      "source_row_sha256": "ed0880d6fa1d7cf471f8b38b7ef5257448f97b48758c2c0bc9aa1c1969720f57",
+      "decision": "exclude_supplied_reference",
+      "reason": "Logging configuration documentation; no Python issue anchor.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C004",
+      "source_row_sha256": "a1f543695ce7559418e19ecfd9a1b97e1f62f0b7428dd8fbe5bd97728f6a0d44",
+      "decision": "exclude_supplied_reference",
+      "reason": "Docstring/filename wording corrections, not an introduced functional bug claim.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C005",
+      "source_row_sha256": "826371c893cc7ee1a257ffbfd9b8cd1d27b1cb05289407d0c52240eaea4a4ceb",
+      "decision": "exclude_supplied_reference",
+      "reason": "Redundant CircleCI .nojekyll operation; no Python issue anchor.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C006",
+      "source_row_sha256": "ee66c91a777547acb394495a6d1f901aedc00fb3a6d85368d388c20f4f8319ca",
+      "decision": "needs_source_audit",
+      "reason": "Potential functional claim; review SHA, scope, trigger and Python anchor still require static source verification.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C007",
+      "source_row_sha256": "23442acb06707819078eb22181df8c3566f51decaa33e3523894cbe448f1ba9f",
+      "decision": "needs_source_audit",
+      "reason": "Potential functional claim; review SHA, scope, trigger and Python anchor still require static source verification.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C008",
+      "source_row_sha256": "323c69c82d9636342d23cf017e436461f0c2784e478a12ac38e8e9d13f3d0d6c",
+      "decision": "needs_source_audit",
+      "reason": "Potential functional claim; review SHA, scope, trigger and Python anchor still require static source verification.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C009",
+      "source_row_sha256": "27c6d58d2e86585333db1b848cf57fd89fcfbb38694a80ad742b6e51de813049",
+      "decision": "needs_source_audit",
+      "reason": "Potential functional claim; review SHA, scope, trigger and Python anchor still require static source verification.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C010",
+      "source_row_sha256": "16e231ec126e8132286b4f8876292ea8083ab4755628cbfd1ad75d67f0f920d8",
+      "decision": "needs_source_audit",
+      "reason": "Potential functional claim; review SHA, scope, trigger and Python anchor still require static source verification.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C011",
+      "source_row_sha256": "08860f0ebc251b1b2bbe2d2bdf85b038554b72a469cc7220bd69d95c591e164b",
+      "decision": "exclude_supplied_reference",
+      "reason": "Equivalent YAML fixture notation, not functional product regression.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C012",
+      "source_row_sha256": "1ad0dfa93bd2ef15beaba4db2a8edbdb72ce443b64af8d066fed74ce0940e491",
+      "decision": "exclude_supplied_reference",
+      "reason": "Remove commented-out code; no functional impact claim.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C013",
+      "source_row_sha256": "ea86d735032fddca2d8e0bfe6f69227ee38bbd23d456bac9a06451b88814bd11",
+      "decision": "needs_source_audit",
+      "reason": "Potential functional claim; review SHA, scope, trigger and Python anchor still require static source verification.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C014",
+      "source_row_sha256": "4da97ff1db2b5c4f87bacf75f9462a5a22ff60cb0b5bb52a705b559f0465576f",
+      "decision": "exclude_supplied_reference",
+      "reason": "Deduplicate shared constant between tokenizer/generator; refactoring request.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C015",
+      "source_row_sha256": "22fe8c9c16b4981dc31d905f1036259337d1f722d2e7ba4b025ff34516a0b202",
+      "decision": "exclude_supplied_reference",
+      "reason": "API/equality design and try/except discussion; no demonstrated regression in supplied comments.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C016",
+      "source_row_sha256": "cc09e75c4a3449847993c6e69dc17e7c70d0828b25bfb9023ce5632655b3d4b0",
+      "decision": "exclude_supplied_reference",
+      "reason": "Whitespace formatting suggestion; functional trigger and impact not established.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C017",
+      "source_row_sha256": "124a5f41ca9123753bdc676c004d2d491c85dfad12aed18cb759b638a7cd4961",
+      "decision": "exclude_supplied_reference",
+      "reason": "Action version-description wording; no Python issue anchor.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C018",
+      "source_row_sha256": "5b230626b35b2a018069d788915807abfc66b0c6f832772cf837e4a5d5f2bd86",
+      "decision": "exclude_supplied_reference",
+      "reason": "Shorten test fixture; no product defect claim.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C019",
+      "source_row_sha256": "42ee61667a64974f57ad1c1b55875d7b28ecc9e11e82d3d87f3e45969b6c4cb2",
+      "decision": "exclude_supplied_reference",
+      "reason": "Requested broader formatting behavior; supplied comments do not establish an introduced behavior regression.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C020",
+      "source_row_sha256": "243c20a7fde94d0acfa536ba6f52940e92f98a2f5adfd543de4c01462fbe18f2",
+      "decision": "exclude_supplied_reference",
+      "reason": "Preview-policy/CHANGES comment; no verified Python issue anchor.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C021",
+      "source_row_sha256": "bc7dd2bea7ba10f4bb64b32811d9e2ddc65a3e87e76e53deecbdfb99ccaf1d17",
+      "decision": "exclude_supplied_reference",
+      "reason": "Remove ineffective test; missing test coverage alone is not a product defect.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C022",
+      "source_row_sha256": "8df0e690dfe2554f8b5b9f7ca9f00879db90c04985dba19bd9f4e60801002331",
+      "decision": "needs_source_audit",
+      "reason": "Potential functional claim; review SHA, scope, trigger and Python anchor still require static source verification.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C023",
+      "source_row_sha256": "9c22b9d109caa7b269f7b5eab4e24e21e561feccb38b64a67995254fe1c6611b",
+      "decision": "needs_source_audit",
+      "reason": "Potential functional claim; review SHA, scope, trigger and Python anchor still require static source verification.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C024",
+      "source_row_sha256": "675cf0bed333b34b991922af93a0e95b725f1689d683064d551da4f2512893d6",
+      "decision": "needs_source_audit",
+      "reason": "Potential functional claim; review SHA, scope, trigger and Python anchor still require static source verification.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C025",
+      "source_row_sha256": "36e53a1532d1c6925d66c4044c0a7be4a239f0bc603368253e05e24eb446baa0",
+      "decision": "needs_source_audit",
+      "reason": "Potential functional claim; review SHA, scope, trigger and Python anchor still require static source verification.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C026",
+      "source_row_sha256": "f606761be8cffab752eb3507e4dda8645215c61a120e0f87abc1587c7f28cf2d",
+      "decision": "needs_source_audit",
+      "reason": "Potential functional claim; review SHA, scope, trigger and Python anchor still require static source verification.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C027",
+      "source_row_sha256": "73e72c949a626ee86bf5fda849b2d053d8199e1902ff07f30fda54123201af6b",
+      "decision": "exclude_supplied_reference",
+      "reason": "Plugin API design/default plugin preference; no concrete existing contract violation established.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C028",
+      "source_row_sha256": "210543a2c4b60ec58887038c281fbf814e7fda19e0092e1344074b842cee5cbc",
+      "decision": "exclude_supplied_reference",
+      "reason": "Proposed compatibility API design; requires a concrete existing contract before admission.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C029",
+      "source_row_sha256": "f74ecebfa49a88b3e3a1a5d08eff861b0a14e09e32534fb21bba917ad66459bc",
+      "decision": "exclude_supplied_reference",
+      "reason": "Requested new return-shape design and duplicate test assertions; not established regression.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C030",
+      "source_row_sha256": "9b6644215fcf3728f096a0c072bd16e76f59907f96a6f756217632a7fad7a143",
+      "decision": "exclude_supplied_reference",
+      "reason": "Coordinate new delete API signatures; concrete introduced caller breakage not established.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C031",
+      "source_row_sha256": "45942bec185b4dcf204ae82e402545779d0a583c47477458e0c444ccfd9efa5b",
+      "decision": "exclude_supplied_reference",
+      "reason": "kwargs design and reducing test resource use; no specific functional defect supplied.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C032",
+      "source_row_sha256": "38009d1b57e81d938591a33c7a72cde50e3f3f99d4d9ec6cffb57522718f7ead",
+      "decision": "needs_source_audit",
+      "reason": "Potential functional claim; review SHA, scope, trigger and Python anchor still require static source verification.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C033",
+      "source_row_sha256": "88aab8b686b4a48a217906c2cdc031fd34f92eb0282c79d9630b25f90671db9f",
+      "decision": "exclude_supplied_reference",
+      "reason": "Delete test statement; no product defect claim.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C034",
+      "source_row_sha256": "8897cd79c80069733fc868a0521fcd2f4e1aff3303f75581fba6f09abec8e32b",
+      "decision": "needs_source_audit",
+      "reason": "Potential functional claim; review SHA, scope, trigger and Python anchor still require static source verification.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C035",
+      "source_row_sha256": "1860fc65c7ae17d0815b28843e9c0a9b4d5cec936e95c8b57e8a40ebcb3fe712",
+      "decision": "exclude_supplied_reference",
+      "reason": "Extra display newline/refactor/URL punctuation suggestions; no sufficiently supported functional defect.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C036",
+      "source_row_sha256": "337ecd0bb5c31320e0c406f0faed40e68b6ad501e90afd0a763ebca8e783f9bb",
+      "decision": "exclude_supplied_reference",
+      "reason": "Documentation links and obsolete metadata; no Python issue anchor.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C037",
+      "source_row_sha256": "e7e98d3d4719026b99aa2ff4ef2627a489b7240327acb6b8a0913cccc7fa6d5c",
+      "decision": "exclude_supplied_reference",
+      "reason": "Suggestion to assert missing response data; no verified trigger or incorrect behavior yet.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C038",
+      "source_row_sha256": "63b96812bcb0ea818208a1444c0fe5a1f999c6f4305c67eaea2f29f6af4f20cd",
+      "decision": "exclude_supplied_reference",
+      "reason": "Move import in a test; no product behavior regression.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C039",
+      "source_row_sha256": "1f0d4df509c8bb972d6c62f837aea685c4035713451ae791aa635b3a0ec65370",
+      "decision": "exclude_supplied_reference",
+      "reason": "Deduplicate/format version command strings; comments speculate about a later rewrite, not verified reviewed-HEAD bug.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    },
+    {
+      "candidate_id": "RG-C040",
+      "source_row_sha256": "aac864a1f12f60b158b5341830006d7a7064058a50316b16d01e9c6324a41033",
+      "decision": "exclude_supplied_reference",
+      "reason": "Strengthen a test assertion without strip(); not a product bug claim.",
+      "reviewer": {
+        "kind": "agent",
+        "name": "GPT-6 Codex",
+        "independent": false
+      },
+      "scope": "Source reference comments only; not an exhaustive PR code audit; not a human attestation."
+    }
+  ]
+}

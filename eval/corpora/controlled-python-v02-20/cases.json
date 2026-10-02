@@ -1,0 +1,646 @@
+{
+  "schemaVersion": 1,
+  "corpusId": "controlled-python-v02-20",
+  "cases": [
+    {
+      "id": "single-zero",
+      "repositoryIdentity": "mergewarden-controlled-python-v02/single-zero",
+      "baseSha": "8a3d355b5f6b5997901d796aa869f0de3a3050b1",
+      "headSha": "feaf587a864ca1bf32be52c7df2318de537aa493",
+      "expected": "defect",
+      "category": "single-file",
+      "crossFile": false,
+      "severity": "high",
+      "relevantLocation": {
+        "path": "ratio.py",
+        "startLine": 3,
+        "endLine": 3
+      },
+      "behavior": "ratio(0,0) raises ZeroDivisionError instead of returning zero.",
+      "humanRationale": "The removed zero-count branch is part of the explicit API contract.",
+      "annotationProvenance": "Authored before model execution; not independently human-adjudicated.",
+      "expectedFindings": [
+        {
+          "id": "single-zero-bug",
+          "path": "ratio.py",
+          "startLine": 3,
+          "endLine": 3,
+          "severity": "high",
+          "behavior": "ratio(0,0) raises ZeroDivisionError instead of returning zero."
+        }
+      ],
+      "baseFiles": {
+        "ratio.py": "# Public API: empty input (count=0) returns zero.\ndef ratio(total, count):\n    return total / count if count else 0\n"
+      },
+      "headFiles": {
+        "ratio.py": "# Public API: empty input (count=0) returns zero.\ndef ratio(total, count):\n    return total / count\n"
+      }
+    },
+    {
+      "id": "single-expiry",
+      "repositoryIdentity": "mergewarden-controlled-python-v02/single-expiry",
+      "baseSha": "ce7ec7e2adf1bbe08842bd996650579adbbb8772",
+      "headSha": "6dca07fc9e1b97b9097644319dbe213f9406aed5",
+      "expected": "defect",
+      "category": "single-file",
+      "crossFile": false,
+      "severity": "high",
+      "relevantLocation": {
+        "path": "token.py",
+        "startLine": 3,
+        "endLine": 3
+      },
+      "behavior": "valid(10,10) accepts an expired token.",
+      "humanRationale": "Equality was forbidden and is now accepted.",
+      "annotationProvenance": "Authored before model execution; not independently human-adjudicated.",
+      "expectedFindings": [
+        {
+          "id": "single-expiry-bug",
+          "path": "token.py",
+          "startLine": 3,
+          "endLine": 3,
+          "severity": "high",
+          "behavior": "valid(10,10) accepts an expired token."
+        }
+      ],
+      "baseFiles": {
+        "token.py": "# Tokens expire at expires, including the equality boundary.\ndef valid(now, expires):\n    return now < expires\n"
+      },
+      "headFiles": {
+        "token.py": "# Tokens expire at expires, including the equality boundary.\ndef valid(now, expires):\n    return now <= expires\n"
+      }
+    },
+    {
+      "id": "single-default",
+      "repositoryIdentity": "mergewarden-controlled-python-v02/single-default",
+      "baseSha": "47cf9799174eaafbe7d7a648711deea96bdfe268",
+      "headSha": "94eb4f7fae06112b9f74d14d8563d55ad14eaa62",
+      "expected": "defect",
+      "category": "single-file",
+      "crossFile": false,
+      "severity": "high",
+      "relevantLocation": {
+        "path": "items.py",
+        "startLine": 2,
+        "endLine": 4
+      },
+      "behavior": "Repeated collect calls without a bucket share state.",
+      "humanRationale": "A mutable default persists between invocations.",
+      "annotationProvenance": "Authored before model execution; not independently human-adjudicated.",
+      "expectedFindings": [
+        {
+          "id": "single-default-bug",
+          "path": "items.py",
+          "startLine": 2,
+          "endLine": 4,
+          "severity": "high",
+          "behavior": "Repeated collect calls without a bucket share state."
+        }
+      ],
+      "baseFiles": {
+        "items.py": "# Each omitted bucket starts an independent collection.\ndef collect(value, bucket=None):\n    if bucket is None: bucket = []\n    bucket.append(value)\n    return bucket\n"
+      },
+      "headFiles": {
+        "items.py": "# Each omitted bucket starts an independent collection.\ndef collect(value, bucket=[]):\n    bucket.append(value)\n    return bucket\n"
+      }
+    },
+    {
+      "id": "single-falsey",
+      "repositoryIdentity": "mergewarden-controlled-python-v02/single-falsey",
+      "baseSha": "8b5124297a2e6915d0fe7ab23cc27590711a3bb2",
+      "headSha": "e042d5998f8248282a800d836b5c0266f7eb949a",
+      "expected": "defect",
+      "category": "single-file",
+      "crossFile": false,
+      "severity": "high",
+      "relevantLocation": {
+        "path": "limit.py",
+        "startLine": 3,
+        "endLine": 3
+      },
+      "behavior": "limit(0) becomes 100 and re-enables disabled results.",
+      "humanRationale": "None and zero have different declared semantics.",
+      "annotationProvenance": "Authored before model execution; not independently human-adjudicated.",
+      "expectedFindings": [
+        {
+          "id": "single-falsey-bug",
+          "path": "limit.py",
+          "startLine": 3,
+          "endLine": 3,
+          "severity": "high",
+          "behavior": "limit(0) becomes 100 and re-enables disabled results."
+        }
+      ],
+      "baseFiles": {
+        "limit.py": "# None selects 100; zero explicitly disables results.\ndef limit(value):\n    return 100 if value is None else value\n"
+      },
+      "headFiles": {
+        "limit.py": "# None selects 100; zero explicitly disables results.\ndef limit(value):\n    return 100 if not value else value\n"
+      }
+    },
+    {
+      "id": "cross-units",
+      "repositoryIdentity": "mergewarden-controlled-python-v02/cross-units",
+      "baseSha": "fe6bc35417570e9e5fa5e31419e0687aa984e94a",
+      "headSha": "d805a390cc23fb41b14e4de328eb2a6eaf4243f1",
+      "expected": "defect",
+      "category": "cross-file",
+      "crossFile": true,
+      "severity": "high",
+      "relevantLocation": {
+        "path": "units.py",
+        "startLine": 2,
+        "endLine": 2
+      },
+      "behavior": "deadline(0,2) returns 2 milliseconds instead of 2000.",
+      "humanRationale": "The caller still supplies seconds and consumes milliseconds.",
+      "annotationProvenance": "Authored before model execution; not independently human-adjudicated.",
+      "expectedFindings": [
+        {
+          "id": "cross-units-bug",
+          "path": "units.py",
+          "startLine": 2,
+          "endLine": 2,
+          "severity": "high",
+          "behavior": "deadline(0,2) returns 2 milliseconds instead of 2000."
+        }
+      ],
+      "baseFiles": {
+        "units.py": "def milliseconds(seconds):\n    return seconds * 1000\n",
+        "timer.py": "from units import milliseconds\n# now_ms and deadline are integer milliseconds.\ndef deadline(now_ms, delay_seconds):\n    return now_ms + milliseconds(delay_seconds)\n"
+      },
+      "headFiles": {
+        "units.py": "def milliseconds(seconds):\n    return seconds\n",
+        "timer.py": "from units import milliseconds\n# now_ms and deadline are integer milliseconds.\ndef deadline(now_ms, delay_seconds):\n    return now_ms + milliseconds(delay_seconds)\n"
+      }
+    },
+    {
+      "id": "cross-key",
+      "repositoryIdentity": "mergewarden-controlled-python-v02/cross-key",
+      "baseSha": "49035ac26cb2216cae221fc9404fd679d96ca562",
+      "headSha": "13bd76ed2f50057b8a2091a70225509aa73615be",
+      "expected": "defect",
+      "category": "cross-file",
+      "crossFile": true,
+      "severity": "high",
+      "relevantLocation": {
+        "path": "user.py",
+        "startLine": 2,
+        "endLine": 2
+      },
+      "behavior": "identifier(1) raises KeyError after the producer key rename.",
+      "humanRationale": "Consumer indexing contract was not migrated.",
+      "annotationProvenance": "Authored before model execution; not independently human-adjudicated.",
+      "expectedFindings": [
+        {
+          "id": "cross-key-bug",
+          "path": "user.py",
+          "startLine": 2,
+          "endLine": 2,
+          "severity": "high",
+          "behavior": "identifier(1) raises KeyError after the producer key rename."
+        }
+      ],
+      "baseFiles": {
+        "user.py": "def user_record(uid):\n    return {\"id\": uid}\n",
+        "view.py": "from user import user_record\ndef identifier(uid):\n    return user_record(uid)[\"id\"]\n"
+      },
+      "headFiles": {
+        "user.py": "def user_record(uid):\n    return {\"user_id\": uid}\n",
+        "view.py": "from user import user_record\ndef identifier(uid):\n    return user_record(uid)[\"id\"]\n"
+      }
+    },
+    {
+      "id": "cross-optional",
+      "repositoryIdentity": "mergewarden-controlled-python-v02/cross-optional",
+      "baseSha": "64b5aca5da5e02f1658a502d2b2bf77ef53dacce",
+      "headSha": "4d1043e4ff01b88651ada63b5a1303fc0cdf2849",
+      "expected": "defect",
+      "category": "cross-file",
+      "crossFile": true,
+      "severity": "high",
+      "relevantLocation": {
+        "path": "store.py",
+        "startLine": 2,
+        "endLine": 2
+      },
+      "behavior": "display({},\"x\") raises KeyError rather than returning missing.",
+      "humanRationale": "The consumer distinguishes absence using the None sentinel.",
+      "annotationProvenance": "Authored before model execution; not independently human-adjudicated.",
+      "expectedFindings": [
+        {
+          "id": "cross-optional-bug",
+          "path": "store.py",
+          "startLine": 2,
+          "endLine": 2,
+          "severity": "high",
+          "behavior": "display({},\"x\") raises KeyError rather than returning missing."
+        }
+      ],
+      "baseFiles": {
+        "store.py": "def lookup(rows, key):\n    return rows.get(key)\n",
+        "view.py": "from store import lookup\ndef display(rows, key):\n    row = lookup(rows, key)\n    return \"missing\" if row is None else row[\"name\"]\n"
+      },
+      "headFiles": {
+        "store.py": "def lookup(rows, key):\n    return rows.get(key, {})\n",
+        "view.py": "from store import lookup\ndef display(rows, key):\n    row = lookup(rows, key)\n    return \"missing\" if row is None else row[\"name\"]\n"
+      }
+    },
+    {
+      "id": "cross-sentinel",
+      "repositoryIdentity": "mergewarden-controlled-python-v02/cross-sentinel",
+      "baseSha": "f064e561e9f6a5feea5a6c112b0d2a8e7d00d22c",
+      "headSha": "c7140df7242e1ad46badbafdb40c119d6cf70dd4",
+      "expected": "defect",
+      "category": "cross-file",
+      "crossFile": true,
+      "severity": "high",
+      "relevantLocation": {
+        "path": "index.py",
+        "startLine": 2,
+        "endLine": 2
+      },
+      "behavior": "Removing an absent item deletes the first unrelated item.",
+      "humanRationale": "Zero is a valid index; the caller uses a negative sentinel.",
+      "annotationProvenance": "Authored before model execution; not independently human-adjudicated.",
+      "expectedFindings": [
+        {
+          "id": "cross-sentinel-bug",
+          "path": "index.py",
+          "startLine": 2,
+          "endLine": 2,
+          "severity": "high",
+          "behavior": "Removing an absent item deletes the first unrelated item."
+        }
+      ],
+      "baseFiles": {
+        "index.py": "def find_index(items, needle):\n    return items.index(needle) if needle in items else -1\n",
+        "delete.py": "from index import find_index\ndef remove(items, needle):\n    idx = find_index(items, needle)\n    if idx >= 0: items.pop(idx)\n"
+      },
+      "headFiles": {
+        "index.py": "def find_index(items, needle):\n    return items.index(needle) if needle in items else 0\n",
+        "delete.py": "from index import find_index\ndef remove(items, needle):\n    idx = find_index(items, needle)\n    if idx >= 0: items.pop(idx)\n"
+      }
+    },
+    {
+      "id": "multihop-units",
+      "repositoryIdentity": "mergewarden-controlled-python-v02/multihop-units",
+      "baseSha": "2655257935db08c33735978582e49014325d9b83",
+      "headSha": "b926a1f2e3c30fd1375c74dcca14bdb925f33d6e",
+      "expected": "defect",
+      "category": "multi-hop",
+      "crossFile": true,
+      "severity": "high",
+      "relevantLocation": {
+        "path": "units.py",
+        "startLine": 2,
+        "endLine": 2
+      },
+      "behavior": "service.deadline(1000,2) returns 1002 rather than 3000.",
+      "humanRationale": "The milliseconds contract is visible two call hops from the changed converter.",
+      "annotationProvenance": "Authored before model execution; not independently human-adjudicated.",
+      "expectedFindings": [
+        {
+          "id": "multihop-units-bug",
+          "path": "units.py",
+          "startLine": 2,
+          "endLine": 2,
+          "severity": "high",
+          "behavior": "service.deadline(1000,2) returns 1002 rather than 3000."
+        }
+      ],
+      "baseFiles": {
+        "units.py": "def convert(seconds):\n    return seconds * 1000\n",
+        "adapter.py": "from units import convert\ndef delay(seconds):\n    return convert(seconds)\n",
+        "service.py": "from adapter import delay\n# All deadlines in this service are milliseconds.\ndef deadline(now_ms, seconds):\n    return now_ms + delay(seconds)\n"
+      },
+      "headFiles": {
+        "units.py": "def convert(seconds):\n    return seconds\n",
+        "adapter.py": "from units import convert\ndef delay(seconds):\n    return convert(seconds)\n",
+        "service.py": "from adapter import delay\n# All deadlines in this service are milliseconds.\ndef deadline(now_ms, seconds):\n    return now_ms + delay(seconds)\n"
+      }
+    },
+    {
+      "id": "multihop-filter",
+      "repositoryIdentity": "mergewarden-controlled-python-v02/multihop-filter",
+      "baseSha": "248df722b4b25fae2574a800cf43804dab5a67d3",
+      "headSha": "cf69e4860a340307be6ea093c5ca22b49dac5f3f",
+      "expected": "defect",
+      "category": "multi-hop",
+      "crossFile": true,
+      "severity": "high",
+      "relevantLocation": {
+        "path": "predicate.py",
+        "startLine": 2,
+        "endLine": 2
+      },
+      "behavior": "API exposes deleted rows and drops active rows.",
+      "humanRationale": "The inverted predicate propagates through filtering to the API contract.",
+      "annotationProvenance": "Authored before model execution; not independently human-adjudicated.",
+      "expectedFindings": [
+        {
+          "id": "multihop-filter-bug",
+          "path": "predicate.py",
+          "startLine": 2,
+          "endLine": 2,
+          "severity": "high",
+          "behavior": "API exposes deleted rows and drops active rows."
+        }
+      ],
+      "baseFiles": {
+        "predicate.py": "def keep(row):\n    return not row[\"deleted\"]\n",
+        "filtering.py": "from predicate import keep\ndef visible(rows):\n    return [row for row in rows if keep(row)]\n",
+        "api.py": "from filtering import visible\n# Deleted records must never be returned.\ndef response(rows):\n    return {\"items\": visible(rows)}\n"
+      },
+      "headFiles": {
+        "predicate.py": "def keep(row):\n    return row[\"deleted\"]\n",
+        "filtering.py": "from predicate import keep\ndef visible(rows):\n    return [row for row in rows if keep(row)]\n",
+        "api.py": "from filtering import visible\n# Deleted records must never be returned.\ndef response(rows):\n    return {\"items\": visible(rows)}\n"
+      }
+    },
+    {
+      "id": "alias-normalize",
+      "repositoryIdentity": "mergewarden-controlled-python-v02/alias-normalize",
+      "baseSha": "c8d998edb2e1a748f35170eea16a6c6eb87d63da",
+      "headSha": "7485f1ad8ef1676789bcb94a41c7c82516dde7d3",
+      "expected": "defect",
+      "category": "import-scope",
+      "crossFile": true,
+      "severity": "high",
+      "relevantLocation": {
+        "path": "helpers.py",
+        "startLine": 2,
+        "endLine": 2
+      },
+      "behavior": "lookup(\"ADMIN\") now raises KeyError.",
+      "humanRationale": "The alias binds helpers.normalize, not the unrelated same-name function.",
+      "annotationProvenance": "Authored before model execution; not independently human-adjudicated.",
+      "expectedFindings": [
+        {
+          "id": "alias-normalize-bug",
+          "path": "helpers.py",
+          "startLine": 2,
+          "endLine": 2,
+          "severity": "high",
+          "behavior": "lookup(\"ADMIN\") now raises KeyError."
+        }
+      ],
+      "baseFiles": {
+        "helpers.py": "def normalize(key):\n    return key.lower()\n",
+        "other.py": "def normalize(key):\n    return key\n",
+        "lookup.py": "from helpers import normalize as clean\ndef lookup(key):\n    return {\"admin\": 1}[clean(key)]\n"
+      },
+      "headFiles": {
+        "helpers.py": "def normalize(key):\n    return key\n",
+        "other.py": "def normalize(key):\n    return key\n",
+        "lookup.py": "from helpers import normalize as clean\ndef lookup(key):\n    return {\"admin\": 1}[clean(key)]\n"
+      }
+    },
+    {
+      "id": "scope-boundary",
+      "repositoryIdentity": "mergewarden-controlled-python-v02/scope-boundary",
+      "baseSha": "83c311043c60a078330544de508ed33515cfe755",
+      "headSha": "11db3caf56f64e308d711cfd15ee2b555204069f",
+      "expected": "defect",
+      "category": "import-scope",
+      "crossFile": false,
+      "severity": "high",
+      "relevantLocation": {
+        "path": "scope.py",
+        "startLine": 6,
+        "endLine": 6
+      },
+      "behavior": "check(0) accepts a value forbidden by its local rule.",
+      "humanRationale": "The nested function shadows the module-level allowed function.",
+      "annotationProvenance": "Authored before model execution; not independently human-adjudicated.",
+      "expectedFindings": [
+        {
+          "id": "scope-boundary-bug",
+          "path": "scope.py",
+          "startLine": 6,
+          "endLine": 6,
+          "severity": "high",
+          "behavior": "check(0) accepts a value forbidden by its local rule."
+        }
+      ],
+      "baseFiles": {
+        "scope.py": "def allowed(value):\n    return value >= 0\n# Local rule requires strictly positive values.\ndef check(value):\n    def allowed(value):\n        return value > 0\n    return allowed(value)\n"
+      },
+      "headFiles": {
+        "scope.py": "def allowed(value):\n    return value >= 0\n# Local rule requires strictly positive values.\ndef check(value):\n    def allowed(value):\n        return value >= 0\n    return allowed(value)\n"
+      }
+    },
+    {
+      "id": "clean-guard",
+      "repositoryIdentity": "mergewarden-controlled-python-v02/clean-guard",
+      "baseSha": "019f6f485698aa9a1dd2ace9e88e67a956373f31",
+      "headSha": "57c41c67a157e3ade9dd118999560c02ae3b55d2",
+      "expected": "clean",
+      "category": "hard-negative",
+      "crossFile": true,
+      "severity": "none",
+      "relevantLocation": {
+        "path": "ratio.py",
+        "startLine": 3,
+        "endLine": 3
+      },
+      "behavior": "Removing the redundant helper guard preserves all permitted inputs.",
+      "humanRationale": "The sole caller checks count and the private helper contract excludes zero.",
+      "annotationProvenance": "Authored before model execution; not independently human-adjudicated.",
+      "expectedFindings": [],
+      "baseFiles": {
+        "ratio.py": "# Internal helper; callers must provide count > 0.\ndef _ratio(total, count):\n    return total / max(count, 1)\n",
+        "api.py": "from ratio import _ratio\ndef ratio(total, count):\n    if count <= 0: return 0\n    return _ratio(total, count)\n"
+      },
+      "headFiles": {
+        "ratio.py": "# Internal helper; callers must provide count > 0.\ndef _ratio(total, count):\n    return total / count\n",
+        "api.py": "from ratio import _ratio\ndef ratio(total, count):\n    if count <= 0: return 0\n    return _ratio(total, count)\n"
+      }
+    },
+    {
+      "id": "clean-key-migration",
+      "repositoryIdentity": "mergewarden-controlled-python-v02/clean-key-migration",
+      "baseSha": "81c70c85daf1572c16db3d96552123d9f48da698",
+      "headSha": "f7e199ac07ab02ec4a815c5df7b695e46a6f528f",
+      "expected": "clean",
+      "category": "hard-negative",
+      "crossFile": true,
+      "severity": "none",
+      "relevantLocation": {
+        "path": "user.py",
+        "startLine": 2,
+        "endLine": 2
+      },
+      "behavior": "Producer and consumer migrate the dictionary key together.",
+      "humanRationale": "A key rename is safe when every consumer is updated in the same patch.",
+      "annotationProvenance": "Authored before model execution; not independently human-adjudicated.",
+      "expectedFindings": [],
+      "baseFiles": {
+        "user.py": "def record(uid):\n    return {\"id\": uid}\n",
+        "view.py": "from user import record\ndef identifier(uid):\n    return record(uid)[\"id\"]\n"
+      },
+      "headFiles": {
+        "user.py": "def record(uid):\n    return {\"user_id\": uid}\n",
+        "view.py": "from user import record\ndef identifier(uid):\n    return record(uid)[\"user_id\"]\n"
+      }
+    },
+    {
+      "id": "clean-shadow",
+      "repositoryIdentity": "mergewarden-controlled-python-v02/clean-shadow",
+      "baseSha": "ee7f04850e9e1a297bca6ecf869994ec9a97c328",
+      "headSha": "782b231cc98fecd8707cd8ff7124bb7e5dec7b7d",
+      "expected": "clean",
+      "category": "hard-negative",
+      "crossFile": false,
+      "severity": "none",
+      "relevantLocation": {
+        "path": "scope.py",
+        "startLine": 2,
+        "endLine": 2
+      },
+      "behavior": "Equivalent module predicate change leaves the nested shadow intact.",
+      "humanRationale": "Same names do not make check call the changed module predicate.",
+      "annotationProvenance": "Authored before model execution; not independently human-adjudicated.",
+      "expectedFindings": [],
+      "baseFiles": {
+        "scope.py": "def valid(x):\n    return x > 0\ndef check(x):\n    def valid(x): return x >= 0\n    return valid(x)\n"
+      },
+      "headFiles": {
+        "scope.py": "def valid(x):\n    return 0 < x\ndef check(x):\n    def valid(x): return x >= 0\n    return valid(x)\n"
+      }
+    },
+    {
+      "id": "clean-alias",
+      "repositoryIdentity": "mergewarden-controlled-python-v02/clean-alias",
+      "baseSha": "eb1270f910e7a25de63582755ac75ecc4cd4cf01",
+      "headSha": "a9f8a36956504c728c0de6bfd0267cf90d62bdb3",
+      "expected": "clean",
+      "category": "hard-negative",
+      "crossFile": true,
+      "severity": "none",
+      "relevantLocation": {
+        "path": "pkg/use.py",
+        "startLine": 1,
+        "endLine": 2
+      },
+      "behavior": "Import alias and its use are renamed together.",
+      "humanRationale": "Relative import target and behavior remain identical.",
+      "annotationProvenance": "Authored before model execution; not independently human-adjudicated.",
+      "expectedFindings": [],
+      "baseFiles": {
+        "pkg/__init__.py": "",
+        "pkg/helper.py": "def clean(key): return key.lower()\n",
+        "pkg/use.py": "from .helper import clean as normalize\ndef get(key): return {\"admin\": 1}[normalize(key)]\n"
+      },
+      "headFiles": {
+        "pkg/__init__.py": "",
+        "pkg/helper.py": "def clean(key): return key.lower()\n",
+        "pkg/use.py": "from .helper import clean as canonical\ndef get(key): return {\"admin\": 1}[canonical(key)]\n"
+      }
+    },
+    {
+      "id": "clean-none",
+      "repositoryIdentity": "mergewarden-controlled-python-v02/clean-none",
+      "baseSha": "84f1c1d47c408e438db3ffb2f74bc2b5734ed26c",
+      "headSha": "cf8fa19e201a4d2cb594240171130c982bcd4970",
+      "expected": "clean",
+      "category": "hard-negative",
+      "crossFile": false,
+      "severity": "none",
+      "relevantLocation": {
+        "path": "limit.py",
+        "startLine": 4,
+        "endLine": 4
+      },
+      "behavior": "The validation guard excludes all falsey numeric values before defaulting.",
+      "humanRationale": "Unlike the defect case, zero is rejected before this expression.",
+      "annotationProvenance": "Authored before model execution; not independently human-adjudicated.",
+      "expectedFindings": [],
+      "baseFiles": {
+        "limit.py": "# value is None or a strictly positive integer.\ndef limit(value):\n    if value is not None and value <= 0: raise ValueError()\n    return 100 if value is None else value\n"
+      },
+      "headFiles": {
+        "limit.py": "# value is None or a strictly positive integer.\ndef limit(value):\n    if value is not None and value <= 0: raise ValueError()\n    return 100 if not value else value\n"
+      }
+    },
+    {
+      "id": "clean-conversion",
+      "repositoryIdentity": "mergewarden-controlled-python-v02/clean-conversion",
+      "baseSha": "aed4eb8812eed9b9d76ed239071720bc15d88f01",
+      "headSha": "d157ed426fdcfc3442f9a389064e39edbed422d6",
+      "expected": "clean",
+      "category": "hard-negative",
+      "crossFile": true,
+      "severity": "none",
+      "relevantLocation": {
+        "path": "units.py",
+        "startLine": 1,
+        "endLine": 1
+      },
+      "behavior": "Multiplication moves to the adapter while end-to-end units are preserved.",
+      "humanRationale": "Both changed files are necessary to assess the contract.",
+      "annotationProvenance": "Authored before model execution; not independently human-adjudicated.",
+      "expectedFindings": [],
+      "baseFiles": {
+        "units.py": "def convert(seconds): return seconds * 1000\n",
+        "adapter.py": "from units import convert\ndef delay(seconds): return convert(seconds)\n",
+        "service.py": "from adapter import delay\ndef deadline(now_ms, seconds): return now_ms + delay(seconds)\n"
+      },
+      "headFiles": {
+        "units.py": "def convert(seconds): return seconds\n",
+        "adapter.py": "from units import convert\ndef delay(seconds): return convert(seconds) * 1000\n",
+        "service.py": "from adapter import delay\ndef deadline(now_ms, seconds): return now_ms + delay(seconds)\n"
+      }
+    },
+    {
+      "id": "clean-empty",
+      "repositoryIdentity": "mergewarden-controlled-python-v02/clean-empty",
+      "baseSha": "99ba869d6d47ba4bdcc1b3adbeb49630d7ac3b62",
+      "headSha": "af98e184a20223aef02dfffe512539fd4eed17e1",
+      "expected": "clean",
+      "category": "hard-negative",
+      "crossFile": false,
+      "severity": "none",
+      "relevantLocation": {
+        "path": "rows.py",
+        "startLine": 3,
+        "endLine": 3
+      },
+      "behavior": "The empty-list guard remains before indexing.",
+      "humanRationale": "For the declared builtin list input, truthiness and zero length are equivalent.",
+      "annotationProvenance": "Authored before model execution; not independently human-adjudicated.",
+      "expectedFindings": [],
+      "baseFiles": {
+        "rows.py": "# rows is always a builtin list, including [].\ndef first(rows):\n    if len(rows) == 0: return None\n    return rows[0]\n"
+      },
+      "headFiles": {
+        "rows.py": "# rows is always a builtin list, including [].\ndef first(rows):\n    if not rows: return None\n    return rows[0]\n"
+      }
+    },
+    {
+      "id": "clean-default",
+      "repositoryIdentity": "mergewarden-controlled-python-v02/clean-default",
+      "baseSha": "2d6268b1b144d0b9f87865a5e647cd9972ef2f8d",
+      "headSha": "23c7aca248903f010369615c05cbab6dcba7875a",
+      "expected": "clean",
+      "category": "hard-negative",
+      "crossFile": false,
+      "severity": "none",
+      "relevantLocation": {
+        "path": "items.py",
+        "startLine": 3,
+        "endLine": 3
+      },
+      "behavior": "Rewriting initialization keeps allocation inside each invocation.",
+      "humanRationale": "No mutable default or replacement of an explicitly supplied empty list is introduced.",
+      "annotationProvenance": "Authored before model execution; not independently human-adjudicated.",
+      "expectedFindings": [],
+      "baseFiles": {
+        "items.py": "# Each omitted collection is independent.\ndef collect(value, bucket=None):\n    if bucket is None: bucket = []\n    bucket.append(value)\n    return bucket\n"
+      },
+      "headFiles": {
+        "items.py": "# Each omitted collection is independent.\ndef collect(value, bucket=None):\n    bucket = [] if bucket is None else bucket\n    bucket.append(value)\n    return bucket\n"
+      }
+    }
+  ]
+}

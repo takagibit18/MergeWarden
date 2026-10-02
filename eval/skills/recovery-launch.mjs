@@ -1,0 +1,10 @@
+import {spawn} from 'node:child_process';
+import {readFile,readdir} from 'node:fs/promises';
+import {join,resolve,dirname} from 'node:path';
+const root=resolve(import.meta.dirname,'../..'),dir=resolve(process.argv[2]),auth=resolve(process.argv[3]);
+const ex=JSON.parse(await readFile(join(dir,'experiment.json'),'utf8'));
+const reads=['src','node_modules','integrations/pi','integrations/tree-sitter','eval/skills'].map(p=>join(root,p));
+for(const f of ex.code)reads.push(join(root,f.path));
+reads.push(dir,join(root,'package.json'),dirname(auth),...ex.cases.map(c=>c.repositoryPath));
+const args=['--experimental-strip-types','--permission','--allow-worker',...reads.map(p=>'--allow-fs-read='+p),'--allow-fs-write='+dir,'--allow-fs-write='+dirname(auth),join(root,'eval/skills/recovery-run.mjs'),dir,auth,process.argv[4],process.argv[5],process.argv[6]??'A',...(process.argv.includes('--check-only')?['--check-only']:[])];
+const child=spawn(process.execPath,args,{stdio:'inherit',windowsHide:true});child.on('exit',code=>process.exitCode=code??1);

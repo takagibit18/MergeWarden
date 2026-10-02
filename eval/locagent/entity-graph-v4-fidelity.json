@@ -1,0 +1,91 @@
+{
+  "schemaVersion": 1,
+  "implementation": "entity-graph-v4",
+  "versions": {
+    "schema": 4,
+    "resolver": "python-entities-streaming-5",
+    "scopePolicy": "python-core-scope-2"
+  },
+  "historicalBoundary": "This file describes the post-challenge v4 graph. locagent-replication-fidelity.json remains the immutable description of the earlier c9584d0 experiment implementation.",
+  "reference": {
+    "paper": "LocAgent: Graph-Guided LLM Agents for Code Localization, ACL 2025",
+    "paperUrl": "https://aclanthology.org/2025.acl-long.426/",
+    "paperBodyUrl": "https://arxiv.org/html/2503.09089v2",
+    "repository": "https://github.com/gersteinlab/LocAgent",
+    "repositoryCommit": "4935b557326c154bad8e8dcf3747cc8d32d1f387",
+    "license": "Apache-2.0",
+    "licenseUrl": "https://github.com/gersteinlab/LocAgent/blob/4935b557326c154bad8e8dcf3747cc8d32d1f387/LICENSE",
+    "copiedSourceCode": false
+  },
+  "mechanisms": [
+    {
+      "name": "directory-file-class-function taxonomy",
+      "status": "faithful",
+      "referenceEvidence": "dependency_graph graph construction and the paper's heterogeneous entity hierarchy",
+      "adapter": "MergeWarden stable IDs, immutable snapshot paths and functionKind metadata; Python methods are externally functions",
+      "implementationEvidence": ["src/graph/contracts.ts", "src/graph/python-resolver.ts", "schemas/graph.sql"]
+    },
+    {
+      "name": "CONTAINS/IMPORTS/CALLS/INHERITS navigation",
+      "status": "adapted",
+      "referenceEvidence": "dependency_graph and dependency_graph/traverse_graph.py",
+      "adapter": "LocAgent invokes is named CALLS; only uniquely proven lexical/import targets become traversable and repeated sites are aggregated",
+      "implementationEvidence": ["src/graph/python-resolver.ts", "src/graph/sqlite-store.ts", "src/experiments/locagent/retrieval.ts"]
+    },
+    {
+      "name": "ordinary reference graph edges",
+      "status": "not used",
+      "referenceEvidence": "Not required by the four selected LocAgent-style dependency relations",
+      "adapter": "No reference index is built; ordinary occurrences remain available through immutable search_text",
+      "implementationEvidence": ["integrations/tree-sitter/src/python-extractor.ts", "src/engine/prompt.ts"]
+    },
+    {
+      "name": "heuristic same-name and dynamic call edges",
+      "status": "not used",
+      "referenceEvidence": "LocAgent's graph constructor may use language-specific heuristics",
+      "adapter": "MergeWarden forbids repository-global same-name promotion and receiver guessing; uncertain sites remain diagnostics",
+      "implementationEvidence": ["src/graph/python-resolver.ts", "integrations/tree-sitter/tests/resolver.test.mjs"]
+    },
+    {
+      "name": "entity/content search and bounded multi-hop traversal",
+      "status": "adapted",
+      "referenceEvidence": "plugins/location_tools/repo_ops, dependency_graph/traverse_graph.py and util/runtime/content_tools.py",
+      "adapter": "Exact/BM25/fuzzy-last retrieval over the v4 generation, shared file chunks, source read required for evidence, explicit depth/node/byte caps",
+      "implementationEvidence": ["src/experiments/locagent/retrieval.ts", "src/experiments/locagent/sparse.ts", "tests/locagent.test.mjs"]
+    },
+    {
+      "name": "core/all scope layering",
+      "status": "adapted",
+      "referenceEvidence": "LocAgent motivates lightweight repository representation but does not define this cache identity or review scope policy",
+      "adapter": "Changed and production Python form default core; all is explicit and independently published. Exact path rules include the source-declared generated SymPy integrals/rubi/rules tree without generalizing every rules directory.",
+      "implementationEvidence": ["src/graph/scope-policy.ts", "tests/graph-scope.test.mjs", "integrations/tree-sitter/tests/store.test.mjs"]
+    },
+    {
+      "name": "streaming checkpoint and immutable generation storage",
+      "status": "adapted",
+      "referenceEvidence": "Engineering extension, not claimed as a LocAgent mechanism",
+      "adapter": "Two-pass resolver, per-file extraction/relationship checkpoints, compact v4 SQLite, atomic publication and deterministic failure cache",
+      "implementationEvidence": ["src/graph/sqlite-store.ts", "schemas/graph.sql", "schemas/graph-checkpoint.sql", "docs/adr/0013.md"]
+    }
+  ],
+  "limitations": [
+    "Python only and head snapshot only",
+    "No receiver type inference, runtime dispatch, MRO execution or external dependency graph",
+    "No namespace-package or src-layout search-root inference",
+    "Candidate and unresolved dependency sites are diagnostic and never traversable",
+    "Reference equivalence is not claimed; review-quality benefit requires a separate frozen experiment"
+  ],
+  "validation": {
+    "semanticTests": ["integrations/tree-sitter/tests/resolver.test.mjs", "integrations/tree-sitter/tests/store.test.mjs", "tests/graph-scope.test.mjs"],
+    "upstreamDifferential": {
+      "runner": "eval/locagent/graph-differential-reference.py",
+      "fixture": "tests/fixtures/locagent/graph-differential",
+      "pinnedOutput": "tests/fixtures/locagent/graph-reference-4935b557.json",
+      "comparisonTest": "tests/locagent-graph-differential.test.mjs",
+      "classification": ["normalMapping", "adapted", "upstreamHeuristicDifference", "pendingDefect"]
+    },
+    "retrievalTests": "tests/locagent.test.mjs",
+    "realSnapshotHarness": "eval/graph-profile.mjs",
+    "qualityClaim": "None"
+  }
+}

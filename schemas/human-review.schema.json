@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema", "title": "Human-authored independent Golden review declaration",
+  "type": "object", "required": ["schemaVersion", "corpusSha256", "reviewer", "humanAttestation", "submittedAt", "cases"],
+  "properties": {
+    "schemaVersion": {"const": 1}, "corpusSha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "reviewer": {"type": "object", "required": ["name", "kind", "independentOfOriginalAnnotation"], "properties": {"name": {"type": "string"}, "kind": {"const": "human"}, "independentOfOriginalAnnotation": {"type": "boolean"}}},
+    "humanAttestation": {"type": "boolean"}, "submittedAt": {"type": ["string", "null"]},
+    "cases": {"type": "array", "minItems": 20, "maxItems": 20, "items": {"type": "object", "required": ["caseId", "baseSha", "headSha", "verdict", "bugExists", "cleanIsClean", "expectedBehavior", "severity", "graphBias", "rationale"], "properties": {
+      "caseId": {"type": "string"}, "baseSha": {"type": "string", "pattern": "^[a-f0-9]{40}$"}, "headSha": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+      "verdict": {"enum": ["pending", "accept", "needs_revision", "reject"]}, "bugExists": {"enum": ["", "yes", "no", "not_applicable", "uncertain"]}, "cleanIsClean": {"enum": ["", "yes", "no", "not_applicable", "uncertain"]},
+      "expectedBehavior": {"enum": ["", "sufficient", "insufficient", "uncertain"]}, "severity": {"enum": ["", "critical", "high", "medium", "low", "none", "uncertain"]}, "graphBias": {"enum": ["", "none", "possible", "clear", "uncertain"]}, "rationale": {"type": "string"}
+    }}}
+  },
+  "$comment": "Completed rows additionally require identity/independence/attestation/date and five consistent assessments in src/eval/human-review.ts. Validation authenticates structure and corpus binding, not the human's identity. Receipts preserve disputed labels without modifying frozen cases."
+}

@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.json",
+  "include": [
+    "src/**/*.ts",
+    "../../src/graph/contracts.ts"
+  ],
+  "exclude": [
+    "node_modules"
+  ]
+}

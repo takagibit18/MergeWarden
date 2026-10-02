@@ -1,0 +1,7 @@
+import {spawn} from 'node:child_process';
+import {join,resolve,dirname} from 'node:path';
+import {read,repo} from './exposure-common.mjs';
+const root=resolve(process.argv[2]),auth=resolve(process.argv[3]),phase=process.argv[4],ex=await read(join(root,'execution/experiment.json'));
+const reads=['src','node_modules','integrations/pi','integrations/tree-sitter','eval/skills'].map(p=>join(repo,p));for(const f of ex.code)reads.push(join(repo,f.path));reads.push(join(root,'execution/experiment.json'),join(root,'sources'),dirname(auth));
+let script;if(['B','C'].includes(phase)){script='exposure-learn.mjs';reads.push(join(root,'execution',phase),join(root,'execution/B/skills/jobs'),join(root,'execution/C/skills/jobs'));if(phase==='C')reads.push(join(root,'execution/B'),join(root,'execution/B-frozen.json'),join(root,'evaluation/feedback-frozen.json'));}else if(phase==='comments'){script='exposure-comments.mjs';reads.push(join(root,'source-audit'),join(root,'evaluation'),join(root,'execution/B-frozen.json'),join(root,'execution/learning-health.json'));}else throw Error('Unknown phase');
+const child=spawn(process.execPath,['--experimental-strip-types','--permission',...reads.map(p=>'--allow-fs-read='+p),'--allow-fs-write='+join(root,'execution'),'--allow-fs-write='+join(root,'evaluation'),'--allow-fs-write='+dirname(auth),join(repo,'eval/skills',script),root,auth,phase,...(process.argv.includes('--preflight-only')?['--preflight-only']:[])],{stdio:'inherit',windowsHide:true});child.on('exit',code=>process.exitCode=code??1);

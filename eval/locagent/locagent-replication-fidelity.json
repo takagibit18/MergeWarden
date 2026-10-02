@@ -1,0 +1,124 @@
+{
+  "reference": {
+    "paper": "LocAgent ACL 2025",
+    "paperUrl": "https://aclanthology.org/2025.acl-long.426/",
+    "repository": "https://github.com/gersteinlab/LocAgent",
+    "repositoryCommit": "4935b557326c154bad8e8dcf3747cc8d32d1f387"
+  },
+  "mechanisms": {
+    "exactEntitySearch": "adapted",
+    "exactNameSearch": "faithful",
+    "bm25Entity": "adapted",
+    "bm25Content": "adapted",
+    "fuzzyFallback": "adapted",
+    "multiHopTraversal": "faithful",
+    "directionFilter": "faithful",
+    "relationFilter": "adapted",
+    "entityTypeFilter": "adapted",
+    "adaptiveFormatting": "adapted",
+    "retrieveEntity": "adapted"
+  },
+  "adaptations": [
+    {
+      "mechanism": "exactEntitySearch",
+      "original": "Human entity ID path.py:qualified name; __init__ fallback",
+      "implementation": "Human ID, immutable stable ID or qualified name, then constructor fallback; invalid roots return bounded BM25 candidate hints and are not traversed",
+      "reason": "Snapshot identity and conservative graph are frozen; extra stable-ID/qualified-name adapters retain exact lookup."
+    },
+    {
+      "mechanism": "exactNameSearch",
+      "original": "Case-sensitive dictionary then case-insensitive fallback",
+      "implementation": "Case-sensitive matches first, case-insensitive fallback, dotted prefix/suffix fallback",
+      "reason": "No intended mechanism deviation; snapshot-bound metadata replaces reference graph attributes."
+    },
+    {
+      "mechanism": "bm25Entity",
+      "original": "bm25s 0.2.3 Lucene, k1=1.5, b=0.75, English PyStemmer 2.2.0.3; human entity IDs include path/module/name",
+      "implementation": "Same sparse formula and token boundaries, float32 postings, JS Snowball 0.6.0; pinned library differential vectors",
+      "reason": "Keep synchronous retrieval within cancellable Node worker. Tested vectors establish conformance on those inputs, not equivalence for all Unicode/stemmer versions. Stable lexical tie order."
+    },
+    {
+      "mechanism": "bm25Content",
+      "original": "EpicSplitter separate AST/codeblock model and LlamaIndex, 100/500/2000 token chunk controls",
+      "implementation": "Existing immutable symbol ranges split at 200 lines; content supplements BM25 entity hits; 64 MiB/200000 chunk build cap",
+      "reason": "Original splitter reconstructs a second AST/graph semantic model. Frozen Tree-sitter IR and source boundary are retained. Chunk overlap and ranking can differ; this is material, not faithful content segmentation."
+    },
+    {
+      "mechanism": "fuzzyFallback",
+      "original": "RapidFuzz token_set_ratio top 3 before supplemental content search",
+      "implementation": "Indel token-set ratio top 3 only after content has no hit; no confidence interpretation and no semantic edges",
+      "reason": "Explicit task requires fuzzy LAST, which conflicts with reference order. This is a task-required deviation, not an architectural necessity."
+    },
+    {
+      "mechanism": "relationFilter",
+      "original": "LocAgent contains/invokes/imports/inherits and heuristic graph builder",
+      "implementation": "Frozen CONTAINS/CALLS/IMPORTS/REFERENCES; unresolved/candidate retained",
+      "reason": "Task explicitly freezes conservative semantic graph; no inheritance or same-name heuristic edges."
+    },
+    {
+      "mechanism": "entityTypeFilter",
+      "original": "directory/file/class/function",
+      "implementation": "module/class/function/method; no synthetic directories",
+      "reason": "Frozen MergeWarden IR has no directories; method remains an explicit type."
+    },
+    {
+      "mechanism": "adaptiveFormatting",
+      "original": "<=3 per-kind preview; exact single complete; file/class skeletons above 100 lines; function previews can be full",
+      "implementation": "fold for >3 total candidates; 6-line/1 KiB preview; 100-line/8 KiB full; <=10 results/32 KiB response",
+      "reason": "Task explicitly requires very limited preview and hard output caps. Original skeleton extractor would introduce a second parser; output remains explorationOnly."
+    },
+    {
+      "mechanism": "retrieveEntity",
+      "original": "Separate get_entity_contents tool",
+      "implementation": "Existing immutable read_source, derived trace retrievalOrigin=locagent_graph",
+      "reason": "Mandatory source evidence ledger and SHA validation must remain unchanged."
+    },
+    {
+      "mechanism": "multiHopTraversal",
+      "original": "Tree DFS, per-root visited nodes/edges, both branches at root then fixed direction, type filters prune",
+      "implementation": "Same traversal control, plus explicit maxNodes/maxBytes/edge cap; candidate path marked unproven",
+      "reason": "Safety/cancellation bounds required by task. No source bundled with tree."
+    },
+    {
+      "mechanism": "indexLifecycle",
+      "original": "Persisted/cached BM25 indices",
+      "implementation": "Rebuild sparse index per cancellable worker request; reuse verified snapshot SQLite graph",
+      "reason": "Worker termination owns synchronous cancellation. Extra index latency is measured; this is a lifecycle adaptation and may increase cost."
+    }
+  ],
+  "notReplicated": [
+    "Original model training/fine-tuning",
+    "Loc-Bench or SWE-bench results",
+    "Original graph constructor",
+    "CodeNib",
+    "Directory/inheritance nodes",
+    "Original content chunk segmentation",
+    "Original class/module skeleton representation",
+    "DOT output (Agent reference uses tree)",
+    "G1R separate RetrieveEntity tool"
+  ],
+  "validation": {
+    "referenceVectors": "tests/fixtures/locagent/reference-vectors.json",
+    "functionalTests": "tests/locagent.test.mjs",
+    "offlinePi": "integrations/pi/tests/locagent.test.mjs",
+    "qualityClaim": "None; live challenge evidence is required."
+  },
+  "fidelityCorrection": "ff8c8e1 omitted invalid-root BM25 hints; six reports and one interrupted attempt preserved outside checkout. Corrected regression and all-arm restart, with unchanged cases/model/prompt/budgets.",
+  "liveChallenge": {
+    "implementationCommit": "c9584d0",
+    "cases": 8,
+    "attempts": 24,
+    "corpusUnchanged": true,
+    "allArmConfigurationsVerified": true,
+    "nativeTraceAndReportIntegrityVerified": true,
+    "graphAssistedFindings": 0,
+    "novelEntityToSource": 0,
+    "stageDExecuted": false,
+    "interpretation": "No retrieval benefit demonstrated on this synthetic review subset; not a reproduction of paper results."
+  },
+  "postRunHardening": [
+    "Diagnostic-heavy invalid roots now respect small output limits; stress-test regression, not triggered in the challenge.",
+    "Trace v2 excludes prior BM25 hint exposure from novelty and adds separate requested/discovered hop diagnostics; all 24 attribution outcomes unchanged.",
+    "Raw/native results remain on c9584d0; post-run code was not evaluated by replacement live runs."
+  ]
+}

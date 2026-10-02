@@ -1,0 +1,19 @@
+import {readFile,writeFile} from 'node:fs/promises';import {resolve,join} from 'node:path';import {createHash} from 'node:crypto';
+import {retentionTraceFromFrozen} from './path-retention-replay.mjs';
+import {retainStructuralPaths} from '../src/experiments/locagent/path-retention.ts';
+import {candidateUnits,selectPathCandidates} from '../src/experiments/locagent/path-candidates.ts';
+const out=resolve(process.argv[2]),read=async p=>JSON.parse(await readFile(p,'utf8')),hash=b=>createHash('sha256').update(b).digest('hex'),save=(name,value)=>writeFile(join(out,name),JSON.stringify(value,null,2)+'\n',{flag:'wx'});
+const protocol=await read(join(out,'protocol.json')),inputs=await read(join(out,'frozen-inputs.json'));
+const inputFile=async suffix=>{const identity=inputs.find(i=>i.path.replaceAll('\\','/').endsWith(suffix)&&i.role!=='post-freeze scorer only');if(!identity)throw Error('Unapproved input');const bytes=await readFile(identity.path);if(hash(bytes)!==identity.sha256)throw Error('Frozen input drift');return JSON.parse(bytes);};
+const rows=await inputFile('/retrieval-v2/b-pattern/results.json'),inspections=await inputFile('/retrieval-v2/edge-inspection-supplement.json');
+const paths=[],selections=[],metrics=[];
+for(const plan of protocol.cases){const row=rows.find(r=>r.id===plan.id),replay=retentionTraceFromFrozen(row,plan,inspections.find(i=>i.id===plan.id)),context={changedPaths:plan.request.changedPaths,rootPaths:[row.pack.anchor.path],seenPaths:plan.actions?plan.actions.filter(a=>a.name==='read_source').map(a=>a.args.path):[row.pack.anchor.path]};
+ const times=[],digests=[],rss=[],heap=[];let retained,units,selection;
+ for(let i=0;i<protocol.repeatSelections;i++){if(global.gc)global.gc();const start=performance.now();retained=retainStructuralPaths(replay.input);units=candidateUnits(retained);selection=selectPathCandidates(units,context);times.push(performance.now()-start);digests.push(hash(JSON.stringify({retained,units,selection})));rss.push(process.memoryUsage().rss);heap.push(process.memoryUsage().heapUsed);}
+ const sorted=[...times].sort((a,b)=>a-b);let run=0,longest=0;for(let i=1;i<rss.length;i++){run=rss[i]>rss[i-1]?run+1:0;longest=Math.max(longest,run);}
+ paths.push({id:plan.id,...replay,retained});selections.push({id:plan.id,context,candidateUnits:units,...selection});metrics.push({id:plan.id,...retained.metrics,candidateUnits:units.length,selectedCandidates:selection.selected.length,candidateDiversityByFile:selection.diversity.files,candidateDiversityByDepth:selection.diversity.depthStrata,candidateDiversityByPattern:selection.diversity.patterns,repeatSelections:100,byteStable:new Set(digests).size===1,selectionSha256:digests[0],selectionLatencyMs:{p50:sorted[49],p95:sorted[94],max:sorted[99]},memory:{retainedRepresentationBytes:Buffer.byteLength(JSON.stringify(retained)),rssStart:rss[0],rssEnd:rss.at(-1),heapStart:heap[0],heapEnd:heap.at(-1),longestMonotonicRssIncrease:longest},graphQueries:0,sourceReads:0});
+ console.log(JSON.stringify({id:plan.id,selected:selection.selected.map(u=>({entity:u.terminalEntity.qualifiedName,depth:u.depth,path:u.terminalPath})),stable:metrics.at(-1).byteStable}));
+}
+await save('path-retention.json',paths);await save('candidate-selection.json',selections);await save('selection-metrics.json',metrics);
+const fingerprints=[];for(const file of ['../src/experiments/locagent/path-retention.ts','../src/experiments/locagent/path-candidates.ts','./path-retention-replay.mjs','./path-retention-diagnostic.mjs'])fingerprints.push({file,sha256:hash(await readFile(new URL(file,import.meta.url)))});await save('implementation.json',{fingerprints,realModelCalls:0});
+await save('prediction-freeze.json',{frozenAt:new Date().toISOString(),artifacts:await Promise.all(['path-retention.json','candidate-selection.json','selection-metrics.json','implementation.json'].map(async name=>({name,sha256:hash(await readFile(join(out,name)))}))),auditRead:false});

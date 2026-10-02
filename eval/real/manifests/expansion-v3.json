@@ -1,0 +1,127 @@
+{
+  "schemaVersion": 1,
+  "selectionBasis": "Additional source-clean candidates after independent audits rejected existing source-clean labels. No model/Graph outcomes used; not approved.",
+  "sourceLockSha256": "cdd47034f31ac89e53963f1b0c4d93d0489a95aa6330785cbb8beab80a698c9e",
+  "instances": [
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "astropy__astropy-3132",
+      "sourceRowSha256": "6c1861fd20a1e633e6d1261c4e2bba35832416d8afc6bf3f446453e837cf059f"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "matplotlib__matplotlib-7944",
+      "sourceRowSha256": "937912d94b48876d900a576e785c3e3ff5d8abd4a13250fae98e6b3a28e49514"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "pydata__xarray-2633",
+      "sourceRowSha256": "844956abc38f697f1cb415c7e44d21d8bc3874fb93dd3f80f8f217ad35ccb6c8"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "pydata__xarray-4592",
+      "sourceRowSha256": "7c1537063258509ac09d2092a2c026047d604c1eca07f637287a5219b2ce601a"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "mwaskom__seaborn-2417",
+      "sourceRowSha256": "0997b1be12003d89fa2d67d77c3a12a6af4e4f4fb8ca00d1a5d3a320d5c5c790"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "astropy__astropy-1810",
+      "sourceRowSha256": "1d77296f2ae70f1d6fa52a188f3afb0449977fada5489ca0ca0550d48384ea3e"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "matplotlib__matplotlib-10206",
+      "sourceRowSha256": "f5c80a865cb1e8ba1f468818b67144a71f9d1e78f9ebedc6d6abf652d8206a35"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "pydata__xarray-3515",
+      "sourceRowSha256": "2857c433f8c38f4151e8e657283acccf3316a571ff5aab944f1508e39380f30d"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "matplotlib__matplotlib-5486",
+      "sourceRowSha256": "7bb97623cc13f2fa525fc98a2b6b38703b8f04ac661232df97bf48daeafdd2d4"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "pytest-dev__pytest-10678",
+      "sourceRowSha256": "56c04071f95992be3a923ac38a20ce05849882d386b6e4f1b353adf9874f2c64"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "pydata__xarray-3132",
+      "sourceRowSha256": "50f3af949bc5c6e8c1c7b958a1173ab9500eaaca49726ffd646557c53f3ea6ea"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "matplotlib__matplotlib-10031",
+      "sourceRowSha256": "5351d62c71b7658d995546f6dbf07b4a58f8c7a4aff580626f6f0b849cc3363d"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "matplotlib__matplotlib-2036",
+      "sourceRowSha256": "a4b2a551ab33c494205b3e6fd45a32e55439b92a198bf8a07c7a79106c69e165"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "pydata__xarray-6823",
+      "sourceRowSha256": "bda44610f29f885fd55b48710632c7e8e55679fa5cde0a2ebc088c40c1ce94d5"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "pallets__flask-2378",
+      "sourceRowSha256": "e2d12948bf8ddeabc12829f09fc0948ff8df0f956f26d76c041962c8fe7f7baa"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "astropy__astropy-3824",
+      "sourceRowSha256": "3368ac4b5ae07963791c68874a69925b6db091444e61ba1706b7667b71b8cbef"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "astropy__astropy-3537",
+      "sourceRowSha256": "8a881ae68f2a1157c7f608a5f45d9ecdf2e8cad459f8889804fb3827fa71bfb9"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "pydata__xarray-2506",
+      "sourceRowSha256": "01822e9cd78541448bb392fdd16dd767ae643a25e4d3cf729a5c6e735f453f60"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "matplotlib__matplotlib-12131",
+      "sourceRowSha256": "74b3fc9736ff58d24a4d595283f20cf1151f8df3411568b2406df972840799a6"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "pydata__xarray-7022",
+      "sourceRowSha256": "3277825aa6efeecb28d4045f2e4f781bea19e6b53a9393b339f1fab9311935f1"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "pytest-dev__pytest-1891",
+      "sourceRowSha256": "9af7494ed1423f66cc98707c13be95cdfe7596ed3bca7236e16d3460bf532225"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "pydata__xarray-6414",
+      "sourceRowSha256": "3e577bb243b1dc6b6acb435cdf0c51cac903800b234e3682a8a0aee532a148ab"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "matplotlib__matplotlib-1416",
+      "sourceRowSha256": "d71c21bd51e789d878fd61b7217a24984705e17f0f5ef470e2c351de7abd9ed8"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "astropy__astropy-14437",
+      "sourceRowSha256": "d598b99cee8c20ba8fa77ee926a5ae2473270bc842c0dbf8c37a8221d048f377"
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { consultAdvisor } from '../src/advisor/coordinator.ts';
+import { RuleAdvisor } from '../src/advisor/rules.ts';
+import { NoopAdvisor } from '../src/advisor/noop.ts';
+import { request } from './helpers.mjs';
+const options = (extra={})=>({mode:'shadow',provider:new RuleAdvisor(),request:request(),timeoutMs:50,currentStateVersion:()=>3,observe:()=>{},...extra});
+test('off does not call a provider',async()=>{let called=false; const result=await consultAdvisor(options({mode:'off',provider:{advise:async()=>{called=true;throw Error();}}})); assert.equal(called,false);assert.equal(result,undefined);});
+test('shadow records advice but never returns it to the agent',async()=>{let observation;const result=await consultAdvisor(options({observe:x=>observation=x}));assert.equal(result,undefined);assert.equal(observation.outcome,'accepted');assert.deepEqual(observation.advice.selected,['TRACE_CALLERS']);});
+test('advisory can return an in-catalog suggestion',async()=>{const result=await consultAdvisor(options({mode:'advisory'}));assert.deepEqual(result.selected,['TRACE_CALLERS']);});
+test('no-op abstains',async()=>{let observation;await consultAdvisor(options({provider:new NoopAdvisor(),observe:x=>observation=x}));assert.equal(observation.outcome,'abstained');});
+test('stale state advice is discarded',async()=>{let observation;const result=await consultAdvisor(options({mode:'advisory',currentStateVersion:()=>4,observe:x=>observation=x}));assert.equal(result,undefined);assert.equal(observation.outcome,'stale');});
+test('advisor cannot introduce an unallowed tool',async()=>{let observation; const provider={advise:async(r,s)=>({...await new RuleAdvisor().advise(r,s),selected:['WRITE_SECRETS']})};const result=await consultAdvisor(options({mode:'advisory',provider,observe:x=>observation=x}));assert.equal(result,undefined);assert.equal(observation.outcome,'invalid');});
+test('advisor failure falls back without blocking the review',async()=>{let observation;await consultAdvisor(options({provider:{advise:async()=>{throw Error('offline');}},observe:x=>observation=x}));assert.equal(observation.outcome,'unavailable');});
+test('timeout bounds even a provider ignoring abort',async()=>{let observation;await consultAdvisor(options({timeoutMs:5,provider:{advise:async()=>new Promise(()=>{})},observe:x=>observation=x}));assert.equal(observation.outcome,'unavailable');});
+test('telemetry failure is not a task failure',async()=>{await assert.doesNotReject(consultAdvisor(options({observe:()=>{throw Error('sink down');}})));});
+test('wrong catalog is rejected',async()=>{let observation;const provider={advise:async(r,s)=>({...await new RuleAdvisor().advise(r,s),catalogVersion:'old'})};await consultAdvisor(options({provider,observe:x=>observation=x}));assert.equal(observation.outcome,'invalid');});
+test('provider cannot mutate original decision state',async()=>{const r=request();const provider={advise:async(r,s)=>{r.facts.evidenceNeed='literal';return new RuleAdvisor().advise(r,s);}};await consultAdvisor(options({request:r,provider}));assert.equal(r.facts.evidenceNeed,'callers');});

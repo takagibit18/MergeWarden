@@ -1,0 +1,123 @@
+{
+  "reference": "LocAgent 4935b557326c154bad8e8dcf3747cc8d32d1f387 requirements; bm25s 0.2.3 / PyStemmer 2.2.0.3 / RapidFuzz 3.10.1",
+  "documents": [
+    "auth/token.py:refresh_access_token",
+    "api/sessions.py:validate_token",
+    "cache.py:refresh",
+    "workers.py:working_workers"
+  ],
+  "scores": [
+    {
+      "query": "token refresh",
+      "results": [
+        {
+          "index": 2,
+          "score": 0.5146753787994385
+        },
+        {
+          "index": 0,
+          "score": 0.4524998366832733
+        }
+      ]
+    },
+    {
+      "query": "sessions",
+      "results": [
+        {
+          "index": 1,
+          "score": 0.4524998366832733
+        }
+      ]
+    },
+    {
+      "query": "working",
+      "results": []
+    },
+    {
+      "query": "zzzzqqqq",
+      "results": []
+    }
+  ],
+  "tokens": [
+    {
+      "text": "working workers worked",
+      "tokens": [
+        "work",
+        "worker",
+        "work"
+      ]
+    },
+    {
+      "text": "refresh_access_token",
+      "tokens": [
+        "refresh_access_token"
+      ]
+    },
+    {
+      "text": "Running runs",
+      "tokens": [
+        "run",
+        "run"
+      ]
+    },
+    {
+      "text": "relational conditional skies",
+      "tokens": [
+        "relat",
+        "condit",
+        "sky"
+      ]
+    },
+    {
+      "text": "the and token",
+      "tokens": [
+        "token"
+      ]
+    },
+    {
+      "text": "café naïve 你好 東京",
+      "tokens": [
+        "café",
+        "naïv",
+        "你好",
+        "東京"
+      ]
+    },
+    {
+      "text": "generously communism organization",
+      "tokens": [
+        "generous",
+        "communism",
+        "organ"
+      ]
+    }
+  ],
+  "fuzzy": [
+    {
+      "query": "refresh token",
+      "entity": "auth/token.py:refresh_access_token",
+      "score": 100.0
+    },
+    {
+      "query": "SAVE",
+      "entity": "pkg/a.py:save",
+      "score": 0.0
+    },
+    {
+      "query": "abc",
+      "entity": "xyz",
+      "score": 0.0
+    },
+    {
+      "query": "normalize",
+      "entity": "helpers.py:normalize",
+      "score": 100.0
+    },
+    {
+      "query": "sessions",
+      "entity": "api/session.py:Session",
+      "score": 46.666666666666664
+    }
+  ],
+  "reviewedPythonExecuted": false
+}

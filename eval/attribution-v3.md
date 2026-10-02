@@ -1,0 +1,15 @@
+# Attribution v3 protocol
+
+`trace-attribution-3` supersedes G0 trace-attribution-2 and G1 locagent-trace-2 for new analyses. Historical outputs retain their original version. Run `node --experimental-strip-types eval/replay-attribution-v3.mjs OUTPUT DATASET...` on saved Routing dataset directories; output must be outside the checkout. Existing differing artifacts are never overwritten.
+
+The replay verifies saved findings against delivered report.json, checks the original native trace digest, hashes all inputs before/after, and analyzes every session twice. It emits the original v2 analysis, v3 analysis, a per-finding diff, input digests and determinism receipt. It never loads reference labels. Frozen regression fixtures are redacted tool-only extracts; native SDK integration tests separately validate the real transport.
+
+The authoritative pipeline is `src/eval/provenance/decode.ts` and `observations.ts`, shared by G0/G1. Path exposure includes base/head text, earlier Graph results and candidate hints. A structural first exposure needs a later, separately issued successful head source read covering the location, exact evidence identity and canonical payload in an accepted submission. Native branch integrity is mandatory. A prior failed submission or unrelated answered tool error is local; an unexplained missing result before acceptance remains ambiguous. Partial positive definite relations are usable and coverage-limited; empty results never prove absence.
+
+`discoveryPath` remains text_only / graph_assisted / ambiguous. `entitySearchAssisted`, `structuralAssisted`, `strictCallerAssisted` and `assistanceKind` distinguish search, incoming/outgoing calls, inheritance, import, containment and multi-hop navigation. Strict caller assistance is a one-hop definite incoming CALLS chain. General structural assistance can include multi-hop paths. Coverage and source links do not establish semantic defect correctness.
+
+The model chooses evidence. Reading a novel source without selecting it in final evidence never receives strict credit. Evidence-transport normalization may resolve an explicit visible evidence ID after the registry phase; it cannot add an unselected reference. Reclassification under this protocol is not a change in historical model capability.
+
+Malformed tool argument shapes are call-local when IDs/names are intact; the affected call cannot supply positive proof. Active native message corruption remains fatal. The final decoder refinement preserves all 34 historical and four delivery-smoke outputs byte-for-byte. Version and input digests are saved separately from historical predictions.
+
+Changed-path membership comes from the delivered report coverage, successful diff observations and accepted reviewedPaths; a changed source never receives untouched-source credit even if Graph exposes it first. Current eval callers supply report coverage explicitly. Refresh output uses trace-analysis-v3.json and preserves historical v2 files; ordinary call warnings do not invalidate the whole run.

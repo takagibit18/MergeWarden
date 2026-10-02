@@ -1,0 +1,8 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {selectPathCandidates} from '../src/experiments/locagent/path-candidates.ts';
+const unit=(id,path,depth,pattern='out')=>({snapshotId:'s',generationId:'g',terminalEntity:{id,path,startLine:1},terminalPath:path,depth,bestPath:{depth,patternId:pattern},retainedPaths:[{depth,patternId:pattern}]});
+const context={changedPaths:['root.py'],rootPaths:['root.py'],seenPaths:['root.py']};
+test('candidate selection reserves a deepest slot and diversifies files before filling peers',()=>{const units=[unit('a','a.py',1),unit('b','a.py',1),unit('c','b.py',1),unit('deep','z.py',3)],r=selectPathCandidates(units,context);assert.equal(r.selected[0].terminalEntity.id,'deep');assert.equal(r.selected.length,3);assert.equal(r.diversity.files,3);assert.deepEqual(r,selectPathCandidates([...units].reverse(),context));});
+test('candidate buckets prefer novel pattern and depth and obey the three-slot cap',()=>{const units=[unit('deep','a.py',3),unit('a','b.py',1),unit('b','c.py',2,'in'),unit('c','d.py',1)],r=selectPathCandidates(units,context);assert.equal(r.selected[1].terminalEntity.id,'b');assert.equal(r.selected.length,3);assert.equal(r.diversity.depthStrata,3);});
+test('generic terminal novelty does not remove same-file candidates or use arrival order',()=>{const units=[unit('same','root.py',3),unit('seen','b.py',3),unit('new','c.py',3)],r=selectPathCandidates(units,{...context,seenPaths:['root.py','b.py']});assert.equal(r.selected[0].terminalEntity.id,'new');assert.ok(r.selected.some(u=>u.terminalEntity.id==='same'));});

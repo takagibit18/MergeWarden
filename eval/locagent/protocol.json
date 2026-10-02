@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "baselineCommit": "93d9da881bee6ea74b65fe261eb34151a79be844",
+  "corpusSha256": "07491d7803a4a25ded06e58d4acfae052e6ec2bd7575cff9867c9adf0c9f62d9",
+  "referenceCommit": "4935b557326c154bad8e8dcf3747cc8d32d1f387",
+  "provider": "bigmodel",
+  "modelId": "glm-5.3-flash",
+  "apiKeyEnvironment": "MERGEWARDEN_API_KEY",
+  "piVersion": "0.84.1",
+  "timeoutMs": 120000,
+  "maxToolCalls": 40,
+  "maxTokens": 8192,
+  "modelConfiguration": "Unmodified Pi/runtime defaults; effective configuration captured and checked across arms",
+  "challenge": ["cross-units", "cross-key", "multihop-retry", "multihop-filter", "alias-normalize", "clean-guard", "clean-key-migration", "clean-conversion"],
+  "selectionReason": "Frozen before any new model outputs: two cross-file contracts, two multihop chains, one alias, three caller-contract hard negatives. Selected by category, not by new arm performance. Prior r1 results were already known; r2 has not had a live evaluation.",
+  "armOrders": [["T0", "G0", "G1"], ["G0", "G1", "T0"], ["G1", "T0", "G0"]],
+  "stageDGate": "All 24 challenge attempts preserved and configuration/source freeze verified; at least one strict G1 graph-assisted finding OR G1 novel-entity-to-source conversions > G0 and >= 1. Otherwise fidelity audit and stop; no prompt/corpus tuning or replacement runs.",
+  "repeats": 1,
+  "interpretation": "Mechanism replication on synthetic controlled Python PR review cases, not reproduction of LocAgent paper results. This challenge subset cannot estimate general PR quality. Stage D needs the recorded gate and independent output directory."
+}

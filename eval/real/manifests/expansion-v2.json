@@ -1,0 +1,327 @@
+{
+  "schemaVersion": 1,
+  "selectionBasis": "Static review of upstream F.* claims; no model outcomes or Graph coverage used. Candidates only, not approved.",
+  "sourceLockSha256": "cdd47034f31ac89e53963f1b0c4d93d0489a95aa6330785cbb8beab80a698c9e",
+  "instances": [
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "astropy__astropy-5868",
+      "sourceRowSha256": "d1ec7d1fb86392614ae1fa9ca5125e26aeffe893b602aad6be11edac3d97e5f6"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "astropy__astropy-9623",
+      "sourceRowSha256": "84d8a3fcbac4f32743f43252547b90a3fd9fd6dfb1c9cd083b2cfa73f1481829"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "astropy__astropy-9793",
+      "sourceRowSha256": "36cb71518c488be8f9f453c5a84acf3755682d315c17a3f49681cf235464668d"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "astropy__astropy-16872",
+      "sourceRowSha256": "7fb46d9962efb289872f2c7527ca29a083c3dbdbe589f4d7b4af8d721d182e5d"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "astropy__astropy-17461",
+      "sourceRowSha256": "130cec5cad98854b4335e763da414f2fa5a5f803a004527edb020e9fc5257a0e"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "django__django-16040",
+      "sourceRowSha256": "3b8abb606d2398bc121ad9516b7de6f934d334eec7d54409fcdcee3d69d529d8"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "matplotlib__matplotlib-1294",
+      "sourceRowSha256": "50b49c7cb8e1aef70b275a301dff98dd4b7ebe319cceec005f7a8a0dc57a0205"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "matplotlib__matplotlib-3752",
+      "sourceRowSha256": "b73ec966d586dd44c97bddbc23dbd6f6f814e62e0bb126a2ec1f994d8b2993d2"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "matplotlib__matplotlib-4290",
+      "sourceRowSha256": "04ef5c98bc8789a9ddc142294e4ee48f153a9a1a576fe0dc57fee6804c63cdc4"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "matplotlib__matplotlib-4689",
+      "sourceRowSha256": "47cc48bfbc0f135a3dbfedc6dc9dc31000c6c0e503b8d51fc4c653bb948192e0"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "matplotlib__matplotlib-4824",
+      "sourceRowSha256": "5e97dfd9182eebc849050fe51da51e01d3bc18286fa541751fcf62eef79fc23a"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "matplotlib__matplotlib-13268",
+      "sourceRowSha256": "716644e9d65ba30bba3e5eceeacb8dc5c70b6496a77659a5097b8777b6b1310d"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "matplotlib__matplotlib-17851",
+      "sourceRowSha256": "5361a48e8f9393dc7bf9b48b86a6758b1af6c1e2aecdb3c627d995e7f281a457"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "matplotlib__matplotlib-22696",
+      "sourceRowSha256": "a850cf0622800436b1394f70a62e7c3129a8e5d764ad6c0a9855b7b7a8be85f9"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "matplotlib__matplotlib-25692",
+      "sourceRowSha256": "7969288bf09fe5bca2557726d0510b092759a21fa2e6a6bca903ec8617ba5cfb"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "matplotlib__matplotlib-27267",
+      "sourceRowSha256": "19bf9c68639de398582ce7e7405f30fcd24f304c333c8f96e6add26fe14997ef"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "mwaskom__seaborn-1948",
+      "sourceRowSha256": "2935b2183e6c0795c81ff0d956b3035fbec1f0e686fedf33c246a9e5062817b0"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "mwaskom__seaborn-2347",
+      "sourceRowSha256": "04acd9d048e73c39ffe06976b20c28df6814b878579ee7d4c7d22a90ddcc0c74"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "pallets__flask-2748",
+      "sourceRowSha256": "0ae81a4615c4a2cc0fcba9578744ee135550bccaa99fea796d384d2e12eb0b21"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "psf__requests-2258",
+      "sourceRowSha256": "35abdebb5d5ad84111dcf10b81d429f99d739e5fd791901e32472bb56edc7c1e"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "pydata__xarray-177",
+      "sourceRowSha256": "1338720afb47b4f0407958849ae6e30da2d88b9a3da3a6b69f553720bb2212bc"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "pydata__xarray-310",
+      "sourceRowSha256": "94d54be395f8ee781c1817378838e365161cb8601e4fbbfbd22abfec2500eff0"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "pydata__xarray-905",
+      "sourceRowSha256": "a289f98b52225e21e44dd83a6ba8c67d98db8b5ea7b6cc70ba30dc22162a2980"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "pydata__xarray-2124",
+      "sourceRowSha256": "5e479172443a703b2661a50cfcec0c8231e684d084ddb0c7c61be2317425988e"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "pydata__xarray-2155",
+      "sourceRowSha256": "87a03d54d3478d608c0d2430418858e53dfbebfd9466f7542d9c9d1913eb3f83"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "pydata__xarray-4744",
+      "sourceRowSha256": "ac268e5a7756f633fdc60f72370a9f367c556ef4628939293d675809456329c2"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "pydata__xarray-6461",
+      "sourceRowSha256": "440b7eab13d2612a1686c645df1140bd1055fe5470058543f1503e44e06dc43f"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "pydata__xarray-8287",
+      "sourceRowSha256": "951575139abf3c0859cf29fb7ed730b04cd7d9f4544ef71ba05c82eb9b23fe37"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "pylint-dev__pylint-1321",
+      "sourceRowSha256": "a9aa9f3a6be8b4d11e96b3067269dc743d9a4020376b9b17b9a35f050a9cd89d"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "pytest-dev__pytest-1854",
+      "sourceRowSha256": "1c931623f074c5f74b42363df150409419bf65324d576e298171f2422d4cf457"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "pytest-dev__pytest-8537",
+      "sourceRowSha256": "e4b8ce6a77dbc43079d96ffdde287c43e8138518fa8e06f7aa5fffbe02861654"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "pytest-dev__pytest-12232",
+      "sourceRowSha256": "d788d9b9a5db239d62f713a8aef51abe7210bf70e742581e492b4350330f622f"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "scikit-learn__scikit-learn-259",
+      "sourceRowSha256": "a458902d88d81a7bad99a8b4a9e491da4f8cedf28afe0d4e441923aa83801e6e"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "scikit-learn__scikit-learn-4584",
+      "sourceRowSha256": "91eef4455fbf4a27293d802af064b10b215b33b687c6cd6f99be84bb2df8e816"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "scikit-learn__scikit-learn-10852",
+      "sourceRowSha256": "ae1e88fbbe32c7dc24e41da4b24e7c7223d18827c7dd50074f8c3ab79c259ba0"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "scikit-learn__scikit-learn-12033",
+      "sourceRowSha256": "675acefe8dc49dbb09f80d947eacf673b0311433202bf13acff4fbfd58a88e5a"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "scikit-learn__scikit-learn-22950",
+      "sourceRowSha256": "098f451936168342eaa48af0de15b6d7ac79692905fd86da354fff61c1357bcf"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "scikit-learn__scikit-learn-23813",
+      "sourceRowSha256": "2c172437b3c00c1e88ac903223fd3bdbc1201fe3ea2a41de3702245ab4229378"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "scikit-learn__scikit-learn-25108",
+      "sourceRowSha256": "ce310d9dd673035a51455418ee6d7c30bf142406e2d7a57777747aade5f45ae8"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "scikit-learn__scikit-learn-25474",
+      "sourceRowSha256": "44b98f28670782ce28ee24b67596e5890388cc862ab7e3b2d0353318e4d92946"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "scikit-learn__scikit-learn-26229",
+      "sourceRowSha256": "b4a20d5a91ab5bfae4814a294312dd318bd053fa5baaabdd322953234cb2f043"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "scikit-learn__scikit-learn-27865",
+      "sourceRowSha256": "58e52cb277d7b695cbf73abcd049cd21ab3265cd37c3c8a1542e9fedabdd524e"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "sphinx-doc__sphinx-5596",
+      "sourceRowSha256": "6bab3ac18ea56055e437049089261c2088daf0eb09484f94a473b9a165ea4b2e"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "sphinx-doc__sphinx-9447",
+      "sourceRowSha256": "7c4c53951b4ea6eda925f77f7f596f683f7ebb445890942269b5d67b211149b3"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "sphinx-doc__sphinx-12131",
+      "sourceRowSha256": "8357e516653c3f6d0c426905c4dfbd0af139171f62f7f91f4fc2a411e09b997e"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "sympy__sympy-245",
+      "sourceRowSha256": "73ec4a181f2b760ae564012a9c6efa4adce322c8b1b9a0295aece656202ce0cb"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "sympy__sympy-1688",
+      "sourceRowSha256": "048460eb8c3216556f9c2ee54741deb6b31a66db34e5debf6c85347df4c0fb53"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "sympy__sympy-1791",
+      "sourceRowSha256": "594f4819041c68e25c57af906c46138f346cc5082136d85c9f54e45aca494565"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "sympy__sympy-2437",
+      "sourceRowSha256": "5b4e0080b29590ebce389fedc286ba4cc6d3c9d28b646657b8ff6d0f437488a9"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "sympy__sympy-8465",
+      "sourceRowSha256": "da608018dfc941f62de0f34e19cdc76d6940c9b5d2b9639464b158bb73715293"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "sympy__sympy-11748",
+      "sourceRowSha256": "ddea8886a6e227acb1a4084cac948c1c097dab82c292f9b9f3cf677ac226ba0e"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "sympy__sympy-13131",
+      "sourceRowSha256": "962178acdc72c6d856aaa0f078e0ba689ebdd3f951136bcf4545a565603996eb"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "sympy__sympy-13327",
+      "sourceRowSha256": "e497af5c4b8a3ffdf37887b6962aed316ce89bf83997982ab95820d702cd6a91"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "sympy__sympy-14145",
+      "sourceRowSha256": "1ba0ddb07e0567f4815c7640e39ecaa3ba173e36e6762760d377e0379ce7f9ae"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "sympy__sympy-15004",
+      "sourceRowSha256": "5c3f703a222b8665745957b79afd9b29244857aa26614dd2e4b4a528bd9e492b"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "sympy__sympy-15569",
+      "sourceRowSha256": "202cb4ce9477922076b43312e5a01c2bb218896bea76f19003d1ba3da9cc25c0"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "sympy__sympy-15683",
+      "sourceRowSha256": "55eb4bde57f18d4a8210dd7cefa91a3e044c077cffed5c3d97730c9b5c39f56d"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "sympy__sympy-15876",
+      "sourceRowSha256": "14fda314fcaedcc6931978c6098d9e6e1adc7a486b103b956da16d9aada3d4e8"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "sympy__sympy-17548",
+      "sourceRowSha256": "741f8a9b5c31453053fc36e14ffc85bc4e57d6d7db04069b983e989ae9f301b9"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "sympy__sympy-20663",
+      "sourceRowSha256": "684eb9c4cc35ab4cbb1efc3cbd1121a262b072f8b58b7f2e82ada266ae4bd288"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "sympy__sympy-25105",
+      "sourceRowSha256": "6fa56f3025a5ff517f3b97385031943701bcc7087838a6f8bc9781e441302026"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "sympy__sympy-25504",
+      "sourceRowSha256": "ebb5d13311cf2f1de952c98350013e09b502a76478883d6dd081747bfd31c7ea"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "sympy__sympy-26233",
+      "sourceRowSha256": "5e4e8cca57bfe735e854d964e5af0c422d5124a41655da5aea31d86f517091c7"
+    },
+    {
+      "source": "swrbench",
+      "sourceInstanceId": "sympy__sympy-27708",
+      "sourceRowSha256": "db50ee714239faad527f5c07fd76a505d92bdd7324857d9617b987c6e26b1550"
+    }
+  ]
+}

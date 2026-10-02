@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "sha256": "06f0749b74ace3f6a3d0df0694d8a9bd39f457621c49ce0dba15c827fd52a39b",
+  "cases": 104,
+  "uniquePRs": 104,
+  "sources": {
+    "ccrab_ids": {
+      "git_blob_sha1": "25778f101530e2611793ca1afd112a3b1f712bc6",
+      "sha256": "fbc2eb9e4595fe159c68c4dfd28ad37b2764371a70e17acbd66e09c64c786b33",
+      "size_bytes": 17896
+    },
+    "ccrab_retained": {
+      "git_blob_sha1": "3e482fc3d23bf84ea680a83915bd0000937d0ab6",
+      "sha256": "63a5079d5d47e233cbf91fb397885dd82b66f1c522e957ca61e3d1f9fb454160",
+      "size_bytes": 26233405
+    },
+    "ccrab_stage3": {
+      "git_blob_sha1": "b66f2883403e4da868bc84ec6e59f439e248ef59",
+      "sha256": "b6e59bdcaec0db11b79064a9d3375cf45a302b13bd3f2d976efda84556b185e8",
+      "size_bytes": 23199798
+    },
+    "swrbench": {
+      "git_blob_sha1": "35313bdf6ed2edb3eb7792e672732c294478ed46",
+      "sha256": "7048e7a92ea9f7a1e6812646694a040582448cc1dd9d515264a4b55071aff95d",
+      "size_bytes": 84826523
+    }
+  }
+}

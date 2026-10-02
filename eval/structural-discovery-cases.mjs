@@ -1,0 +1,23 @@
+// Preselected diagnostic fixtures, never an independent holdout. Loaded only during preparation.
+export const cases = [
+ { id:'P1-signature-caller', positive:true, reuse:'P1-signature-caller', changedPath:'core.py', entity:'normalize_key', relevantPath:'cache.py',
+   reference:'normalize_key adds a required mode parameter. Untouched cache.lookup passes only key, introducing TypeError before CACHE lookup.', probe:'from cache import lookup\nprint(lookup("ready"))', baseOutput:'1', headError:'TypeError' },
+ { id:'P2-multihop', positive:true, reuse:'P3-multihop', changedPath:'core.py', entity:'encode', relevantPath:'adapter.py',
+   reference:'encode adds required format. Untouched adapter.serialize still passes one argument; api.response fails transitively with TypeError.', probe:'from api import response\nprint(response(7))', baseOutput:'7', headError:'TypeError' },
+ { id:'P3-time-unit', positive:true, changedPath:'core.py', entity:'timeout_seconds', relevantPath:'worker.py',
+   initial:{'core.py':'def timeout_seconds(value, unit="seconds"):\n    return value / 1000 if unit == "milliseconds" else value\n','worker.py':'from core import timeout_seconds\n# Scheduler configuration stores seconds; a 30 second lease is required.\nLEASE_SECONDS = 30\ndef lease_duration():\n    return timeout_seconds(LEASE_SECONDS)\n'},
+   changed:'def timeout_seconds(value, unit="milliseconds"):\n    return value / 1000 if unit == "milliseconds" else value\n',
+   reference:'Default changes from seconds to milliseconds. Untouched worker passes LEASE_SECONDS=30 without unit; lease_duration returns 0.03 rather than required 30 seconds.', probe:'from worker import lease_duration\nprint(lease_duration())',baseOutput:'30',headOutput:'0.03' },
+ { id:'P4-container-type', positive:true, changedPath:'core.py', entity:'encode', relevantPath:'serializer.py',
+   initial:{'core.py':'def encode(value, as_list=False):\n    return [str(value)] if as_list else str(value)\n','serializer.py':'from core import encode\ndef serialize(value):\n    return {encode(value): value}\n'},
+   changed:'def encode(value, as_list=True):\n    return [str(value)] if as_list else str(value)\n',
+   reference:'Default output becomes list. Untouched serializer.serialize uses encode(value) as a dictionary key, introducing unhashable-list TypeError.', probe:'from serializer import serialize\nprint(serialize(7))',baseOutput:"{'7': 7}",headError:'TypeError' },
+ { id:'N1-compatible-optional', positive:false, changedPath:'core.py', entity:'normalize_key', relevantPath:'cache.py',
+   initial:{'core.py':'def normalize_key(key):\n    return key.strip().lower()\n','cache.py':'from core import normalize_key\nCACHE = {"ready": 1}\ndef lookup(key):\n    return CACHE[normalize_key(key)]\n'},
+   changed:'def normalize_key(key, preserve_case=False):\n    return key.strip() if preserve_case else key.strip().lower()\n',
+   reference:'New optional preserve_case defaults false, preserving the existing one-argument caller behavior. No introduced defect.',probe:'from cache import lookup\nprint(lookup(" READY "))',baseOutput:'1',headOutput:'1' },
+ { id:'N2-compatible-explicit', positive:false, changedPath:'core.py', entity:'encode', relevantPath:'serializer.py',
+   initial:{'core.py':'def encode(value, as_list=False):\n    return [str(value)] if as_list else str(value)\n','serializer.py':'from core import encode\ndef serialize(value):\n    return {encode(value, as_list=False): value}\n'},
+   changed:'def encode(value, as_list=True):\n    return [str(value)] if as_list else str(value)\n',
+   reference:'Default changes to list, but the sole untouched caller explicitly requests as_list=False. Its dictionary key remains a string. No introduced defect.',probe:'from serializer import serialize\nprint(serialize(7))',baseOutput:"{'7': 7}",headOutput:"{'7': 7}" },
+];

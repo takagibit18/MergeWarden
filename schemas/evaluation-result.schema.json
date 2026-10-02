@@ -1,0 +1,6 @@
+{
+ "$schema":"https://json-schema.org/draft/2020-12/schema","title":"Evaluation run and semantic adjudication",
+ "type":"object","required":["schemaVersion","kind","corpusSha256","runs"],
+ "properties":{"schemaVersion":{"const":1},"kind":{"enum":["live-model","scripted-offline"]},"corpusSha256":{"type":"string","pattern":"^[a-f0-9]{64}$"},"runs":{"type":"array","items":{"type":"object","required":["runKey","caseId","arm","repeat","snapshotId","status","delivered","findings","elapsedMs"],"properties":{"runKey":{"type":"string"},"caseId":{"type":"string"},"arm":{"enum":["text-only","text+graph"]},"repeat":{"type":"integer","minimum":0},"snapshotId":{"type":"string"},"status":{"type":"string"},"delivered":{"type":"boolean"},"findings":{"type":"array"},"elapsedMs":{"type":"number","minimum":0}}}}},
+ "$defs":{"mapping":{"type":"object","required":["runKey","status","reviewer","predictions"],"properties":{"runKey":{"type":"string"},"status":{"enum":["pending","complete"]},"reviewer":{"type":"string"},"predictions":{"type":"array","items":{"type":"object","required":["predictionId","goldenId","rationale"],"properties":{"predictionId":{"type":"string"},"goldenId":{"type":["string","null"]},"rationale":{"type":"string"}}}}}}}
+}

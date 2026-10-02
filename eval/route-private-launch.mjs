@@ -1,0 +1,15 @@
+import {mkdir,realpath} from 'node:fs/promises';
+import {resolve,join} from 'node:path';
+import {spawnSync} from 'node:child_process';
+import assert from 'node:assert/strict';
+import {read,save,checkIdentities} from './candidate-dataset-context.mjs';
+const out=resolve(process.argv[2]),repo=resolve(import.meta.dirname,'..'),workspace=resolve(out,'../..');
+const {plans}=await read(join(out,'universe.json'));
+const phase=join(out,'phase-b');await mkdir(phase,{recursive:true});
+const allowed=[out,join(repo,'eval'),join(repo,'src'),join(repo,'package.json'),join(workspace,'output/realgolden40-closure/corpus-v1-final/hidden'),join(workspace,'output/realgolden40-closure/corpus-v1-final/audit')];
+allowed.push(join(repo,'node_modules'),await realpath(join(repo,'node_modules')));
+for(const p of plans.filter(p=>p.group!=='CLEAN_CONTROL'))allowed.push(join(p.state,'graphs'),join(p.state,'snapshots',p.snapshotId+'.json'));
+await save(join(out,'phase-b-access-policy.json'),{read:[...new Set(allowed)],write:[phase],phaseAFilesReadOnly:true,networkAllowed:false,childProcessAllowed:false});
+const args=['--experimental-strip-types','--permission',...[...new Set(allowed)].map(p=>'--allow-fs-read='+p),'--allow-fs-write='+phase,join(repo,'eval/route-private-material.mjs'),out];
+const result=spawnSync(process.execPath,args,{cwd:repo,encoding:'utf8',maxBuffer:2e6});process.stdout.write(result.stdout??'');process.stderr.write(result.stderr??'');assert.equal(result.status,0);
+await checkIdentities((await read(join(out,'phase-a-v2/diagnostic-freeze.json'))).files);

@@ -1,0 +1,6 @@
+import test from 'node:test';import assert from 'node:assert/strict';
+import {progressiveWalk,STRUCTURAL_PATTERNS} from '../src/experiments/locagent/patterns.ts';
+test('optional progressive telemetry preserves every result and records actual mismatch and beam drop',()=>{
+ const symbols=Array.from({length:8},(_,i)=>({id:String(i),snapshotId:'s',name:String(i),path:i+'.py',kind:'function',qualifiedName:String(i),startLine:1,endLine:2})),edges=symbols.slice(1).map((s,i)=>({id:'e'+i,fromId:'0',toId:s.id,relation:i===6?'IMPORTS':'CALLS',resolution:'resolved_scoped'})),access={entity:id=>symbols.find(s=>s.id===id),compare:(a,b)=>a.id.localeCompare(b.id),neighbors:(id,dir)=>edges.filter(e=>(dir==='upstream'?e.toId:e.fromId)===id)},budget={maxVisitedNodes:30,maxVisitedEdges:200,maxExpandedStates:200},events=[];
+ const a=progressiveWalk([symbols[0]],STRUCTURAL_PATTERNS,budget,4,access),b=progressiveWalk([symbols[0]],STRUCTURAL_PATTERNS,budget,4,access,undefined,e=>events.push(e));assert.deepEqual(a,b);assert.equal(events.filter(e=>e.decision==='INSPECTED').length,b.visitedEdges);assert.ok(events.some(e=>e.decision==='SKIPPED_PATTERN_MISMATCH'));assert.equal(events.filter(e=>e.decision==='FRONTIER_DROPPED').length,b.frontierDropped);assert.ok(events.every(e=>Number.isInteger(e.stepIndex)&&e.state.patternId&&e.direction));
+});
