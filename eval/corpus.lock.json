@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "sha256": "07491d7803a4a25ded06e58d4acfae052e6ec2bd7575cff9867c9adf0c9f62d9",
+  "frozenBeforeModelRuns": true,
+  "freezeScope": "r2 model runs only; author has seen r1 results"
+}

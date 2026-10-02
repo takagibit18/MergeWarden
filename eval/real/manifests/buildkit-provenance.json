@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "source": "User-provided mergewarden-realgolden40-buildkit/mergewarden-realgolden40",
+  "upstreamFiles": {
+    "tools/realgolden.py": "78d3e386d6812c3df626b78c9917ad20aee0c7dc1386ca9aedd1351950e53d9b",
+    "tests/test_realgolden.py": "e337f361e5e00a68cac2415854db892bdad028945973a420004384aba87d1d34",
+    "manifests/sources.lock.json": "5679d720df28b11d2706832464534414590fe5e6ca11bb210295f26b43b399b8",
+    "manifests/candidates40.json": "e756906a2c2ce02b8255322e0885b4a59cfa3d3c8af868bb1c95b98b711701bd",
+    "manifests/protocol.json": "984fcaca3dbe80d314dae5a656a1e0c783775ad2afcbf5d76851a8ccfcb0c926"
+  },
+  "adaptations": [
+    "Stage 3 lock corrected against unchanged pinned Git tree",
+    "Explicit diff-scope and evidence/severity admission",
+    "Strict false label plus explicit empty changes",
+    "Profile identity binding and path hardening",
+    "Original-object adapter and offline Pi preflight"
+  ],
+  "projectCodeExecuted": false,
+  "sourceDataRedistributed": false
+}

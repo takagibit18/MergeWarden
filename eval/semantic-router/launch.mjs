@@ -1,0 +1,14 @@
+import {mkdir,realpath} from 'node:fs/promises';
+import {join,resolve} from 'node:path';
+import {spawn} from 'node:child_process';
+import assert from 'node:assert/strict';
+import {read,save,checkIdentities} from '../candidate-dataset-context.mjs';
+const out=resolve(process.argv[2]),mode=process.argv[3]??'primary',repo=resolve(import.meta.dirname,'../..');assert.ok(['primary','secondary'].includes(mode));
+const freeze=await read(join(out,'experiment-freeze.json'));await checkIdentities([...freeze.publicFiles,...freeze.privateFiles,...freeze.sourceInputs,...freeze.implementation]);
+const config=await read(join(out,'model-config.json'));assert.ok(process.env[config.apiKeyEnv]?.trim(),'Explicit API key env missing');
+const directory=join(out,mode);await mkdir(directory,{recursive:true});
+const allowed=[join(out,'experiment-freeze.json'),...freeze.publicFiles.map(i=>i.path),...freeze.implementation.map(i=>i.path),join(repo,'eval/semantic-router'),join(repo,'eval/candidate-dataset-context.mjs'),join(repo,'src'),join(repo,'integrations/pi'),await realpath(join(repo,'integrations/pi/node_modules')),join(repo,'node_modules'),await realpath(join(repo,'node_modules')),join(repo,'package.json'),directory];
+if(mode==='secondary')allowed.push(join(out,'gate.json'),join(out,'prediction-freeze.json'),join(out,'primary'));
+await save(join(out,mode+'-access-policy.json'),{read:allowed,write:[directory],privateManifestReadable:false,privateAuditReadable:false,modelNetwork:'BigModel endpoint only, guarded by runtime fetch',childProcesses:false});
+const args=['--experimental-strip-types','--permission',...allowed.map(p=>'--allow-fs-read='+p),'--allow-fs-write='+directory,join(repo,'eval/semantic-router/runner.mjs'),out,mode];
+const child=spawn(process.execPath,args,{cwd:repo,env:process.env,stdio:'inherit'});const code=await new Promise((resolve,reject)=>{child.on('error',reject);child.on('exit',resolve);});assert.equal(code,0);await checkIdentities([...freeze.publicFiles,...freeze.privateFiles,...freeze.sourceInputs,...freeze.implementation]);

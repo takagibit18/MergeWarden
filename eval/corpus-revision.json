@@ -1,0 +1,472 @@
+{
+  "schemaVersion": 1,
+  "corpusId": "controlled-python-v02-20-r2",
+  "corpusSha256": "07491d7803a4a25ded06e58d4acfae052e6ec2bd7575cff9867c9adf0c9f62d9",
+  "predecessor": {
+    "corpusId": "controlled-python-v02-20",
+    "sha256": "ef748a3c5916190857e5cb8e4753b23274f7206833ada681763dd328b2b44939",
+    "archive": "corpora/controlled-python-v02-20"
+  },
+  "review": {
+    "kind": "agent_static_review",
+    "independent": false,
+    "humanAttestation": false,
+    "priorModelResultsSeen": true,
+    "modelRunsOnThisRevision": 0,
+    "pythonExecuted": false
+  },
+  "rationale": "User authorized repairing source-audit defects, scope ambiguity, severity inflation and weak/repeated fixtures. No r1 results are rescored or represented as r2 results.",
+  "severityRubric": {
+    "medium": "Confirmed behavioral regression without demonstrated critical production/security scope.",
+    "high": "Direct erroneous deletion or complete reversal of an explicit API data-visibility invariant; contextual severity remains provisional."
+  },
+  "limitations": [
+    "Controlled 1-3-file repositories; not a representative real-project corpus.",
+    "Graph-oriented structures and readable names/comments can favor different retrieval strategies.",
+    "clean-alias remains an easier control; no blanket claim that all eight negatives are difficult.",
+    "The cross-units/clean-conversion pair intentionally shares a family; outcomes across cases are not independent.",
+    "Seen-r1-results revision is not an independent holdout and does not establish Graph quality gains."
+  ],
+  "cases": [
+    {
+      "caseId": "single-zero",
+      "predecessorCaseId": "single-zero",
+      "previousBaseSha": "8a3d355b5f6b5997901d796aa869f0de3a3050b1",
+      "previousHeadSha": "feaf587a864ca1bf32be52c7df2318de537aa493",
+      "baseSha": "8a3d355b5f6b5997901d796aa869f0de3a3050b1",
+      "headSha": "feaf587a864ca1bf32be52c7df2318de537aa493",
+      "sourceChanged": false,
+      "reason": "Keep the confirmed defect and concrete trigger; apply the reviewed severity rubric and explicit Agent provenance.",
+      "severity": {
+        "before": "high",
+        "after": "medium",
+        "rationale": "可确认公开函数在合法输入上异常，未提供生产关键路径、影响规模或不可恢复损失。"
+      },
+      "provenance": {
+        "status": "agent_reviewed",
+        "reviewerKind": "agent",
+        "humanReviewed": false,
+        "independent": false,
+        "priorModelResultsSeen": true
+      }
+    },
+    {
+      "caseId": "single-expiry",
+      "predecessorCaseId": "single-expiry",
+      "previousBaseSha": "ce7ec7e2adf1bbe08842bd996650579adbbb8772",
+      "previousHeadSha": "6dca07fc9e1b97b9097644319dbe213f9406aed5",
+      "baseSha": "ce7ec7e2adf1bbe08842bd996650579adbbb8772",
+      "headSha": "6dca07fc9e1b97b9097644319dbe213f9406aed5",
+      "sourceChanged": false,
+      "reason": "Keep the confirmed defect and concrete trigger; apply the reviewed severity rubric and explicit Agent provenance.",
+      "severity": {
+        "before": "high",
+        "after": "medium",
+        "rationale": "有 token 过期语义，但没有鉴权调用链、时钟粒度或暴露范围；high 需更多真实影响依据。"
+      },
+      "provenance": {
+        "status": "agent_reviewed",
+        "reviewerKind": "agent",
+        "humanReviewed": false,
+        "independent": false,
+        "priorModelResultsSeen": true
+      }
+    },
+    {
+      "caseId": "single-default",
+      "predecessorCaseId": "single-default",
+      "previousBaseSha": "47cf9799174eaafbe7d7a648711deea96bdfe268",
+      "previousHeadSha": "94eb4f7fae06112b9f74d14d8563d55ad14eaa62",
+      "baseSha": "47cf9799174eaafbe7d7a648711deea96bdfe268",
+      "headSha": "94eb4f7fae06112b9f74d14d8563d55ad14eaa62",
+      "sourceChanged": false,
+      "reason": "Keep the confirmed defect and concrete trigger; apply the reviewed severity rubric and explicit Agent provenance.",
+      "severity": {
+        "before": "high",
+        "after": "medium",
+        "rationale": "确认跨调用状态污染，未显示跨用户、安全隔离或持久化损害。"
+      },
+      "provenance": {
+        "status": "agent_reviewed",
+        "reviewerKind": "agent",
+        "humanReviewed": false,
+        "independent": false,
+        "priorModelResultsSeen": true
+      }
+    },
+    {
+      "caseId": "single-falsey",
+      "predecessorCaseId": "single-falsey",
+      "previousBaseSha": "8b5124297a2e6915d0fe7ab23cc27590711a3bb2",
+      "previousHeadSha": "e042d5998f8248282a800d836b5c0266f7eb949a",
+      "baseSha": "8b5124297a2e6915d0fe7ab23cc27590711a3bb2",
+      "headSha": "e042d5998f8248282a800d836b5c0266f7eb949a",
+      "sourceChanged": false,
+      "reason": "Keep the confirmed defect and concrete trigger; apply the reviewed severity rubric and explicit Agent provenance.",
+      "severity": {
+        "before": "high",
+        "after": "medium",
+        "rationale": "确认行为回归；没有下游访问控制或资源耗尽的证据。"
+      },
+      "provenance": {
+        "status": "agent_reviewed",
+        "reviewerKind": "agent",
+        "humanReviewed": false,
+        "independent": false,
+        "priorModelResultsSeen": true
+      }
+    },
+    {
+      "caseId": "cross-units",
+      "predecessorCaseId": "cross-units",
+      "previousBaseSha": "fe6bc35417570e9e5fa5e31419e0687aa984e94a",
+      "previousHeadSha": "d805a390cc23fb41b14e4de328eb2a6eaf4243f1",
+      "baseSha": "fe6bc35417570e9e5fa5e31419e0687aa984e94a",
+      "headSha": "d805a390cc23fb41b14e4de328eb2a6eaf4243f1",
+      "sourceChanged": false,
+      "reason": "Keep the confirmed defect and concrete trigger; apply the reviewed severity rubric and explicit Agent provenance.",
+      "severity": {
+        "before": "high",
+        "after": "medium",
+        "rationale": "计时单位错误成立，具体服务可用性后果未给出。"
+      },
+      "provenance": {
+        "status": "agent_reviewed",
+        "reviewerKind": "agent",
+        "humanReviewed": false,
+        "independent": false,
+        "priorModelResultsSeen": true
+      }
+    },
+    {
+      "caseId": "cross-key",
+      "predecessorCaseId": "cross-key",
+      "previousBaseSha": "49035ac26cb2216cae221fc9404fd679d96ca562",
+      "previousHeadSha": "13bd76ed2f50057b8a2091a70225509aa73615be",
+      "baseSha": "49035ac26cb2216cae221fc9404fd679d96ca562",
+      "headSha": "13bd76ed2f50057b8a2091a70225509aa73615be",
+      "sourceChanged": false,
+      "reason": "Keep the confirmed defect and concrete trigger; apply the reviewed severity rubric and explicit Agent provenance.",
+      "severity": {
+        "before": "high",
+        "after": "medium",
+        "rationale": "可复现入口异常，未提供关键生产路径影响。"
+      },
+      "provenance": {
+        "status": "agent_reviewed",
+        "reviewerKind": "agent",
+        "humanReviewed": false,
+        "independent": false,
+        "priorModelResultsSeen": true
+      }
+    },
+    {
+      "caseId": "cross-optional",
+      "predecessorCaseId": "cross-optional",
+      "previousBaseSha": "64b5aca5da5e02f1658a502d2b2bf77ef53dacce",
+      "previousHeadSha": "4d1043e4ff01b88651ada63b5a1303fc0cdf2849",
+      "baseSha": "64b5aca5da5e02f1658a502d2b2bf77ef53dacce",
+      "headSha": "4d1043e4ff01b88651ada63b5a1303fc0cdf2849",
+      "sourceChanged": false,
+      "reason": "Keep the confirmed defect and concrete trigger; apply the reviewed severity rubric and explicit Agent provenance.",
+      "severity": {
+        "before": "high",
+        "after": "medium",
+        "rationale": "合法缺失输入崩溃，未证明更广泛系统影响。"
+      },
+      "provenance": {
+        "status": "agent_reviewed",
+        "reviewerKind": "agent",
+        "humanReviewed": false,
+        "independent": false,
+        "priorModelResultsSeen": true
+      }
+    },
+    {
+      "caseId": "cross-sentinel",
+      "predecessorCaseId": "cross-sentinel",
+      "previousBaseSha": "f064e561e9f6a5feea5a6c112b0d2a8e7d00d22c",
+      "previousHeadSha": "c7140df7242e1ad46badbafdb40c119d6cf70dd4",
+      "baseSha": "f064e561e9f6a5feea5a6c112b0d2a8e7d00d22c",
+      "headSha": "c7140df7242e1ad46badbafdb40c119d6cf70dd4",
+      "sourceChanged": false,
+      "reason": "Keep the confirmed defect and concrete trigger; apply the reviewed severity rubric and explicit Agent provenance.",
+      "severity": {
+        "before": "high",
+        "after": "high",
+        "rationale": "high 可由直接破坏调用者数据的操作支撑，但没有证据说明已持久化或不可恢复；此为审阅建议。"
+      },
+      "provenance": {
+        "status": "agent_reviewed",
+        "reviewerKind": "agent",
+        "humanReviewed": false,
+        "independent": false,
+        "priorModelResultsSeen": true
+      }
+    },
+    {
+      "caseId": "multihop-retry",
+      "predecessorCaseId": "multihop-units",
+      "previousBaseSha": "2655257935db08c33735978582e49014325d9b83",
+      "previousHeadSha": "b926a1f2e3c30fd1375c74dcca14bdb925f33d6e",
+      "baseSha": "5517fe62c98998ffe0f50e67e13b506eb234ed27",
+      "headSha": "7667d5d01886a55bfa8a9c48eea3a09e04b88f8c",
+      "sourceChanged": true,
+      "reason": "Replace the duplicate multihop-units family with a two-hop retry-count off-by-one; retire the old ID in this corpus.",
+      "severity": {
+        "before": "high",
+        "after": "medium",
+        "rationale": "数值回归成立，但生产超时影响尚无证据。"
+      },
+      "provenance": {
+        "status": "agent_reviewed",
+        "reviewerKind": "agent",
+        "humanReviewed": false,
+        "independent": false,
+        "priorModelResultsSeen": true
+      }
+    },
+    {
+      "caseId": "multihop-filter",
+      "predecessorCaseId": "multihop-filter",
+      "previousBaseSha": "248df722b4b25fae2574a800cf43804dab5a67d3",
+      "previousHeadSha": "cf69e4860a340307be6ea093c5ca22b49dac5f3f",
+      "baseSha": "248df722b4b25fae2574a800cf43804dab5a67d3",
+      "headSha": "cf69e4860a340307be6ea093c5ca22b49dac5f3f",
+      "sourceChanged": false,
+      "reason": "Keep the confirmed defect and concrete trigger; apply the reviewed severity rubric and explicit Agent provenance.",
+      "severity": {
+        "before": "high",
+        "after": "high",
+        "rationale": "high 可由显式禁止输出的数据被返回且正常集合整体筛反支撑；仍是缺少真实业务背景的暂定等级。"
+      },
+      "provenance": {
+        "status": "agent_reviewed",
+        "reviewerKind": "agent",
+        "humanReviewed": false,
+        "independent": false,
+        "priorModelResultsSeen": true
+      }
+    },
+    {
+      "caseId": "alias-normalize",
+      "predecessorCaseId": "alias-normalize",
+      "previousBaseSha": "c8d998edb2e1a748f35170eea16a6c6eb87d63da",
+      "previousHeadSha": "7485f1ad8ef1676789bcb94a41c7c82516dde7d3",
+      "baseSha": "c8d998edb2e1a748f35170eea16a6c6eb87d63da",
+      "headSha": "7485f1ad8ef1676789bcb94a41c7c82516dde7d3",
+      "sourceChanged": false,
+      "reason": "Keep the confirmed defect and concrete trigger; apply the reviewed severity rubric and explicit Agent provenance.",
+      "severity": {
+        "before": "high",
+        "after": "medium",
+        "rationale": "大小写输入回归造成查找失败，没有认证或权限影响证据。"
+      },
+      "provenance": {
+        "status": "agent_reviewed",
+        "reviewerKind": "agent",
+        "humanReviewed": false,
+        "independent": false,
+        "priorModelResultsSeen": true
+      }
+    },
+    {
+      "caseId": "scope-boundary",
+      "predecessorCaseId": "scope-boundary",
+      "previousBaseSha": "83c311043c60a078330544de508ed33515cfe755",
+      "previousHeadSha": "11db3caf56f64e308d711cfd15ee2b555204069f",
+      "baseSha": "83c311043c60a078330544de508ed33515cfe755",
+      "headSha": "11db3caf56f64e308d711cfd15ee2b555204069f",
+      "sourceChanged": false,
+      "reason": "Keep the confirmed defect and concrete trigger; apply the reviewed severity rubric and explicit Agent provenance.",
+      "severity": {
+        "before": "high",
+        "after": "medium",
+        "rationale": "规则放宽可证明，缺少业务风险上下文。"
+      },
+      "provenance": {
+        "status": "agent_reviewed",
+        "reviewerKind": "agent",
+        "humanReviewed": false,
+        "independent": false,
+        "priorModelResultsSeen": true
+      }
+    },
+    {
+      "caseId": "clean-guard",
+      "predecessorCaseId": "clean-guard",
+      "previousBaseSha": "019f6f485698aa9a1dd2ace9e88e67a956373f31",
+      "previousHeadSha": "57c41c67a157e3ade9dd118999560c02ae3b55d2",
+      "baseSha": "fb406f33227c28220f1309fd914cf2c671c3387c",
+      "headSha": "27302df990500d44bdef9fb20fe7034b7f5a7836",
+      "sourceChanged": true,
+      "reason": "Replace the invalid guard-only negative with real caller normalization; positive fractional inputs remain supported. Both frozen revisions change.",
+      "severity": {
+        "before": "none",
+        "after": "none",
+        "rationale": "No defect at the explicitly documented public boundary; private helper behavior is not a promised API."
+      },
+      "provenance": {
+        "status": "agent_reviewed",
+        "reviewerKind": "agent",
+        "humanReviewed": false,
+        "independent": false,
+        "priorModelResultsSeen": true
+      }
+    },
+    {
+      "caseId": "clean-key-migration",
+      "predecessorCaseId": "clean-key-migration",
+      "previousBaseSha": "81c70c85daf1572c16db3d96552123d9f48da698",
+      "previousHeadSha": "f7e199ac07ab02ec4a815c5df7b695e46a6f528f",
+      "baseSha": "8657d568ef43ce65df92025636c111531e740a26",
+      "headSha": "3ce88ec5cb6c02c5b3662c68f2bfa7ba6b43a5aa",
+      "sourceChanged": true,
+      "reason": "Declare the public entrypoint and private producer in source, rather than assuming an unstated closed-world API.",
+      "severity": {
+        "before": "none",
+        "after": "none",
+        "rationale": "No defect at the explicitly documented public boundary; private helper behavior is not a promised API."
+      },
+      "provenance": {
+        "status": "agent_reviewed",
+        "reviewerKind": "agent",
+        "humanReviewed": false,
+        "independent": false,
+        "priorModelResultsSeen": true
+      }
+    },
+    {
+      "caseId": "clean-shadow",
+      "predecessorCaseId": "clean-shadow",
+      "previousBaseSha": "ee7f04850e9e1a297bca6ecf869994ec9a97c328",
+      "previousHeadSha": "782b231cc98fecd8707cd8ff7124bb7e5dec7b7d",
+      "baseSha": "d6cff5c1ec6ca3aeed8d740dbeef513d8df79dc8",
+      "headSha": "15913fa3a5cd4184cfbeab4be0478b6a5926ef9f",
+      "sourceChanged": true,
+      "reason": "Replace a trivially equivalent expression with a real unused-helper change; lexical binding now matters.",
+      "severity": {
+        "before": "none",
+        "after": "none",
+        "rationale": "No defect at the explicitly documented public boundary; private helper behavior is not a promised API."
+      },
+      "provenance": {
+        "status": "agent_reviewed",
+        "reviewerKind": "agent",
+        "humanReviewed": false,
+        "independent": false,
+        "priorModelResultsSeen": true
+      }
+    },
+    {
+      "caseId": "clean-alias",
+      "predecessorCaseId": "clean-alias",
+      "previousBaseSha": "eb1270f910e7a25de63582755ac75ecc4cd4cf01",
+      "previousHeadSha": "a9f8a36956504c728c0de6bfd0267cf90d62bdb3",
+      "baseSha": "442793978ba7fe0ace96bdf20252efb106c7d39d",
+      "headSha": "6ea0a02402ea899ffe7a01c7b828e717d8b61530",
+      "sourceChanged": true,
+      "reason": "Make the alias private and declare the package public API in both snapshots; retain as an easier control rather than overstate difficulty.",
+      "severity": {
+        "before": "none",
+        "after": "none",
+        "rationale": "No defect at the explicitly documented public boundary; private helper behavior is not a promised API."
+      },
+      "provenance": {
+        "status": "agent_reviewed",
+        "reviewerKind": "agent",
+        "humanReviewed": false,
+        "independent": false,
+        "priorModelResultsSeen": true
+      }
+    },
+    {
+      "caseId": "clean-none",
+      "predecessorCaseId": "clean-none",
+      "previousBaseSha": "84f1c1d47c408e438db3ffb2f74bc2b5734ed26c",
+      "previousHeadSha": "cf8fa19e201a4d2cb594240171130c982bcd4970",
+      "baseSha": "84f1c1d47c408e438db3ffb2f74bc2b5734ed26c",
+      "headSha": "cf8fa19e201a4d2cb594240171130c982bcd4970",
+      "sourceChanged": false,
+      "reason": "Keep the valid clean control: the explicit None-or-positive-integer domain and validation guard make falsey defaulting equivalent.",
+      "severity": {
+        "before": "none",
+        "after": "none",
+        "rationale": "No defect at the explicitly documented public boundary; private helper behavior is not a promised API."
+      },
+      "provenance": {
+        "status": "agent_reviewed",
+        "reviewerKind": "agent",
+        "humanReviewed": false,
+        "independent": false,
+        "priorModelResultsSeen": true
+      }
+    },
+    {
+      "caseId": "clean-conversion",
+      "predecessorCaseId": "clean-conversion",
+      "previousBaseSha": "aed4eb8812eed9b9d76ed239071720bc15d88f01",
+      "previousHeadSha": "d157ed426fdcfc3442f9a389064e39edbed422d6",
+      "baseSha": "6541dda112fae5f12dafdcb657d1df2de112fccb",
+      "headSha": "19afecb47882b6df3405c6c8705a0a367576811c",
+      "sourceChanged": true,
+      "reason": "Declare private conversion and public entrypoints; retain as a compensating-change negative paired with cross-units.",
+      "severity": {
+        "before": "none",
+        "after": "none",
+        "rationale": "No defect at the explicitly documented public boundary; private helper behavior is not a promised API."
+      },
+      "provenance": {
+        "status": "agent_reviewed",
+        "reviewerKind": "agent",
+        "humanReviewed": false,
+        "independent": false,
+        "priorModelResultsSeen": true
+      }
+    },
+    {
+      "caseId": "clean-empty",
+      "predecessorCaseId": "clean-empty",
+      "previousBaseSha": "99ba869d6d47ba4bdcc1b3adbeb49630d7ac3b62",
+      "previousHeadSha": "af98e184a20223aef02dfffe512539fd4eed17e1",
+      "baseSha": "950bac585b8eb6cfa1fa39814f33333fe3820307",
+      "headSha": "e4a8c58d6a71ac4136903efceac11919caea8582",
+      "sourceChanged": true,
+      "reason": "Replace an equivalent len/truthiness rewrite with removal of a redundant guard that requires checking its caller.",
+      "severity": {
+        "before": "none",
+        "after": "none",
+        "rationale": "No defect at the explicitly documented public boundary; private helper behavior is not a promised API."
+      },
+      "provenance": {
+        "status": "agent_reviewed",
+        "reviewerKind": "agent",
+        "humanReviewed": false,
+        "independent": false,
+        "priorModelResultsSeen": true
+      }
+    },
+    {
+      "caseId": "clean-default",
+      "predecessorCaseId": "clean-default",
+      "previousBaseSha": "2d6268b1b144d0b9f87865a5e647cd9972ef2f8d",
+      "previousHeadSha": "23c7aca248903f010369615c05cbab6dcba7875a",
+      "baseSha": "b49a7a1c4e2867421e26fcd36dd6b5966e2e68b9",
+      "headSha": "8a392b846680e2c37139751595b1c62d60246c2f",
+      "sourceChanged": true,
+      "reason": "Replace a trivial initialization rewrite with a mutable default that is never used by the declared public call path.",
+      "severity": {
+        "before": "none",
+        "after": "none",
+        "rationale": "No defect at the explicitly documented public boundary; private helper behavior is not a promised API."
+      },
+      "provenance": {
+        "status": "agent_reviewed",
+        "reviewerKind": "agent",
+        "humanReviewed": false,
+        "independent": false,
+        "priorModelResultsSeen": true
+      }
+    }
+  ]
+}

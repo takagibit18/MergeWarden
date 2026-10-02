@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "id": "python-empty-mean-v1",
+  "frozenBeforeModelEvaluation": true,
+  "versions": {
+    "base": {
+      "stats.py": "def mean(values):\n    if not values:\n        return 0\n    return sum(values) / len(values)\n",
+      "api.py": "from stats import mean\n\ndef summary(values):\n    return {\"mean\": mean(values)}\n"
+    },
+    "bug": {
+      "stats.py": "def mean(values):\n    return sum(values) / len(values)\n",
+      "api.py": "from stats import mean\n\ndef summary(values):\n    return {\"mean\": mean(values)}\n"
+    },
+    "fixed": {
+      "stats.py": "def mean(values):\n    if not values:\n        return 0\n    return sum(values) / len(values)\n",
+      "api.py": "from stats import mean\n\ndef summary(values):\n    return {\"mean\": mean(values)}\n"
+    }
+  },
+  "expected": {
+    "baseToBug": {"defect": "summary([]) raises ZeroDivisionError after the empty-input guard is removed", "evidencePath": "stats.py", "revision": "head", "line": 2},
+    "bugToFixed": {"sameDefectMustNotBeReported": true},
+    "scope": "One synthetic, predetermined smoke pair; not the later 20-case/3-public-project evaluation"
+  }
+}

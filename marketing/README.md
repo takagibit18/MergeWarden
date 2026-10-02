@@ -1,30 +1,23 @@
-# MergeWarden Marketing Site
+# MergeWarden V2 project site
 
-This is the deployable static marketing surface for MergeWarden. It is separate
-from the Python runtime, CLI, FastAPI app, and GitHub Actions implementation.
+This directory contains the static V2 product page. It shares the repository's
+current CLI, CodeGraph and Review Skills documentation and evaluation results.
+The page does not run the review engine or collect model credentials.
 
 ## Preview
 
-```powershell
-python -m http.server 4174 -d E:\PycharmProjects\Debug\marketing
+From the repository root:
+
+```sh
+python -m http.server 4174 --directory marketing
 ```
 
-Open `http://localhost:4174`.
+Open `http://localhost:4174`. Python is only needed for this optional local
+preview; the deployed HTML, CSS and JavaScript require no build or runtime.
 
 ## Deployment
 
-Use `marketing` as the Vercel project root. No build command is required; the
-directory is served as a static site.
-
-## Product Boundary
-
-The page presents MergeWarden as an advisory AI PR gatekeeper. It provides
-neutral soft checks, structured evidence, changed-line comments, and run
-summary artifacts. It must not claim to replace CI, auto-approve pull requests,
-or take over branch protection.
-
-## Design Source
-
-Figma concept: https://www.figma.com/design/rgAm606tvflaRqlkhsuSK7
-
-Asset details are documented in `../docs/marketing/figma-asset-spec.md`.
+Keep `marketing` as the existing Vercel project's root directory. Serve it as a
+static site with no install or build command. The review engine remains a local
+Node.js application; its CLI and MCP setup are documented in the root README
+and `integrations/mcp/README.md`.

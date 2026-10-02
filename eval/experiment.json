@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "provider": "bigmodel",
+  "modelId": "glm-5.3-flash",
+  "apiKeyEnvironment": "MERGEWARDEN_API_KEY",
+  "timeoutMs": 120000,
+  "maxToolCalls": 40,
+  "piVersion": "0.84.1",
+  "modelConfiguration": "Pi 0.84.1 in-memory defaults; effective thinking level, API, endpoint and maxTokens recorded and compared per pair",
+  "findingSchema": "FindingCandidate immutable source evidence; final_only",
+  "baselineCommit": "5422ba79c088d17fd3377e56c32e2ad90308706c",
+  "defaultSmokeCases": ["single-zero", "cross-key", "alias-normalize", "clean-guard"]
+}

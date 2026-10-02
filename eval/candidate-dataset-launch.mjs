@@ -1,0 +1,26 @@
+import {readdir,readFile,realpath,mkdir} from 'node:fs/promises';
+import {join,resolve,dirname} from 'node:path';
+import {execFileSync,spawnSync} from 'node:child_process';
+import assert from 'node:assert/strict';
+import {read,save,identity,checkIdentities,hash} from './candidate-dataset-context.mjs';
+const out=resolve(process.argv[2]),repo=resolve(import.meta.dirname,'..'),workspace=resolve(out,'../..');
+const {plans}=await read(join(out,'universe.json'));
+const sourceFiles=[];
+async function walk(dir){for(const d of await readdir(dir,{withFileTypes:true})){const p=join(dir,d.name);if(d.isDirectory())await walk(p);else if(/\.(ts|mjs|json)$/.test(d.name))sourceFiles.push(p);}}
+await walk(join(repo,'src'));await walk(join(repo,'integrations/pi/src'));
+const modules=['candidate-dataset-context.mjs','candidate-dataset-generate.mjs','candidate-dataset-prepare.mjs','candidate-dataset-launch.mjs','frontier-data.mjs','path-retention-replay.mjs'].map(n=>join(repo,'eval',n));
+const files=await Promise.all([...sourceFiles,...modules,join(repo,'package.json'),join(repo,'package-lock.json'),join(repo,'node_modules/snowball-stemmers/snowball-stemmers.js')].map(identity));
+const privatePaths=[join(workspace,'output/realgolden40-closure/corpus-v1-final/hidden/gold.jsonl'),join(workspace,'output/complex-graph-value-20260924/private/audit.json'),join(workspace,'bounded-structural-retrieval-v1/private/audit-v2.json'),join(out,'phase-b/scorer-identity.json')];
+await checkIdentities(await read(join(out,'frozen-inputs.json')));
+const implementation={commit:execFileSync('git',['rev-parse','HEAD'],{cwd:repo,encoding:'utf8'}).trim(),files,privatePaths,productRuntimeCommit:(await read(join(out,'protocol.json'))).runtimeCommit};
+await save(join(out,'implementation-freeze.json'),implementation);
+await mkdir(join(out,'phase-a'),{recursive:true});
+const allowed=[join(repo,'src'),join(repo,'integrations/pi/src'),join(repo,'integrations/pi/package.json'),join(repo,'node_modules'),await realpath(join(repo,'node_modules')), ...files.map(f=>f.path),join(out,'phase-a'),join(out,'protocol.json'),join(out,'universe.json'),join(out,'implementation-freeze.json')];
+for(const p of plans)allowed.push(join(p.state,'snapshots',p.snapshotId+'.json'),join(p.state,'graphs'),join(p.state,'blobs'));
+const args=['--experimental-strip-types','--permission',...[...new Set(allowed)].map(p=>'--allow-fs-read='+p),'--allow-fs-write='+join(out,'phase-a'),join(repo,'eval/candidate-dataset-generate.mjs'),out];
+await save(join(out,'phase-a-access-policy.json'),{readAllowlist:[...new Set(allowed)],writeAllowlist:[join(out,'phase-a')],privatePaths,spawnAllowed:false,networkAllowed:false,modelRuntimeCreated:false});
+const result=spawnSync(process.execPath,args,{cwd:repo,encoding:'utf8',maxBuffer:2*1024*1024});
+process.stdout.write(result.stdout??'');process.stderr.write(result.stderr??'');
+assert.equal(result.status,0,'Blind generation process failed');
+await checkIdentities(await read(join(out,'frozen-inputs.json')));await checkIdentities(files);
+await save(join(out,'post-generation-integrity.json'),{unchanged:true,checkedOriginals:(await read(join(out,'frozen-inputs.json'))).length,checkedImplementation:files.length,generationFreeze:await identity(join(out,'phase-a/generation-freeze.json'))});

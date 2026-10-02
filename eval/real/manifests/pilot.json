@@ -1,0 +1,48 @@
+{
+  "status": "pilot_only_not_scoring_gold",
+  "candidateIds": [
+    "RG-C006",
+    "RG-C034",
+    "RG-N-876d774b3723",
+    "RG-N-01caff1dd76a"
+  ],
+  "reason": "Two specific functional reference claims and two single-commit source-clean behavioral fixes in four repositories, chosen before graph/model results. Reserved from the formal set. Kit-suggested poetry/scrapy references concern formatting/test assertions, unsuitable as functional positive pilots.",
+  "tasks": [
+    {
+      "case_id": "RGP-001",
+      "repository": "networkx/networkx",
+      "repository_url": "https://github.com/networkx/networkx.git",
+      "base_sha": "e8fbdcb90391673132bae043c7e3c45b2cdedeba",
+      "reviewed_sha": "b2da108af7f70a507ed9232ea01466e972781d8a",
+      "language": "Python",
+      "review_context_policy": "repository-and-diff-only; no post-review discussion or hidden gold"
+    },
+    {
+      "case_id": "RGP-002",
+      "repository": "certbot/certbot",
+      "repository_url": "https://github.com/certbot/certbot.git",
+      "base_sha": "dedbdea1d9854761df9ba28d26e368bdd78d72c9",
+      "reviewed_sha": "01f570dbf4082bd1b9e0d3c876b9b1675fc4729d",
+      "language": "Python",
+      "review_context_policy": "repository-and-diff-only; no post-review discussion or hidden gold"
+    },
+    {
+      "case_id": "RGP-003",
+      "repository": "psf/requests",
+      "repository_url": "https://github.com/psf/requests.git",
+      "base_sha": "6cfbe1aedd56f8c2f9ff8b968efe65b22669795b",
+      "reviewed_sha": "a7aa86a933523a31e426d2e2aab01247c65ea87e",
+      "language": "Python",
+      "review_context_policy": "repository-and-diff-only; no post-review discussion or hidden gold"
+    },
+    {
+      "case_id": "RGP-004",
+      "repository": "pytest-dev/pytest",
+      "repository_url": "https://github.com/pytest-dev/pytest.git",
+      "base_sha": "dae74b674ecb660082271d8bbe0e42ccb925eaa5",
+      "reviewed_sha": "6e14585ca20d27db81f122d2c3a76135e4192fc4",
+      "language": "Python",
+      "review_context_policy": "repository-and-diff-only; no post-review discussion or hidden gold"
+    }
+  ]
+}

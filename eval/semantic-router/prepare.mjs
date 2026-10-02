@@ -1,0 +1,37 @@
+import {writeFile,readdir} from 'node:fs/promises';
+import {join,resolve} from 'node:path';
+import {execFileSync} from 'node:child_process';
+import assert from 'node:assert/strict';
+import {read,save,identity,checkIdentities} from '../candidate-dataset-context.mjs';
+import {projectInput,sha} from './input.mjs';
+import {SYSTEM_PROMPT,USER_TEMPLATE,userPrompt} from './prompt.mjs';
+import {MODEL_CONFIG,OUTPUT_SCHEMA} from './contracts.mjs';
+const out=resolve(process.argv[2]),previous=resolve(process.argv[3]),repo=resolve(import.meta.dirname,'../..'),experiment='semantic-router-shadow-1';
+const positive=await read(join(previous,'gray-zone/semantic-router-candidates.json')),negative=await read(join(previous,'gray-zone/hard-negatives.json')),oldFreeze=await read(join(previous,'phase-a-v2/diagnostic-freeze.json'));
+await checkIdentities(oldFreeze.files);await checkIdentities((await read(join(previous,'phase-b/private-freeze.json'))).inputs);
+const cases=[...positive.cases,...negative.cases];assert.equal(cases.length,7);assert.equal(new Set(cases.map(c=>c.caseId)).size,7);
+const diagnoses=await read(join(previous,'phase-b/private-labels.json')),replays=await read(join(previous,'phase-a-v2/route-replay.json'));
+cases.sort((a,b)=>sha(experiment+a.caseId).localeCompare(sha(experiment+b.caseId)));
+const manifest=[],hashes=[],order=[],publicFiles=[];
+for(const [i,c] of cases.entries()){
+  await checkIdentities([c.contextIdentity]);assert.equal(resolve(c.contextIdentity.path),resolve(c.preRouteContext.path));
+  const prefix=await read(c.contextIdentity.path),replay=replays.find(r=>r.caseId===c.caseId),diagnosis=diagnoses.find(d=>d.caseId===c.caseId);assert.ok(replay&&diagnosis);assert.equal(c.currentDeterministicOutcome,false);
+  const label=c.privateLabel==='should_escalate'?'SHOULD_ESCALATE':c.privateLabel==='no_escalation'?'SHOULD_NOT_ESCALATE':'UNCERTAIN';assert.equal(label,diagnosis.label);
+  const alias='R'+String(i+1).padStart(2,'0'),input=projectInput(alias,prefix,replay),prompt=userPrompt(input);assert.equal(prompt,userPrompt(structuredClone(input)));assert.ok(!prompt.includes(c.caseId));
+  const inputPath=join(out,'inputs',alias+'.json');await save(inputPath,input);const file=await identity(inputPath);publicFiles.push(file);hashes.push({caseId:alias,semanticRouteInputHash:sha(input),userPromptHash:sha(prompt),file});order.push(alias);
+  manifest.push({alias,caseId:c.caseId,label,diagnosisCategory:diagnosis.taxonomy,prefixKind:c.provenance,sourceContext:c.contextIdentity,semanticRouteInputHash:sha(input),deterministicOutcome:false,privateRationale:diagnosis.rationale});
+}
+assert.equal(manifest.filter(m=>m.label==='SHOULD_ESCALATE').length,2);assert.equal(manifest.filter(m=>m.label==='SHOULD_NOT_ESCALATE').length,5);
+await save(join(out,'dataset-manifest.json'),{experiment,sourceManifests:await Promise.all(['gray-zone/semantic-router-candidates.json','gray-zone/hard-negatives.json','phase-b/private-labels.json'].map(f=>identity(join(previous,f)))),cases:manifest});
+await save(join(out,'case-order.json'),{experiment,method:'ascending SHA256(experimentIdentity + originalCaseId); opaque aliases assigned after permutation',order});
+await save(join(out,'input-hashes.json'),hashes);await save(join(out,'model-config.json'),MODEL_CONFIG);await save(join(out,'schema.json'),OUTPUT_SCHEMA);
+await writeFile(join(out,'prompt.txt'),SYSTEM_PROMPT+'\n\nUSER TEMPLATE\n'+USER_TEMPLATE+'\n',{flag:'wx'});
+await save(join(out,'prompt-sha.json'),{systemPrompt:sha(SYSTEM_PROMPT),userPromptTemplate:sha(USER_TEMPLATE),schema:sha(OUTPUT_SCHEMA),modelConfig:sha(MODEL_CONFIG),file:await identity(join(out,'prompt.txt'))});
+const sourceInputs=await Promise.all(['gray-zone/semantic-router-candidates.json','gray-zone/hard-negatives.json','phase-a-v2/route-replay.json','phase-a-v2/diagnostic-freeze.json','phase-b/private-labels.json','universe.json','metrics.json'].map(f=>identity(join(previous,f))));sourceInputs.push(...manifest.map(c=>c.sourceContext));
+const protocol={experiment,baselineHead:execFileSync('git',['rev-parse','HEAD'],{cwd:repo,encoding:'utf8'}).trim(),sourceDiagnostic:'real-route-recall-diagnostic-1',cases:7,positive:2,negative:5,primary:'one independent first attempt per frozen case; SDK and experiment retries=0; no repair; no cross-case messages',input:'raw observed diff and changed-side source only; searches preserve queries and metadata but remove snippets; no private fields, source paths, graph, dispatch, prior assistant summaries or findings',model:MODEL_CONFIG,promptHash:sha(SYSTEM_PROMPT),outputSchema:OUTPUT_SCHEMA,gate:{positiveEscalate:2,negativeNoEscalationMinimum:4,falsePositiveMaximum:1,formatFailures:0},secondary:'Only if primary PASS after prediction freeze and scoring: exactly two further runs of every case, identical prompt/config/input. On primary FAIL or operational INCONCLUSIVE stop without repeats.',stability:'If repeats run: acceptable only if all seven cases have identical decisions in all three attempts. Primary never replaced by vote.',providerFailure:'Preserve each attempted error without retry; complete the seven first-attempt slots. Any provider failure makes capability INCONCLUSIVE, not model-quality FAIL.',hybrid:'Keep all existing deterministic routes; fill fallback only for the seven measured cases. Remaining no-route cases are semantic NOT_RUN, never inferred NO_ESCALATION.',cost:'Record observed provider token usage and elapsed call latency; no prices. SDK zero prices are not cost estimates.',boundaries:['no product code changes','no ReviewEngine','no tools','no dispatch or graph','no small model/Jev/second provider','no active routing'],labels:'Frozen previous single-agent development judgments; no relabeling; independent context input construction does not imply independent held-out data.',preparedAt:new Date().toISOString()};
+await save(join(out,'protocol.json'),protocol);
+const implementation=[];for(const name of(await readdir(import.meta.dirname)).filter(n=>n.endsWith('.mjs')).sort())implementation.push(await identity(join(import.meta.dirname,name)));
+for(const name of ['integrations/pi/src/runtime.ts','integrations/pi/src/bigmodel.ts','integrations/pi/src/model-catalog.ts','integrations/pi/src/models.json','integrations/pi/package-lock.json','integrations/pi/node_modules/@earendil-works/pi-coding-agent/dist/core/defaults.js'])implementation.push(await identity(join(repo,name)));
+for(const name of ['case-order.json','input-hashes.json','model-config.json','schema.json','prompt.txt','prompt-sha.json','protocol.json'])publicFiles.push(await identity(join(out,name)));
+const freeze={experiment,frozenAt:new Date().toISOString(),publicFiles,privateFiles:[await identity(join(out,'dataset-manifest.json'))],sourceInputs,implementation,apiKeyEnv:MODEL_CONFIG.apiKeyEnv,secretSerialized:false};
+await save(join(out,'experiment-freeze.json'),freeze);console.log(JSON.stringify({cases:7,inputBytes:publicFiles.slice(0,7).length,order,freeze:await identity(join(out,'experiment-freeze.json'))}));

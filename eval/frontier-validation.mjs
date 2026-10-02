@@ -1,0 +1,13 @@
+import {readFile,writeFile} from 'node:fs/promises';import {resolve,join} from 'node:path';import {pathToFileURL} from 'node:url';import assert from 'node:assert/strict';
+import {read,hash} from './frontier-data.mjs';
+import {STRUCTURAL_PATTERNS} from '../src/experiments/locagent/patterns.ts';
+import {selectCandidateSet} from '../src/experiments/locagent/candidate-set.ts';
+const out=resolve(process.argv[2]),ids=await read(join(out,'frozen-inputs.json')),oldPatterns=await import(pathToFileURL(join(out,'previous-patterns.ts')).href);
+assert.deepEqual(STRUCTURAL_PATTERNS,oldPatterns.STRUCTURAL_PATTERNS);
+const unchanged=[];for(const i of ids){if(i.path.endsWith('patterns.ts'))continue;unchanged.push({...i,unchanged:hash(await readFile(i.path))===i.sha256});}assert.ok(unchanged.every(i=>i.unchanged));
+const get=async suffix=>read(ids.find(i=>i.path.replaceAll('\\','/').endsWith(suffix)).path),units=await get('/candidate-selection-20260925/candidate-units.json'),prior=await get('/candidate-selection-20260925/selection-results.json'),selectorReplay=[];
+for(const u of units){const old=prior.find(p=>p.id===u.id),order=old.armA.selected.map(c=>c.terminalEntity.id),selected=selectCandidateSet(u.eligible,u.context,order);assert.deepEqual(selected,old.armB);selectorReplay.push({id:u.id,byteIdentical:JSON.stringify(selected)===JSON.stringify(old.armB)});}
+const code=await readFile(new URL('../src/experiments/locagent/deferred-frontier.ts',import.meta.url),'utf8');assert.ok(!/merge_attrs|xarray|sklearn|sympy|private\/|audit\.json|Golden|node:fs|PageRank|embedding/i.test(code));
+const a=await read(join(out,'metrics-a.json')),b=await read(join(out,'metrics-b.json')),rows=[];
+for(const arm of ['A','B']){const dir=join(out,arm==='A'?'arm-a-traces':'arm-b-traces'),metrics=arm==='A'?a:b;for(const m of metrics){const r=await read(join(dir,m.id+'.json'));assert.equal(r.inferredLaneLinks,0);const inspections=r.trace.filter(e=>e.decision==='INSPECTED');assert.equal(inspections.length,m.edgeInspections);assert.ok(r.trace.every(e=>e.stateId&&e.patternId&&Number.isInteger(e.stepIndex)&&e.direction));const budgetOk=r.searches.every(s=>s.visitedNodes<=30&&s.visitedEdges<=200&&s.expandedStates<=200);assert.ok(budgetOk);assert.ok(m.retention.maxParentsPerState<=2);rows.push({arm,id:m.id,budgetOk,exactLaneTelemetry:true,inspectionCountMatches:true,retentionCap:m.retention.maxParentsPerState});}}
+await writeFile(join(out,'frozen-contract-validation.json'),JSON.stringify({pass:true,patternsUnchanged:true,selectorReplay,unchanged,staticSchedulerAuditIsolation:true,rows},null,2)+'\n',{flag:'wx'});console.log(JSON.stringify({pass:true,frozenFiles:unchanged.length,selectorCases:selectorReplay.length}));

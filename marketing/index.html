@@ -1,615 +1,157 @@
 <!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta
-      name="description"
-      content="MergeWarden publishes advisory PR review signals backed by diffs, CI context, and traceable evidence."
-    />
-    <title>MergeWarden - Advisory review signals for pull requests</title>
-    <script>
-      window.GITHUB_REPO_URL = "https://github.com/takagibit18/MergeWarden";
-    </script>
-    <link rel="stylesheet" href="styles.css?v=20260601-hero-title-clip-r3" />
-  </head>
-  <body>
-    <div class="header-gradient-mask" aria-hidden="true"></div>
-
-    <header class="site-header" aria-label="Primary navigation">
-      <a class="site-header__about" href="https://www.seanhomepage.top/" target="_blank" rel="noopener">-&gt; About</a>
-
-      <a class="site-header__logo" href="#top" aria-label="MergeWarden home">
-        <svg class="site-header__logo-mark" viewBox="0 0 828 48" aria-hidden="true" focusable="false">
-          <defs>
-            <linearGradient id="mw-wordmark-silver" x1="0" y1="5" x2="0" y2="43" gradientUnits="userSpaceOnUse">
-              <stop offset="0" stop-color="#ffffff" />
-              <stop offset="0.48" stop-color="#f6f9ff" />
-              <stop offset="1" stop-color="#d8e5f5" />
-            </linearGradient>
-          </defs>
-          <g
-            fill="none"
-            stroke="url(#mw-wordmark-silver)"
-            stroke-width="8.6"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          >
-            <path d="M8 40V8H16L36 38L56 8H64V40" />
-            <path d="M88 8H136M88 24H126M88 40H136" />
-            <path d="M156 40V8H198Q210 8 210 19Q210 29 198 29H156M184 29L212 40" />
-            <path d="M292 8H250Q232 8 232 24Q232 40 250 40H292V29H268" />
-            <path d="M316 8H364M316 24H354M316 40H364" />
-            <path d="M384 8L400 40L418 13L436 40L452 8" />
-            <path d="M474 40L500 8L526 40" />
-            <path d="M548 40V8H590Q602 8 602 19Q602 29 590 29H548M576 29L604 40" />
-            <path d="M628 40V8H662Q690 8 690 24Q690 40 662 40H628" />
-            <path d="M714 8H762M714 24H752M714 40H762" />
-            <path d="M786 40V8L820 40V8" />
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f5f7">
+  <meta name="description" content="MergeWarden 2：以源码证据为中心的 AI 代码审查 CLI。连接 Python 跨文件依赖，保留不可变证据，让审查经验持续积累。">
+  <title>MergeWarden 2 — 看见变更之外</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231d1d1f'/%3E%3Cpath d='M9 8v6q0 5 7 5m7-11v6q0 5-7 5v5' stroke='white' stroke-width='2.5' fill='none'/%3E%3Ccircle cx='9' cy='8' r='2' fill='white'/%3E%3Ccircle cx='23' cy='8' r='2' fill='white'/%3E%3Ccircle cx='16' cy='24' r='2' fill='white'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="./style.css">
+  <script defer src="./app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到正文</a>
+  <header class="site-header">
+    <a class="brand" href="#" aria-label="MergeWarden 首页">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M9 6v8q0 6 7 6m7-14v8q0 6-7 6v6"/><circle cx="9" cy="6" r="2.2"/><circle cx="23" cy="6" r="2.2"/><circle cx="16" cy="26" r="2.2"/></svg>
+      <span>MergeWarden<span class="brand-version">2</span></span>
+    </a>
+    <nav class="desktop-nav" aria-label="主要导航"><a href="#graph">CodeGraph</a><a href="#evidence">源码证据</a><a href="#skills">Review Skills</a><a href="#performance">评测</a></nav>
+    <a class="header-cta" href="#start">快速开始</a>
+  </header>
+  <main id="main">
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <p class="eyebrow">EVIDENCE-FIRST CODE REVIEW</p>
+        <h1 id="hero-title">MergeWarden <span>2</span></h1>
+        <p class="hero-statement">看见变更之外。</p>
+        <p class="hero-description"><span>连接跨文件依赖。</span><span>让每条审查结论，回到源码。</span></p>
+        <div class="hero-actions"><a class="button button-dark" href="#graph">探索 CodeGraph</a><a class="button button-light" href="#start">在终端中开始</a></div>
+      </div>
+      <div class="hero-graph" role="img" aria-label="结构导航示意：从变更函数连接调用方、继承关系和导入关系，再回到源码证据">
+        <svg viewBox="0 0 1200 300" fill="none" aria-hidden="true">
+          <g stroke="#d3d5d9" stroke-width="1.2">
+            <path d="M60 180H210Q250 180 270 150L300 110H455Q520 110 570 150"/>
+            <path d="M180 45H350Q400 45 425 70L500 135Q540 165 600 165"/>
+            <path d="M120 270H325Q365 270 390 240L445 190Q485 165 600 165"/>
+            <path d="M600 165H710Q755 165 785 135L840 80H1050"/>
+            <path d="M600 165H880Q920 165 945 195L980 230H1150"/>
+            <path d="M750 165L825 255H985"/>
+            <path d="M840 80L880 35H1160"/>
+            <path d="M425 70V20H550"/>
           </g>
+          <path class="signal-path" d="M180 45H350Q400 45 425 70L500 135Q540 165 600 165H710Q755 165 785 135L840 80H1050" stroke="#1d1d1f" stroke-width="1.7"/>
+          <g class="graph-quiet" fill="#f5f5f7" stroke="#b6bbc3" stroke-width="1.2">
+            <circle cx="180" cy="45" r="5"/><circle cx="350" cy="45" r="5"/><circle cx="60" cy="180" r="5"/><circle cx="300" cy="110" r="5"/><circle cx="120" cy="270" r="5"/><circle cx="390" cy="240" r="5"/><circle cx="1050" cy="80" r="5"/><circle cx="1150" cy="230" r="5"/><circle cx="985" cy="255" r="5"/><circle cx="1160" cy="35" r="5"/><circle cx="550" cy="20" r="5"/>
+          </g>
+          <circle cx="600" cy="165" r="37" fill="#f5f5f7" stroke="#dadce0"/>
+          <circle cx="600" cy="165" r="22" fill="#1d1d1f"/>
+          <path d="M592 156v8q0 5 8 5m8-13v8q0 5-8 5v7" stroke="#fff" stroke-width="1.8"/>
+          <g fill="#777b83" font-family="Consolas, monospace" font-size="13"><text x="174" y="27">CALLER</text><text x="280" y="94">IMPORT</text><text x="1030" y="64">CALLEE</text><text x="965" y="212">INHERITS</text><text x="564" y="225" fill="#1d1d1f">CHANGE</text></g>
         </svg>
-      </a>
+        <p class="diagram-caption">一次变更，连接完整上下文。<span>结构导航示意</span></p>
+      </div>
+      <div class="hero-foot"><span>READ-ONLY BY DESIGN</span><span>POWERED BY Pi</span><span>BUILT FOR YOUR TERMINAL</span></div>
+    </section>
+    <section class="intro" aria-labelledby="intro-title"><div class="reveal"><p class="eyebrow">BEYOND THE DIFF</p><h2 id="intro-title">改动只有几行。<br><span>影响，可能在别处。</span></h2><p class="section-body">一次参数变化，可能影响调用方；一次继承调整，可能改变子类行为。<br class="desktop-break">MergeWarden 从 Git 变更出发，查找关联代码，核对实际行为。</p></div></section>
 
-      <a
-        class="site-header__cta"
-        href="https://github.com/takagibit18/MergeWarden"
-        target="_blank"
-        rel="noopener"
-        data-github-repo-link
-      >
-        <svg class="site-header__cta-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-          <path
-            fill="currentColor"
-            d="M12 2C6.48 2 2 6.58 2 12.25c0 4.53 2.87 8.37 6.84 9.73.5.09.68-.22.68-.49 0-.24-.01-.88-.01-1.73-2.78.62-3.37-1.37-3.37-1.37-.45-1.18-1.11-1.49-1.11-1.49-.91-.64.07-.63.07-.63 1 .07 1.53 1.06 1.53 1.06.9 1.57 2.35 1.12 2.92.86.09-.67.35-1.12.64-1.38-2.22-.26-4.56-1.14-4.56-5.08 0-1.12.39-2.04 1.03-2.76-.1-.26-.45-1.31.1-2.72 0 0 .84-.28 2.75 1.05A9.35 9.35 0 0 1 12 6.96c.85 0 1.7.12 2.5.34 1.91-1.33 2.75-1.05 2.75-1.05.55 1.41.2 2.46.1 2.72.64.72 1.03 1.64 1.03 2.76 0 3.95-2.34 4.81-4.57 5.07.36.32.68.94.68 1.9 0 1.37-.01 2.48-.01 2.82 0 .27.18.59.69.49A10.14 10.14 0 0 0 22 12.25C22 6.58 17.52 2 12 2Z"
-          />
-        </svg>
-        <span><span class="site-header__cta-label-prefix">Open on </span>GitHub</span>
-      </a>
-    </header>
-
-    <main id="top" class="hero-shell">
-      <section class="hero" aria-labelledby="hero-title">
-        <div class="hero__bg" aria-hidden="true">
-          <div class="hero__glow hero__glow--outer"></div>
-          <div class="hero__glow hero__glow--core"></div>
-          <div class="hero__glow hero__glow--lower-mist"></div>
-          <div class="hero__glow hero__glow--vignette"></div>
-        </div>
-
-        <h1
-          id="hero-title"
-          class="hero__title hero-title"
-          aria-label="Risk Intelligence for Pull Requests"
-          data-hero-typing-title
-        >
-          <span class="hero-title__line" data-hero-title-line="Risk Intelligence">
-            <span class="hero-title__text" aria-hidden="true"></span>
-          </span>
-          <span class="hero-title__line" data-hero-title-line="for Pull Requests">
-            <span class="hero-title__text" aria-hidden="true"></span>
-          </span>
-        </h1>
-
-        <div class="hero__topic" aria-label="Current topic">
-          <span>PR review evidence</span>
-          <span aria-hidden="true">&lt;-</span>
-        </div>
-
-        <div class="hero__edge-line" aria-hidden="true"></div>
-      </section>
-
-      <section class="mission-section" aria-labelledby="mission-title">
-        <div class="mission-section__inner">
-          <div class="mission-section__label">The Mission</div>
-          <div class="mission-section__line" aria-hidden="true"></div>
-          <h2 id="mission-title" class="mission-section__title">
-            <span>CI can pass while review risks</span>
-            <span>remain. Make them visible,</span>
-            <span>traceable, and advisory</span>
-          </h2>
-        </div>
-      </section>
-
-      <section class="problem-section" aria-labelledby="problem-title">
-        <div class="problem-section__inner">
-          <div class="problem-section__label">The Problem</div>
-          <div class="problem-section__line" aria-hidden="true"></div>
-          <h2 id="problem-title" class="problem-section__title">
-            Review risks hide between CI signals
-          </h2>
-
-          <div class="problem-section__cards" aria-label="PR review problem cards">
-            <article class="problem-card problem-card--vulnerabilities">
-              <div class="problem-card__content">
-                <svg class="problem-card__icon" viewBox="0 0 32 32" fill="none" aria-hidden="true">
-                  <path d="M16 3.5 25 6.8v7.1c0 6.6-3.9 11.7-9 14.1-5.1-2.4-9-7.5-9-14.1V6.8l9-3.3Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" />
-                  <path d="M16 7.6v16.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" opacity=".72" />
-                </svg>
-                <h3>Hidden Review Risk</h3>
-                <p>
-                  A passing build can still miss behavior changes, unsafe defaults, or assumptions hidden inside the diff.
-                </p>
-              </div>
-              <div class="problem-card__matrix" aria-hidden="true">
-                <span>010011001101 1010</span>
-                <span>changed_line_map</span>
-                <span>0110 1011 0010 1101</span>
-                <span>risk_signature: elevated</span>
-                <span>100101111010 0011</span>
-                <span>review_gap_trace</span>
-                <span>edge_case_probe</span>
-                <span>0101 1100 1001 1110</span>
-                <span>behavior_boundary_drift</span>
-                <span>111001011010</span>
-              </div>
-            </article>
-
-            <article class="problem-card problem-card--failures">
-              <div class="problem-card__content">
-                <svg class="problem-card__icon" viewBox="0 0 32 32" fill="none" aria-hidden="true">
-                  <circle cx="16" cy="16" r="12.5" stroke="currentColor" stroke-width="1.6" />
-                  <path d="M7.4 7.4 24.6 24.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
-                </svg>
-                <h3>Edge-Case Failures</h3>
-                <p>
-                  Some regressions only appear around rare inputs, stale assumptions, or paths the current test suite does not cover.
-                </p>
-              </div>
-              <div class="problem-card__pills" aria-hidden="true">
-                <span>Changed Path</span>
-                <span>Missing Test</span>
-                <span>CI Passed</span>
-                <span>Needs Review</span>
-                <span>Edge Branch</span>
-                <span>Risk Note</span>
-                <span>Reviewer Cue</span>
-                <span>Soft Check</span>
-              </div>
-            </article>
+    <section class="graph-section dark-section" id="graph" aria-labelledby="graph-title">
+      <div class="section-wrap">
+        <div class="section-heading reveal"><p class="eyebrow">01 / PYTHON CODEGRAPH</p><h2 id="graph-title">顺着关系，<br><span>找到关键代码。</span></h2><p class="section-body">用 Tree-sitter 理解 Python 结构，将调用、继承与导入关系连接起来。<br class="desktop-break">文本搜索与图导航协同，最终仍回到源码核验。</p></div>
+        <div class="graph-explorer reveal">
+          <div class="segmented dark-segmented" role="tablist" aria-label="探索代码关系">
+            <button type="button" role="tab" id="relation-calls" aria-selected="true" aria-controls="relation-panel" data-relation="calls">调用 Calls</button>
+            <button type="button" role="tab" id="relation-inherits" aria-selected="false" aria-controls="relation-panel" tabindex="-1" data-relation="inherits">继承 Inherits</button>
+            <button type="button" role="tab" id="relation-imports" aria-selected="false" aria-controls="relation-panel" tabindex="-1" data-relation="imports">导入 Imports</button>
           </div>
+          <div id="relation-panel" role="tabpanel" aria-labelledby="relation-calls" class="relation-panel">
+            <div class="flow-labels"><span>变更声明</span><span>关联上下文</span><span>源码核验</span></div>
+            <svg class="relation-diagram" viewBox="0 0 1000 268" role="img" aria-labelledby="relation-diagram-title">
+              <title id="relation-diagram-title">调用关系示意：从修改的 normalize 函数定位 import_data 调用方，再读取调用位置的源码</title>
+              <path class="dim-route" d="M200 134H320Q360 134 380 105L420 62H610Q650 62 680 95L710 134H800"/>
+              <path class="dim-route" d="M200 134H320Q360 134 380 165L420 211H610Q650 211 680 175L710 134H800"/>
+              <path class="active-route" d="M200 134H800"/>
+              <circle cx="200" cy="134" r="44" class="root-ring"/><circle cx="200" cy="134" r="9" class="root-dot"/>
+              <circle cx="500" cy="62" r="5" class="quiet-dot"/><circle cx="500" cy="211" r="5" class="quiet-dot"/>
+              <circle cx="500" cy="134" r="10" class="root-dot"/>
+              <circle cx="800" cy="134" r="28" class="source-ring"/><path d="M790 134l7 7 14-15" class="source-check"/>
+              <g class="svg-label"><text x="200" y="215" text-anchor="middle" id="graph-root">normalize()</text><text x="500" y="176" text-anchor="middle" id="graph-target">import_data()</text><text x="800" y="215" text-anchor="middle">read_source</text><text x="500" y="30" text-anchor="middle" class="quiet-label">related context</text><text x="500" y="251" text-anchor="middle" class="quiet-label">related context</text></g>
+            </svg>
+            <div class="relation-explanation" aria-live="polite"><h3 id="relation-title">参数改了，调用方跟上了吗？</h3><p id="relation-description">沿 incoming call 查找调用位置，读取未修改文件，核对参数约定与实际行为。</p></div>
+          </div>
+          <p class="small-note">导航原理示意。图提供线索，源码提供证据。</p>
         </div>
-      </section>
+        <div class="graph-principles reveal"><div><span class="principle-number">01</span><h3>按需构建</h3><p>以源码快照为单位，复用 SQLite 图索引。</p></div><div><span class="principle-number">02</span><h3>保守解析</h3><p>明确呈现未知关系与覆盖范围。</p></div><div><span class="principle-number">03</span><h3>有界探索</h3><p>时间、工具与结构调查预算共同约束。</p></div></div>
+      </div>
+    </section>
 
-      <section class="solution-section" aria-labelledby="solution-title" data-solution-diagram>
-        <div class="solution-section__ambient" aria-hidden="true"></div>
-
-        <div class="solution-section__copy">
-          <h2 id="solution-title" class="solution-section__title">
-            MergeWarden adds advisory review
-            <span>on top of CI signals</span>
-          </h2>
-          <p class="solution-section__subtitle">
-            MergeWarden reads diffs, PR context, repository state and CI results
-            to surface review suggestions, soft checks and evidence for issues
-            that traditional CI often misses.
-          </p>
+    <section class="evidence-section" id="evidence" aria-labelledby="evidence-title">
+      <div class="section-wrap evidence-layout">
+        <div class="evidence-copy reveal"><p class="eyebrow">02 / IMMUTABLE EVIDENCE</p><h2 id="evidence-title">每一条结论，<br><span>都有据可查。</span></h2><p class="section-body">代码会继续变化，审查依据留在当时。<br>每条证据绑定代码版本、文件、行号与内容摘要，随时回到原始源码。</p><div class="evidence-detail"><span>固定源码快照</span><span>校验引用与内容</span><span>历史报告与同快照重跑</span></div></div>
+        <div class="evidence-visual reveal" aria-label="证据关联结构：代码快照、源码位置与内容 hash">
+          <div class="evidence-orbit"><span>VERSION</span><div class="evidence-core"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M8 6h11l5 5v15H8Z"/><path d="M19 6v6h5M12 17h8M12 21h6"/></svg><strong>Evidence</strong><span>源码证据</span></div><span>FILE · LINES</span><span>CONTENT HASH</span></div>
+          <div class="evidence-caption"><span>可定位。</span><span>可核查。</span><span>可重读。</span></div>
         </div>
+      </div>
+      <div class="delivery-strip section-wrap reveal"><div><p class="eyebrow">LOCAL DELIVERY</p><h3>从审查，到完整交付。</h3></div><p>JSON / Markdown 报告、源码证据与运行记录一同保存。<br>只有通过覆盖、提交和持久化检查，审查才算完成。</p></div>
+    </section>
 
-        <div class="solution-diagram" role="img" aria-label="Raw Diff, Pull Request, Repository Snapshot and Changed Files flow into GitHub Actions, then CI Checks, then MergeWarden, producing Review Suggestions, Soft Check, Evidence and Risk Notes.">
-          <div class="solution-diagram__halo" aria-hidden="true"></div>
-
-          <div class="solution-diagram__chips solution-diagram__chips--left" aria-label="Input chips">
-            <span class="flow-chip" style="--chip-delay: 900ms">
-              <svg class="flow-chip__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <path d="M4 2.5h5.2L12 5.3v8.2H4z" stroke="currentColor" stroke-width="1.15" stroke-linejoin="round" />
-                <path d="M9.2 2.5v3H12M6 8h4M6 10.5h3" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round" />
-              </svg>
-              <span>Raw Diff</span>
-              <span class="flow-chip__socket" aria-hidden="true"></span>
-            </span>
-            <span class="flow-chip" style="--chip-delay: 1000ms">
-              <svg class="flow-chip__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <circle cx="4" cy="4" r="1.45" stroke="currentColor" stroke-width="1.15" />
-                <circle cx="12" cy="12" r="1.45" stroke="currentColor" stroke-width="1.15" />
-                <circle cx="4" cy="12" r="1.45" stroke="currentColor" stroke-width="1.15" />
-                <path d="M4 5.45v5.1M5.45 4H8c2.2 0 4 1.8 4 4v2.55" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" />
-              </svg>
-              <span>Pull Request</span>
-              <span class="flow-chip__socket" aria-hidden="true"></span>
-            </span>
-            <span class="flow-chip" style="--chip-delay: 1100ms">
-              <svg class="flow-chip__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <ellipse cx="8" cy="4" rx="4.5" ry="1.7" stroke="currentColor" stroke-width="1.15" />
-                <path d="M3.5 4v4c0 .95 2 1.7 4.5 1.7s4.5-.75 4.5-1.7V4M3.5 8v4c0 .95 2 1.7 4.5 1.7s4.5-.75 4.5-1.7V8" stroke="currentColor" stroke-width="1.15" />
-              </svg>
-              <span>Repository Snapshot</span>
-              <span class="flow-chip__socket" aria-hidden="true"></span>
-            </span>
-            <span class="flow-chip" style="--chip-delay: 1200ms">
-              <svg class="flow-chip__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <path d="M5.2 5.8 3 8l2.2 2.2M10.8 5.8 13 8l-2.2 2.2M9.2 4.5 6.8 11.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" />
-              </svg>
-              <span>Changed Files</span>
-              <span class="flow-chip__socket" aria-hidden="true"></span>
-            </span>
+    <section class="skills-section" id="skills" aria-labelledby="skills-title">
+      <div class="section-wrap">
+        <div class="section-heading reveal"><p class="eyebrow">03 / REVIEW SKILLS <span class="new-label">NEW</span></p><h2 id="skills-title">经验留下。<br><span>每次，重新求证。</span></h2><p class="section-body">从已交付审查与反馈中提炼仓库级检查方法。<br class="desktop-break">下一次审查，按需读取相关经验，继续核对当前源码。</p></div>
+        <div class="skills-journey reveal">
+          <div class="journey-steps" role="tablist" aria-label="Review Skills 工作过程">
+            <button type="button" role="tab" id="skill-source" aria-controls="skill-panel" aria-selected="true" data-skill="source"><span class="step-symbol">01</span><span>审查与反馈</span></button>
+            <button type="button" role="tab" id="skill-learn" aria-controls="skill-panel" aria-selected="false" tabindex="-1" data-skill="learn"><span class="step-symbol">02</span><span>提炼检查方法</span></button>
+            <button type="button" role="tab" id="skill-version" aria-controls="skill-panel" aria-selected="false" tabindex="-1" data-skill="version"><span class="step-symbol">03</span><span>版本化知识</span></button>
+            <button type="button" role="tab" id="skill-review" aria-controls="skill-panel" aria-selected="false" tabindex="-1" data-skill="review"><span class="step-symbol">04</span><span>下一次审查</span></button>
           </div>
-
-          <div class="solution-diagram__nodes" aria-hidden="true">
-            <div class="flow-node flow-node--actions flow-node--left" style="--node-delay: 360ms">
-              <span class="flow-node__body">
-                <span class="github-actions-node" aria-hidden="true">
-                  <span class="github-actions-node__track"></span>
-                  <span class="github-actions-node__dot github-actions-node__dot--top"></span>
-                  <span class="github-actions-node__dot github-actions-node__dot--middle"></span>
-                  <span class="github-actions-node__dot github-actions-node__dot--bottom"></span>
-                </span>
-              </span>
-              <span class="flow-node__label">GitHub Actions</span>
-            </div>
-            <div class="flow-node flow-node--checks" style="--node-delay: 500ms">
-              <span class="ci-checks-group" aria-hidden="true">
-                <span class="ci-check-tile">
-                  <svg viewBox="0 0 20 20" fill="none">
-                    <circle cx="10" cy="10" r="6.6" stroke="currentColor" stroke-width="1.5" />
-                    <path d="m6.9 10 2.2 2.2 4.3-4.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
-                  </svg>
-                </span>
-                <span class="ci-check-tile">
-                  <svg viewBox="0 0 20 20" fill="none">
-                    <path d="M5 5h10v10H5z" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round" />
-                    <path d="M7.6 8h4.8M7.6 10h4.8M7.6 12h3" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" />
-                  </svg>
-                </span>
-                <span class="ci-check-tile">
-                  <svg viewBox="0 0 20 20" fill="none">
-                    <path d="M10 3.5 15 5.4v3.9c0 3.7-2.2 6.5-5 7.7-2.8-1.2-5-4-5-7.7V5.4z" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round" />
-                  </svg>
-                </span>
-              </span>
-              <span class="flow-node__label">CI Checks</span>
-            </div>
-            <div class="flow-node flow-node--mergewarden flow-node--right" style="--node-delay: 640ms">
-              <span class="flow-node__body">
-                <img class="mergewarden-logo-node" src="assets/mergewarden-logo-mark.png" alt="" aria-hidden="true" />
-              </span>
-              <span class="flow-node__label">MergeWarden</span>
-            </div>
-          </div>
-
-          <svg class="diagram-connector" viewBox="0 0 1600 520" preserveAspectRatio="none" aria-hidden="true">
-            <defs>
-              <filter id="solution-line-glow" x="-30%" y="-30%" width="160%" height="160%">
-                <feGaussianBlur stdDeviation="5" result="blur" />
-                <feMerge>
-                  <feMergeNode in="blur" />
-                  <feMergeNode in="SourceGraphic" />
-                </feMerge>
-              </filter>
-
-              <path id="solution-path-raw-diff" d="M 333 84 H 359 C 398 100 416 220 536 238" />
-              <path id="solution-path-pull-request" d="M 333 219 H 359 C 392 219 426 250 536 254" />
-              <path id="solution-path-repository-snapshot" d="M 333 354 H 359 C 394 342 426 270 536 266" />
-              <path id="solution-path-changed-files" d="M 333 489 H 359 C 382 460 416 300 536 282" />
-              <path id="solution-path-actions-checks" d="M 628 260 C 648 260 660 260 680 260" />
-              <path id="solution-path-checks-mergewarden" d="M 920 260 C 948 260 978 260 1010 260" />
-              <path id="solution-path-review-suggestions" d="M 1104 238 C 1196 220 1210 84 1239 84 H 1265" />
-              <path id="solution-path-soft-check" d="M 1104 254 C 1196 250 1208 219 1239 219 H 1265" />
-              <path id="solution-path-evidence" d="M 1104 266 C 1196 270 1206 354 1239 354 H 1265" />
-              <path id="solution-path-risk-notes" d="M 1104 282 C 1196 300 1218 489 1239 489 H 1265" />
-              <path id="solution-route-raw-review" d="M 333 84 H 359 C 398 100 416 220 536 238 C 564 244 596 252 628 260 C 648 260 660 260 680 260 C 758 260 842 260 920 260 C 948 260 978 260 1010 260 C 1042 252 1074 244 1104 238 C 1196 220 1210 84 1239 84 H 1265" />
-              <path id="solution-route-pr-soft-check" d="M 333 219 H 359 C 392 219 426 250 536 254 C 564 256 596 258 628 260 C 648 260 660 260 680 260 C 758 260 842 260 920 260 C 948 260 978 260 1010 260 C 1042 258 1074 256 1104 254 C 1196 250 1208 219 1239 219 H 1265" />
-              <path id="solution-route-snapshot-evidence" d="M 333 354 H 359 C 394 342 426 270 536 266 C 564 264 596 262 628 260 C 648 260 660 260 680 260 C 758 260 842 260 920 260 C 948 260 978 260 1010 260 C 1042 262 1074 264 1104 266 C 1196 270 1206 354 1239 354 H 1265" />
-              <path id="solution-route-files-risk" d="M 333 489 H 359 C 382 460 416 300 536 282 C 564 276 596 268 628 260 C 648 260 660 260 680 260 C 758 260 842 260 920 260 C 948 260 978 260 1010 260 C 1042 268 1074 276 1104 282 C 1196 300 1218 489 1239 489 H 1265" />
-            </defs>
-
-            <g class="diagram-connector__glow">
-              <use href="#solution-path-raw-diff" class="diagram-connector__line diagram-connector__line--glow" pathLength="1" />
-              <use href="#solution-path-pull-request" class="diagram-connector__line diagram-connector__line--glow" pathLength="1" />
-              <use href="#solution-path-repository-snapshot" class="diagram-connector__line diagram-connector__line--glow" pathLength="1" />
-              <use href="#solution-path-changed-files" class="diagram-connector__line diagram-connector__line--glow" pathLength="1" />
-              <use href="#solution-path-actions-checks" class="diagram-connector__line diagram-connector__line--glow" pathLength="1" />
-              <use href="#solution-path-checks-mergewarden" class="diagram-connector__line diagram-connector__line--glow" pathLength="1" />
-              <use href="#solution-path-review-suggestions" class="diagram-connector__line diagram-connector__line--glow" pathLength="1" />
-              <use href="#solution-path-soft-check" class="diagram-connector__line diagram-connector__line--glow" pathLength="1" />
-              <use href="#solution-path-evidence" class="diagram-connector__line diagram-connector__line--glow" pathLength="1" />
-              <use href="#solution-path-risk-notes" class="diagram-connector__line diagram-connector__line--glow" pathLength="1" />
-            </g>
-
-            <g class="diagram-connector__strokes">
-              <use href="#solution-path-raw-diff" class="diagram-connector__line" pathLength="1" />
-              <use href="#solution-path-pull-request" class="diagram-connector__line" pathLength="1" />
-              <use href="#solution-path-repository-snapshot" class="diagram-connector__line" pathLength="1" />
-              <use href="#solution-path-changed-files" class="diagram-connector__line" pathLength="1" />
-              <use href="#solution-path-actions-checks" class="diagram-connector__line diagram-connector__line--core" pathLength="1" />
-              <use href="#solution-path-checks-mergewarden" class="diagram-connector__line diagram-connector__line--core" pathLength="1" />
-              <use href="#solution-path-review-suggestions" class="diagram-connector__line diagram-connector__line--output" pathLength="1" />
-              <use href="#solution-path-soft-check" class="diagram-connector__line diagram-connector__line--output" pathLength="1" />
-              <use href="#solution-path-evidence" class="diagram-connector__line diagram-connector__line--output" pathLength="1" />
-              <use href="#solution-path-risk-notes" class="diagram-connector__line diagram-connector__line--output" pathLength="1" />
-            </g>
-
-            <g class="diagram-data-packets">
-              <circle class="diagram-data-packet" r="3.2" data-packet-delay="2100">
-                <animateMotion dur="6.4s" begin="indefinite" repeatCount="indefinite" rotate="auto">
-                  <mpath href="#solution-route-raw-review" />
-                </animateMotion>
-                <animate attributeName="opacity" values="0;0;0.9;0.9;0" keyTimes="0;0.08;0.18;0.84;1" dur="6.4s" begin="indefinite" repeatCount="indefinite" />
-              </circle>
-              <circle class="diagram-data-packet diagram-data-packet--soft" r="2.8" data-packet-delay="2700">
-                <animateMotion dur="6.8s" begin="indefinite" repeatCount="indefinite" rotate="auto">
-                  <mpath href="#solution-route-pr-soft-check" />
-                </animateMotion>
-                <animate attributeName="opacity" values="0;0;0.78;0.78;0" keyTimes="0;0.08;0.18;0.84;1" dur="6.8s" begin="indefinite" repeatCount="indefinite" />
-              </circle>
-              <circle class="diagram-data-packet diagram-data-packet--soft" r="2.8" data-packet-delay="3250">
-                <animateMotion dur="7.1s" begin="indefinite" repeatCount="indefinite" rotate="auto">
-                  <mpath href="#solution-route-snapshot-evidence" />
-                </animateMotion>
-                <animate attributeName="opacity" values="0;0;0.76;0.76;0" keyTimes="0;0.08;0.18;0.84;1" dur="7.1s" begin="indefinite" repeatCount="indefinite" />
-              </circle>
-              <circle class="diagram-data-packet" r="3.2" data-packet-delay="3850">
-                <animateMotion dur="7.4s" begin="indefinite" repeatCount="indefinite" rotate="auto">
-                  <mpath href="#solution-route-files-risk" />
-                </animateMotion>
-                <animate attributeName="opacity" values="0;0;0.88;0.88;0" keyTimes="0;0.08;0.18;0.84;1" dur="7.4s" begin="indefinite" repeatCount="indefinite" />
-              </circle>
-            </g>
-          </svg>
-
-          <div class="solution-diagram__chips solution-diagram__chips--right" aria-label="Output chips">
-            <span class="flow-chip" style="--chip-delay: 980ms">
-              <svg class="flow-chip__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <path d="M3 3.5h10v6.8H7L4.2 13v-2.7H3z" stroke="currentColor" stroke-width="1.15" stroke-linejoin="round" />
-                <path d="M5.5 6h5M5.5 8h3.2" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" />
-              </svg>
-              <span>Review Suggestions</span>
-              <span class="flow-chip__socket" aria-hidden="true"></span>
-            </span>
-            <span class="flow-chip" style="--chip-delay: 1080ms">
-              <svg class="flow-chip__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <path d="M5 3.5h6l1.5 1.6v7.4h-9v-9z" stroke="currentColor" stroke-width="1.15" stroke-linejoin="round" />
-                <path d="m5.9 8.4 1.4 1.4 3-3.3" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" />
-              </svg>
-              <span>Soft Check</span>
-              <span class="flow-chip__socket" aria-hidden="true"></span>
-            </span>
-            <span class="flow-chip" style="--chip-delay: 1180ms">
-              <svg class="flow-chip__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <path d="M4 2.5h5.2L12 5.3v8.2H4z" stroke="currentColor" stroke-width="1.15" stroke-linejoin="round" />
-                <path d="M9.2 2.5v3H12M6 8h4M6 10.5h4" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round" />
-              </svg>
-              <span>Evidence</span>
-              <span class="flow-chip__socket" aria-hidden="true"></span>
-            </span>
-            <span class="flow-chip" style="--chip-delay: 1280ms">
-              <svg class="flow-chip__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <path d="M8 3 14 13H2z" stroke="currentColor" stroke-width="1.15" stroke-linejoin="round" />
-                <path d="M8 6.4v3.1M8 11.8h.01" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" />
-              </svg>
-              <span>Risk Notes</span>
-              <span class="flow-chip__socket" aria-hidden="true"></span>
-            </span>
-          </div>
+          <div class="skill-panel" id="skill-panel" role="tabpanel" aria-labelledby="skill-source" aria-live="polite"><p class="eyebrow" id="skill-kicker">DELIVERED REVIEW + FEEDBACK</p><h3 id="skill-title">让纠正，有后续。</h3><p id="skill-description">已交付运行与开发者反馈成为学习来源。来源与失败尝试保留，经验可以追溯。</p></div>
         </div>
-      </section>
+        <div class="skill-controls reveal"><div><h3>冻结只读</h3><p>每次审查绑定固定知识包。历史经验提出检查方向，当前源码决定结论。</p></div><div><h3>可停用，可回滚</h3><p>经验带有版本与来源。反馈撤回、停用与回滚均保留记录。</p></div></div>
+        <p class="small-note">Review Skills 已实现；对审查质量的增益仍待独立评测。</p>
+      </div>
+    </section>
 
-      <!-- ================================================================
-      Value Cards — beyond deterministic CI
-      ================================================================ -->
-      <section id="value-cards" class="value-cards-section" aria-labelledby="vc-title">
-        <div class="value-cards-section__ambient" aria-hidden="true"></div>
-        <div class="value-cards-section__inner">
-          <h2 id="vc-title" class="value-cards-section__title">
-            Beyond deterministic CI
-          </h2>
-          <p class="value-cards-section__subtitle">
-            MergeWarden surfaces review risks that traditional CI pipelines<br>are not designed to evaluate.
-          </p>
-          <div class="value-cards-grid">
-            <article class="value-card reveal">
-              <svg class="value-card__icon" viewBox="0 0 32 32" fill="none" aria-hidden="true">
-                <path d="M4 16 H13" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
-                <path d="M13 16 C18 16 19 7 25 6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
-                <path d="M13 16 C18 16 19 25 25 26" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
-                <circle cx="4" cy="16" r="2.5" stroke="currentColor" stroke-width="1.2"/>
-                <circle cx="25" cy="6" r="2.5" stroke="currentColor" stroke-width="1.2"/>
-                <circle cx="25" cy="26" r="2.5" stroke="currentColor" stroke-width="1.2"/>
-                <path d="M27.5 3.5 L27.5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-              </svg>
-              <h3 class="value-card__title">Behavior Regression</h3>
-              <p class="value-card__body">
-                Detect risky behavior changes that deterministic CI may miss, especially when a diff subtly changes control flow, error handling, or side effects.
-              </p>
-            </article>
-
-            <article class="value-card reveal">
-              <svg class="value-card__icon" viewBox="0 0 32 32" fill="none" aria-hidden="true">
-                <path d="M8 4 H20 L26 10 V28 H8 Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
-                <path d="M20 4 V10 H26" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
-                <path d="M12 15 H20" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
-                <path d="M12 19 H16" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" opacity="0.42"/>
-                <path d="M12 23 H22" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
-                <circle cx="22" cy="13" r="3.2" stroke="currentColor" stroke-width="1.3" stroke-dasharray="2.2 1.6" fill="none"/>
-              </svg>
-              <h3 class="value-card__title">Test Gaps</h3>
-              <p class="value-card__body">
-                Surface missing or weak tests around changed paths, edge branches, and failure modes before they become production review debt.
-              </p>
-            </article>
-
-            <article class="value-card reveal">
-              <svg class="value-card__icon" viewBox="0 0 32 32" fill="none" aria-hidden="true">
-                <rect x="4" y="5" width="10" height="9" rx="2.5" stroke="currentColor" stroke-width="1.6"/>
-                <rect x="18" y="5" width="10" height="9" rx="2.5" stroke="currentColor" stroke-width="1.6"/>
-                <rect x="11" y="18" width="10" height="9" rx="2.5" stroke="currentColor" stroke-width="1.6"/>
-                <path d="M9 14 L14 18" stroke="currentColor" stroke-width="1.2" stroke-dasharray="2 2"/>
-                <path d="M23 14 L21 18" stroke="currentColor" stroke-width="1.2" stroke-dasharray="2 2"/>
-              </svg>
-              <h3 class="value-card__title">Maintainability Risks</h3>
-              <p class="value-card__body">
-                Flag review concerns around readability, coupling, hidden assumptions, and long-term maintainability without blocking the merge decision.
-              </p>
-            </article>
+    <section class="performance-section" id="performance" aria-labelledby="performance-title">
+      <div class="section-wrap">
+        <div class="section-heading reveal"><p class="eyebrow">MEASURED ON REAL PULL REQUESTS</p><h2 id="performance-title">让结果说话。</h2><p class="section-body">40 个真实 PR，12 个 Python 仓库。<br>同一 Pi 审查流程，对比文本基线与变更感知 CodeGraph 配置。</p></div>
+        <div class="benchmark reveal">
+          <div class="segmented benchmark-tabs" role="tablist" aria-label="选择评测范围">
+            <button type="button" role="tab" id="bench-all" aria-selected="true" aria-controls="benchmark-panel" data-benchmark="all">全量 · 40</button>
+            <button type="button" role="tab" id="bench-cross" aria-selected="false" aria-controls="benchmark-panel" tabindex="-1" data-benchmark="cross">跨文件 · 12</button>
+            <button type="button" role="tab" id="bench-core" aria-selected="false" aria-controls="benchmark-panel" tabindex="-1" data-benchmark="core">核心依赖 · 9</button>
+            <button type="button" role="tab" id="bench-complex" aria-selected="false" aria-controls="benchmark-panel" tabindex="-1" data-benchmark="complex">复杂场景 · 10</button>
           </div>
+          <div id="benchmark-panel" role="tabpanel" aria-labelledby="bench-all">
+            <div class="metric-grid" aria-live="polite"><div class="metric-main"><p class="metric-label">F1 · 缺陷检出综合表现</p><div class="metric-value" id="metric-f1">77.4<span>%</span></div><p class="metric-change" id="metric-f1-change">从 67.8% 提升 · +9.6 个百分点</p></div><div><p class="metric-label">Precision · 报告准确率</p><div class="metric-value" id="metric-precision">85.7<span>%</span></div><p class="metric-change" id="metric-precision-change">文本基线 80.0%</p></div><div><p class="metric-label">Token 用量变化</p><div class="metric-value" id="metric-token">+19.6<span>%</span></div><p class="metric-change" id="metric-rounds">探索轮次 +6.5%</p></div></div>
+            <div class="bar-chart" aria-label="F1 对比"><div class="bar-row"><span>Pi 文本基线</span><div class="bar-track"><div class="bar baseline" id="bar-baseline" style="width:67.8%"></div></div><strong id="bar-baseline-label">67.8%</strong></div><div class="bar-row"><span>CodeGraph 配置</span><div class="bar-track"><div class="bar graph" id="bar-graph" style="width:77.4%"></div></div><strong id="bar-graph-label">77.4%</strong></div></div>
+            <p id="benchmark-scope-note" class="benchmark-scope-note" aria-live="polite">全量 40 例，80 次配对结果。质量提升伴随更多 Token 投入。</p>
+          </div>
+          <details class="method-details"><summary>评测口径与适用范围 <span aria-hidden="true">+</span></summary><div><p>2026-09-28 评测；模型为 openai-codex / gpt-5.6-luna，推理档位 max。两臂使用同一审查提示词、文本工具与预算。Graph 的变更感知结构调查使用显式评测配置，CLI 默认导航策略未改变。</p><p>缺陷由 AI 结合源码逐条进行语义审核，F1 采用 micro 汇总。场景成员有交集；复杂场景的 10 例按已完成评测的任务特征与表现选取，属于事后分析，不替代全量结果。</p><p>Token 为成功运行的累计输入与输出用量；成本数据不含前置构图及连接失败的额外重试。Review Skills 未纳入本次评测。</p><a class="text-link" href="https://github.com/takagibit18/MergeWarden/blob/main/docs/experiments/CODE_GRAPH_EVAL.md" target="_blank" rel="noopener noreferrer">阅读完整评测与逐例矩阵</a></div></details>
         </div>
-      </section>
+      </div>
+    </section>
 
-      <!-- ================================================================
-      Review Artifacts — what MergeWarden leaves behind
-      ================================================================ -->
-      <section id="review-artifacts" class="artifacts-section" aria-labelledby="artifacts-title">
-        <div class="artifacts-section__ambient" aria-hidden="true"></div>
-        <div class="artifacts-section__inner">
-          <div class="artifacts-section__left">
-            <span class="artifacts-section__label">Review Artifacts</span>
-            <h2 id="artifacts-title" class="artifacts-section__title">
-              What MergeWarden<br>leaves behind
-            </h2>
-            <p class="artifacts-section__subtitle">
-              Every suggestion is advisory, evidence-backed, and designed to support human reviewers rather than replace branch protection.
-            </p>
-          </div>
-          <div class="artifacts-section__right">
-            <div class="artifacts-grid">
-              <article class="artifact-card reveal">
-                <svg class="artifact-card__icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                  <path d="M4 4 H16 L20 8 V20 H4 Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
-                  <path d="M16 4 V8 H20" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
-                  <path d="M7 12 H14 M7 15 H12" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
-                </svg>
-                <h3 class="artifact-card__title">Review Suggestions</h3>
-                <p class="artifact-card__body">
-                  Human-readable review notes tied to changed files and risky hunks.
-                </p>
-              </article>
-              <article class="artifact-card reveal">
-                <svg class="artifact-card__icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                  <path d="M5 5 H15 L19 9 V19 H5 Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
-                  <path d="M9 11 L11 13 L15 9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-                </svg>
-                <h3 class="artifact-card__title">Soft Check</h3>
-                <p class="artifact-card__body">
-                  Non-blocking status signals that summarize risk without replacing CI gates.
-                </p>
-              </article>
-              <article class="artifact-card reveal">
-                <svg class="artifact-card__icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                  <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.5"/>
-                  <path d="M12 7 V12 L16 15" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-                </svg>
-                <h3 class="artifact-card__title">Evidence</h3>
-                <p class="artifact-card__body">
-                  Traceable reasoning, file references, and context snippets for follow-up review.
-                </p>
-              </article>
-              <article class="artifact-card reveal">
-                <svg class="artifact-card__icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                  <path d="M12 2 L22 20 H2 Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
-                  <path d="M12 9 V13 M12 16 V16.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
-                </svg>
-                <h3 class="artifact-card__title">Risk Notes</h3>
-                <p class="artifact-card__body">
-                  Concise flags for behavior regression, edge cases, missing tests, or maintainability debt.
-                </p>
-              </article>
-            </div>
-          </div>
+    <section class="start-section dark-section" id="start" aria-labelledby="start-title">
+      <div class="section-wrap">
+        <div class="section-heading reveal"><p class="eyebrow">YOUR CODE. YOUR TERMINAL.</p><h2 id="start-title">从下一次提交开始。</h2><p class="section-body">审查提交、暂存区或已保存的工作区。<br>以只读方式，融入你已有的开发流程。</p></div>
+        <div class="start-content reveal">
+          <div class="segmented dark-segmented start-tabs" role="tablist" aria-label="选择审查方式"><button type="button" role="tab" id="start-staged" aria-selected="true" aria-controls="command-panel" data-command="staged">暂存区</button><button type="button" role="tab" id="start-commits" aria-selected="false" aria-controls="command-panel" tabindex="-1" data-command="commits">提交对比</button><button type="button" role="tab" id="start-worktree" aria-selected="false" aria-controls="command-panel" tabindex="-1" data-command="worktree">工作区</button></div>
+          <div class="command-block" id="command-panel" role="tabpanel" aria-labelledby="start-staged"><div class="command-topline"><span>在 MergeWarden 项目目录中运行</span><button class="copy-button" type="button" id="copy-command" aria-label="复制当前审查命令">复制命令</button></div><pre><code id="review-command">npm run cli -- review \
+  --repo /path/to/repository \
+  --scope staged \
+  --provider openai-codex \
+  --model MODEL_ID --auth oauth</code></pre></div>
+          <p class="copy-status" role="status" id="copy-status" aria-live="polite"></p>
+          <div class="setup-note"><span>Node.js 22.19+ · Git · npm</span><p>首次使用运行 <code>npm run setup</code>，通过 <code>login</code> 完成授权，<br class="desktop-break">再从 <code>models</code> 目录选择账号可用的模型。</p></div>
+          <div class="start-actions"><a class="button button-white" href="https://github.com/takagibit18/MergeWarden" target="_blank" rel="noopener noreferrer">查看项目与使用指南</a><a class="text-link" href="https://github.com/takagibit18/MergeWarden/blob/main/docs/REVIEW_SKILLS.md" target="_blank" rel="noopener noreferrer">了解 Review Skills</a></div>
+          <p class="small-note">当前为 CLI 产品。Python 结构导航已实现，VS Code 界面在后续路线中。</p>
         </div>
-      </section>
-
-      <!-- ================================================================
-      Advisory Positioning — CI vs MergeWarden
-      ================================================================ -->
-      <section id="advisory-positioning" class="advisory-section" aria-labelledby="advisory-title">
-        <div class="advisory-section__ambient" aria-hidden="true"></div>
-        <div class="advisory-section__inner">
-          <h2 id="advisory-title" class="advisory-section__title">
-            Advisory by design,<br>not another merge gate
-          </h2>
-          <p class="advisory-section__subtitle">
-            MergeWarden complements deterministic CI with review intelligence for judgment-heavy risks.
-          </p>
-          <div class="comparison-pair">
-            <article class="comparison-card comparison-card--ci reveal">
-              <div class="comparison-card__header">
-                <span class="comparison-card__label">Hard checks</span>
-                <h3 class="comparison-card__title">GitHub CI</h3>
-              </div>
-              <ul class="comparison-card__list">
-                <li>Lint, tests, build, type checks</li>
-                <li>Deterministic pass / fail signals</li>
-                <li>Branch protection integration</li>
-                <li>Fast mechanical verification</li>
-              </ul>
-            </article>
-            <div class="comparison-bridge reveal" aria-hidden="true">
-              <span class="comparison-bridge__line"></span>
-              <span class="comparison-bridge__text">complements,<br>not replaces</span>
-              <span class="comparison-bridge__line"></span>
-            </div>
-            <article class="comparison-card comparison-card--mw reveal">
-              <div class="comparison-card__header">
-                <span class="comparison-card__label">Advisory review</span>
-                <h3 class="comparison-card__title">MergeWarden</h3>
-              </div>
-              <ul class="comparison-card__list">
-                <li>Behavior regression signals</li>
-                <li>Test gap detection</li>
-                <li>Edge-case reasoning</li>
-                <li>Maintainability and review evidence</li>
-              </ul>
-            </article>
-          </div>
-          <p class="advisory-section__note reveal">
-            CI stays authoritative. &nbsp;MergeWarden stays advisory.
-          </p>
-        </div>
-      </section>
-
-      <!-- ================================================================
-      CTA / Footer
-      ================================================================ -->
-      <section id="cta" class="cta-section" aria-labelledby="cta-title">
-        <div class="cta-section__ambient" aria-hidden="true"></div>
-        <div class="cta-section__inner">
-          <h2 id="cta-title" class="cta-section__title">
-            Review risk without<br>blocking your flow
-          </h2>
-          <p class="cta-section__subtitle">
-            Use MergeWarden as an advisory AI reviewer for PRs where CI passes,<br>but human judgment still matters.
-          </p>
-          <div class="cta-section__actions reveal">
-            <a
-              class="site-header__cta cta-section__github-button"
-              href="https://github.com/takagibit18/MergeWarden"
-              target="_blank"
-              rel="noopener"
-              data-github-repo-link
-            >
-              <svg class="site-header__cta-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                <path
-                  fill="currentColor"
-                  d="M12 2C6.48 2 2 6.58 2 12.25c0 4.53 2.87 8.37 6.84 9.73.5.09.68-.22.68-.49 0-.24-.01-.88-.01-1.73-2.78.62-3.37-1.37-3.37-1.37-.45-1.18-1.11-1.49-1.11-1.49-.91-.64.07-.63.07-.63 1 .07 1.53 1.06 1.53 1.06.9 1.57 2.35 1.12 2.92.86.09-.67.35-1.12.64-1.38-2.22-.26-4.56-1.14-4.56-5.08 0-1.12.39-2.04 1.03-2.76-.1-.26-.45-1.31.1-2.72 0 0 .84-.28 2.75 1.05A9.35 9.35 0 0 1 12 6.96c.85 0 1.7.12 2.5.34 1.91-1.33 2.75-1.05 2.75-1.05.55 1.41.2 2.46.1 2.72.64.72 1.03 1.64 1.03 2.76 0 3.95-2.34 4.81-4.57 5.07.36.32.68.94.68 1.9 0 1.37-.01 2.48-.01 2.82 0 .27.18.59.69.49A10.14 10.14 0 0 0 22 12.25C22 6.58 17.52 2 12 2Z"
-                />
-              </svg>
-              <span><span class="site-header__cta-label-prefix">Open on </span>GitHub</span>
-            </a>
-            <a class="cta-button cta-button--secondary" href="mailto:hello@mergewarden.dev">
-              Book a Demo
-            </a>
-            <a class="cta-button cta-button--ghost" href="#top">
-              Read Docs
-            </a>
-          </div>
-        </div>
-        <footer class="site-footer">
-          <div class="site-footer__links">
-            <a href="#top">Product</a>
-            <a href="https://github.com/takagibit18/MergeWarden" target="_blank" rel="noopener">GitHub</a>
-            <a href="#top">Docs</a>
-            <a href="mailto:hello@mergewarden.dev">Contact</a>
-          </div>
-          <div class="site-footer__wordmark" aria-hidden="true">MERGEWARDEN</div>
-        </footer>
-      </section>
-
-    </main>
-    <script src="solution-diagram.js?v=20260526-solution-diagram-r8" defer></script>
-    <script src="page-reveal.js?v=20260601-hero-title-typing" defer></script>
-    <script>
-      document.querySelectorAll("[data-github-repo-link]").forEach(link => {
-        link.href = window.GITHUB_REPO_URL || "https://github.com/takagibit18/MergeWarden";
-      });
-    </script>
-  </body>
+      </div>
+    </section>
+  </main>
+  <footer><span>MergeWarden 2</span><span>以源码证据为中心。</span><span class="footer-date">实现资料更新至 2026.10.02</span><a href="#">回到顶部</a></footer>
+</body>
 </html>

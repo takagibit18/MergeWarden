@@ -1,0 +1,20 @@
+import {readFile,writeFile} from 'node:fs/promises';
+import {resolve,join,dirname} from 'node:path';
+import {createHash} from 'node:crypto';
+import assert from 'node:assert/strict';
+const out=resolve(process.argv[2]),hash=b=>createHash('sha256').update(b).digest('hex'),read=async p=>JSON.parse(await readFile(p,'utf8')),save=(n,v)=>writeFile(join(out,n),JSON.stringify(v,null,2)+'\n',{flag:'wx'});
+const freeze=await read(join(out,'prediction-freeze.json'));for(const a of freeze.artifacts)assert.equal(hash(await readFile(join(out,a.name))),a.sha256);
+const identities=await read(join(out,'frozen-inputs.json')),auditIdentity=identities.find(i=>i.role==='post-freeze scorer only'),bytes=await readFile(auditIdentity.path);assert.equal(hash(bytes),auditIdentity.sha256);
+const audit=JSON.parse(bytes).cases,oldRoot=dirname(identities.find(i=>i.path.endsWith('path-retention.json')).path),upstream=await read(join(oldRoot,'funnel.json'));
+const units=await read(join(out,'candidate-units.json')),results=await read(join(out,'selection-results.json')),metrics=await read(join(out,'selection-metrics.json')),perf=await read(join(out,'performance.json')),isolation=await read(join(out,'audit-isolation.json'));
+for(const m of metrics){const a=audit.find(a=>a.id===m.id),u=units.find(u=>u.id===m.id),r=results.find(r=>r.id===m.id),old=upstream.find(x=>x.id===m.id);m.targets=old.targets.map(t=>{
+ const candidate=u.eligible.find(u=>u.terminalEntityId===t.targetId),choice=r.armB.selected.find(s=>s.candidate.terminalEntityId===t.targetId),before=r.armA.selected.some(s=>s.terminalEntity.id===t.targetId);
+ return {...t,targetEligible:!!candidate,candidateSelected:!!choice,baselineCandidateSelected:before,targetSelectionReason:choice?.selectedBecause??null,sourceRead:false,necessaryFactCovered:false,downstreamExecution:'NOT_RUN_YET',failureStage:!t.edgeInspected?'F0_NOT_INSPECTED':!t.entityReached?'F1_EDGE_INSPECTED_ENTITY_NOT_REACHED':!t.pathRetained?'F2_ENTITY_REACHED_PATH_NOT_RETAINED':!choice?'F3_PATH_RETAINED_CANDIDATE_DROPPED':'F4_CANDIDATE_SELECTED_SOURCE_NOT_READ'};
+ });
+ for(const [key,field] of [['targetEntityReached','entityReached'],['targetPathRetained','pathRetained'],['targetEligible','targetEligible'],['targetCandidateSelected','candidateSelected']])m[key]=m.targets.every(t=>t[field]);
+ const relevant=r.armB.selected.filter(({candidate:c})=>a.necessaryFacts.some(f=>f.path===c.terminalPath&&f.startLine<=c.sourceRange.endLine&&f.endLine>=c.sourceRange.startLine)).length;
+ m.qualityDiagnostic={relevantCandidateCount:relevant,irrelevantCandidateCount:r.armB.selected.length-relevant,candidatePrecisionLike:relevant/r.armB.selected.length,interpretation:'Closed-world necessary-fact range overlap proxy only; non-overlap is not a proven semantic irrelevance label.'};
+}
+const d3=metrics.find(m=>m.id==='D3-xarray-multihop'),checks={D3Reached:d3.targetEntityReached,D3Retained:d3.targetPathRetained,D3Eligible:d3.targetEligible,D3Selected:d3.targetCandidateSelected,D1Selected:metrics.find(m=>m.id==='D1-direct-caller').targetCandidateSelected,D5Selected:metrics.find(m=>m.id==='D5-reexport').targetCandidateSelected,deterministic100:metrics.every(m=>m.determinism.byteIdentical),fixedSlots:metrics.every(m=>m.selectedCandidates<=3&&m.candidateSlots===3),sameEligiblePool:units.every(u=>!u.rejected.length),boundedParents:metrics.every(m=>m.maxParentsPerState<=2),unreachedTargetsNotInvented:metrics.every(m=>m.targets.every(t=>t.entityReached||!t.candidateSelected)),noAuditLeakage:isolation.staticCheck&&isolation.scorerInputReadable===false,performance:perf.every(p=>p.pass),noGraphRequests:metrics.every(m=>m.graphBackendRequests===0)};
+const pass=Object.values(checks).every(Boolean);await save('selection-score.json',metrics);await save('gate.json',{name:'Candidate Selection Gate',pass,checks,predictionFrozenAt:freeze.frozenAt,scoredAt:new Date().toISOString(),auditSha256:auditIdentity.sha256,recommendation:pass?'READY FOR GATE 2B':'NOT READY FOR GATE 2B',nextAction:pass?'Source replay only; stop before frontier':'STOP',realModelCalls:0});
+console.log(JSON.stringify({pass,checks}));

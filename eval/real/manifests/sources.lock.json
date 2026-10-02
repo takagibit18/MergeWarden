@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "retrieved_at": "2026-09-21",
+  "files": {
+    "ccrab_ids": {
+      "repository": "c-CRAB-Benchmark/dataset",
+      "commit": "856dfa3102b8996d168c4f195217b7603e1d1bc6",
+      "path": "results_preprocessed/instance-ids.txt",
+      "git_blob_sha1": "25778f101530e2611793ca1afd112a3b1f712bc6",
+      "size_bytes": 17896,
+      "url": "https://raw.githubusercontent.com/c-CRAB-Benchmark/dataset/856dfa3102b8996d168c4f195217b7603e1d1bc6/results_preprocessed/instance-ids.txt",
+      "bytes_downloaded_in_authoring_session": false
+    },
+    "ccrab_retained": {
+      "repository": "c-CRAB-Benchmark/dataset",
+      "commit": "856dfa3102b8996d168c4f195217b7603e1d1bc6",
+      "path": "results_preprocessed/preprocess_dataset.jsonl",
+      "git_blob_sha1": "3e482fc3d23bf84ea680a83915bd0000937d0ab6",
+      "size_bytes": 26233405,
+      "url": "https://raw.githubusercontent.com/c-CRAB-Benchmark/dataset/856dfa3102b8996d168c4f195217b7603e1d1bc6/results_preprocessed/preprocess_dataset.jsonl",
+      "bytes_downloaded_in_authoring_session": false
+    },
+    "ccrab_stage3": {
+      "repository": "c-CRAB-Benchmark/dataset",
+      "commit": "856dfa3102b8996d168c4f195217b7603e1d1bc6",
+      "path": "results_pipeline_funnel/stage3_testgen_verified.jsonl",
+      "git_blob_sha1": "b66f2883403e4da868bc84ec6e59f439e248ef59",
+      "size_bytes": 23199798,
+      "url": "https://raw.githubusercontent.com/c-CRAB-Benchmark/dataset/856dfa3102b8996d168c4f195217b7603e1d1bc6/results_pipeline_funnel/stage3_testgen_verified.jsonl",
+      "bytes_downloaded_in_authoring_session": false
+    },
+    "swrbench": {
+      "repository": "ZZR0/SWRench",
+      "commit": "67ae1d4395ac05f800d62b0e13678eadeb9fa5c7",
+      "path": "data/swr_datasets_d5c5.jsonl",
+      "git_blob_sha1": "35313bdf6ed2edb3eb7792e672732c294478ed46",
+      "size_bytes": 84826523,
+      "url": "https://raw.githubusercontent.com/ZZR0/SWRench/67ae1d4395ac05f800d62b0e13678eadeb9fa5c7/data/swr_datasets_d5c5.jsonl",
+      "bytes_downloaded_in_authoring_session": false
+    }
+  },
+  "lock_revision": 2,
+  "corrections": [
+    {
+      "source": "ccrab_stage3",
+      "reason": "Original buildkit lock disagreed with Git tree at SAME pinned commit; observed download failed size admission. No moving ref used.",
+      "original_lock_sha256": "5679d720df28b11d2706832464534414590fe5e6ca11bb210295f26b43b399b8",
+      "original_spec": {
+        "repository": "c-CRAB-Benchmark/dataset",
+        "commit": "856dfa3102b8996d168c4f195217b7603e1d1bc6",
+        "path": "results_pipeline_funnel/stage3_testgen_verified.jsonl",
+        "git_blob_sha1": "983189503209701183d841397d7b7c3b07f93920c",
+        "size_bytes": 23350133,
+        "url": "https://raw.githubusercontent.com/c-CRAB-Benchmark/dataset/856dfa3102b8996d168c4f195217b7603e1d1bc6/results_pipeline_funnel/stage3_testgen_verified.jsonl",
+        "bytes_downloaded_in_authoring_session": false
+      },
+      "verified_tree_url": "https://api.github.com/repos/c-CRAB-Benchmark/dataset/git/trees/856dfa3102b8996d168c4f195217b7603e1d1bc6?recursive=1"
+    }
+  ]
+}

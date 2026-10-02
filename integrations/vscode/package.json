@@ -1,0 +1,13 @@
+{
+  "name": "mergewarden2-vscode-scaffold",
+  "displayName": "MergeWarden 2 · Integration Scaffold",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Design boundary only; no runnable extension UI is included",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ]
+}

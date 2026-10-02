@@ -1,0 +1,15 @@
+import {join,resolve,toNamespacedPath} from 'node:path';
+import {mkdir} from 'node:fs/promises';
+import {spawnSync} from 'node:child_process';
+import assert from 'node:assert/strict';
+import {read,save,checkIdentities} from '../candidate-dataset-context.mjs';
+const out=resolve(process.argv[2]),repo=resolve(import.meta.dirname,'../..');
+assert.equal((await read(join(out,'phase-c-private/structural-actionability.json'))).privateGate,'PASS');
+const universe=await read(join(out,'universe.json')),predictions=await read(join(out,'phase-b/prediction-freeze.json'));await checkIdentities(predictions.files);
+await mkdir(join(out,'phase-d'));
+const denied=[join(out,'phase-c-private'),...(await read(join(out,'public-preparation-freeze.json'))).denied];
+await save(join(out,'prediction-execution-policy.json'),{denied,oracleReadable:false,targetReadable:false,planSource:'Frozen parsed predictions only'});
+const allowed=[import.meta.dirname,join(repo,'eval/candidate-dataset-context.mjs'),join(repo,'eval/frontier-data.mjs'),join(repo,'src'),join(repo,'integrations/pi/src'),join(repo,'integrations/pi/package.json'),join(repo,'package.json'),join(out,'universe.json'),join(out,'phase-a'),join(out,'phase-b'),join(out,'phase-d'),join(out,'prediction-execution-policy.json')];
+for(const c of universe.primary.filter(c=>c.status==='PUBLIC_ADMITTED'))allowed.push(c.snapshotPath,join(c.state,'graphs'),join(c.state,'blobs'));
+const paths=[...new Set(allowed.flatMap(p=>[p,toNamespacedPath(p)]))];await save(join(out,'phase-d-access-policy.json'),{read:paths,write:[join(out,'phase-d')],denied,child:false,modelCalls:0});
+const child=spawnSync(process.execPath,['--experimental-strip-types','--permission',...paths.map(p=>'--allow-fs-read='+p),'--allow-fs-write='+join(out,'phase-d'),join(import.meta.dirname,'prediction-execute.mjs'),out],{cwd:repo,encoding:'utf8',maxBuffer:2e6});process.stdout.write(child.stdout??'');process.stderr.write(child.stderr??'');assert.equal(child.status,0);

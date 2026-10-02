@@ -1,0 +1,12 @@
+import {join,resolve} from 'node:path';import assert from 'node:assert/strict';
+import {read,save,identity,checkIdentities} from './candidate-dataset-context.mjs';import {exploratoryScore} from './route-utility-rubric.mjs';
+const out=resolve(process.argv[2]),old=resolve(out,'../semantic-router-shadow-20260925'),labelFreeze=await read(join(out,'phase-b/utility-label-freeze.json'));
+await checkIdentities(labelFreeze.files);const labels=(await read(join(out,'phase-b/utility-labels.json'))).filter(r=>r.primary);
+const predictionFreeze=await read(join(old,'primary/prediction-freeze.json'));await checkIdentities(predictionFreeze.files);
+const raw=await read(join(old,'primary/parsed-decisions.json')),manifest=await read(join(old,'dataset-manifest.json'));
+const decisions=raw.map(p=>{const c=manifest.cases.find(c=>c.alias===p.caseId);assert(c);return {caseId:c.caseId,alias:c.alias,oldLabel:c.label,status:p.parsed.status,decision:p.parsed.status==='VALID'?p.parsed.decision:p.parsed.status};});
+await save(join(out,'phase-c/old-semantic-decisions.json'),{source:await identity(join(old,'primary/parsed-decisions.json')),decisions,labelFreeze:await identity(join(out,'phase-b/utility-label-freeze.json'))});
+const result=exploratoryScore(labels,decisions),oldFP=decisions.filter(d=>d.oldLabel==='SHOULD_NOT_ESCALATE'&&d.decision==='ESCALATE'),reclassified=oldFP.map(d=>result.rows.find(r=>r.caseId===d.caseId));
+await save(join(out,'phase-c/exploratory-rescore.json'),{...result,oldFalseEscalations:{count:oldFP.length,stillClearFP:reclassified.filter(r=>r.result==='FP').length,uncertain:reclassified.filter(r=>r.result==='EXCLUDED_UNCERTAIN_LABEL').length,clearLabelMismatch:reclassified.filter(r=>r.result==='TP').length,rows:reclassified},interpretation:'Post-hoc development re-analysis under a different objective; no new formal model test or claim of capability PASS.'});
+await save(join(out,'phase-c/confusion-matrix.json'),{status:'EXPLORATORY_ONLY',...result.matrix,uncertainLabelExcluded:result.rows.filter(r=>r.result==='EXCLUDED_UNCERTAIN_LABEL').length});
+await checkIdentities(labelFreeze.files);await checkIdentities(await read(join(out,'historical-identities.json')));console.log(JSON.stringify(result.matrix));

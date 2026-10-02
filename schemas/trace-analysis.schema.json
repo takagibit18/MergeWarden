@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Post-review trace attribution (does not change FindingCandidate evidence)",
+  "type": "object",
+  "required": ["schemaVersion", "attributionVersion", "provisional", "rawSha256", "analyzerSha256", "definitions", "runs", "byArm"],
+  "properties": {
+    "schemaVersion": {"const": 1}, "attributionVersion": {"const": "trace-attribution-2"}, "provisional": {"type": "boolean"},
+    "rawSha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "analyzerSha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "definitions": {"type": "object"}, "byArm": {"type": "object"},
+    "runs": {"type": "array", "items": {"type": "object", "required": ["runKey", "caseId", "arm", "status", "analysisStatus"], "properties": {
+      "analysisStatus": {"enum": ["ok", "unavailable", "trace_incomplete"]},
+      "usage": {"type": "object", "required": ["reportedInputTokens", "reportedOutputTokens", "reportedTotalTokens", "interruptedResponses", "missingUsageResponses", "incompleteUsage"], "properties": {"incompleteUsage": {"type": "boolean"}, "interruptedResponses": {"type": "integer", "minimum": 0}, "missingUsageResponses": {"type": "integer", "minimum": 0}}},
+      "findings": {"type": "array", "items": {"$ref": "#/$defs/attribution"}},
+      "metrics": {"type": "object", "properties": {"graphResponseTokens": {"type": "null"}, "graphResponseTokenEstimate": {"type": "integer", "minimum": 0}, "firstGraphToolOrdinal": {"type": ["integer", "null"], "minimum": 1}}}
+    }}}
+  },
+  "$defs": {"attribution": {"type": "object", "required": ["predictionId", "discoveryPath", "reason", "submissionCallId", "sourceCallIds", "chains"], "properties": {
+    "predictionId": {"type": "string"}, "discoveryPath": {"enum": ["text_only", "graph_assisted", "ambiguous"]}, "reason": {"type": "string"},
+    "submissionCallId": {"type": ["string", "null"]}, "sourceCallIds": {"type": "array", "items": {"type": "string"}},
+    "chains": {"type": "array", "items": {"type": "object", "required": ["neighborCallId", "sourceCallId", "edgeId", "callerId", "path", "startLine", "endLine", "resolution", "novelToText", "competingTextCallIds", "evidence"]}}
+  }}}
+}

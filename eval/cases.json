@@ -1,0 +1,646 @@
+{
+  "schemaVersion": 1,
+  "corpusId": "controlled-python-v02-20-r2",
+  "cases": [
+    {
+      "id": "single-zero",
+      "repositoryIdentity": "mergewarden-controlled-python-v02-r2/single-zero",
+      "expected": "defect",
+      "category": "single-file",
+      "crossFile": false,
+      "severity": "medium",
+      "relevantLocation": {
+        "path": "ratio.py",
+        "startLine": 3,
+        "endLine": 3
+      },
+      "behavior": "ratio(0,0) raises ZeroDivisionError instead of returning zero.",
+      "humanRationale": "The removed zero-count branch is part of the explicit API contract.",
+      "annotationProvenance": "Agent-authored and statically reviewed in a user-authorized r2 revision after exposure to r1 A/B results; frozen before r2 model runs; not independent human review. See corpus-revision.json.",
+      "expectedFindings": [
+        {
+          "id": "single-zero-bug",
+          "path": "ratio.py",
+          "startLine": 3,
+          "endLine": 3,
+          "severity": "medium",
+          "behavior": "ratio(0,0) raises ZeroDivisionError instead of returning zero."
+        }
+      ],
+      "baseFiles": {
+        "ratio.py": "# Public API: empty input (count=0) returns zero.\ndef ratio(total, count):\n    return total / count if count else 0\n"
+      },
+      "headFiles": {
+        "ratio.py": "# Public API: empty input (count=0) returns zero.\ndef ratio(total, count):\n    return total / count\n"
+      },
+      "baseSha": "8a3d355b5f6b5997901d796aa869f0de3a3050b1",
+      "headSha": "feaf587a864ca1bf32be52c7df2318de537aa493"
+    },
+    {
+      "id": "single-expiry",
+      "repositoryIdentity": "mergewarden-controlled-python-v02-r2/single-expiry",
+      "expected": "defect",
+      "category": "single-file",
+      "crossFile": false,
+      "severity": "medium",
+      "relevantLocation": {
+        "path": "token.py",
+        "startLine": 3,
+        "endLine": 3
+      },
+      "behavior": "valid(10,10) accepts an expired token.",
+      "humanRationale": "Equality was forbidden and is now accepted.",
+      "annotationProvenance": "Agent-authored and statically reviewed in a user-authorized r2 revision after exposure to r1 A/B results; frozen before r2 model runs; not independent human review. See corpus-revision.json.",
+      "expectedFindings": [
+        {
+          "id": "single-expiry-bug",
+          "path": "token.py",
+          "startLine": 3,
+          "endLine": 3,
+          "severity": "medium",
+          "behavior": "valid(10,10) accepts an expired token."
+        }
+      ],
+      "baseFiles": {
+        "token.py": "# Tokens expire at expires, including the equality boundary.\ndef valid(now, expires):\n    return now < expires\n"
+      },
+      "headFiles": {
+        "token.py": "# Tokens expire at expires, including the equality boundary.\ndef valid(now, expires):\n    return now <= expires\n"
+      },
+      "baseSha": "ce7ec7e2adf1bbe08842bd996650579adbbb8772",
+      "headSha": "6dca07fc9e1b97b9097644319dbe213f9406aed5"
+    },
+    {
+      "id": "single-default",
+      "repositoryIdentity": "mergewarden-controlled-python-v02-r2/single-default",
+      "expected": "defect",
+      "category": "single-file",
+      "crossFile": false,
+      "severity": "medium",
+      "relevantLocation": {
+        "path": "items.py",
+        "startLine": 2,
+        "endLine": 4
+      },
+      "behavior": "Repeated collect calls without a bucket share state.",
+      "humanRationale": "A mutable default persists between invocations.",
+      "annotationProvenance": "Agent-authored and statically reviewed in a user-authorized r2 revision after exposure to r1 A/B results; frozen before r2 model runs; not independent human review. See corpus-revision.json.",
+      "expectedFindings": [
+        {
+          "id": "single-default-bug",
+          "path": "items.py",
+          "startLine": 2,
+          "endLine": 4,
+          "severity": "medium",
+          "behavior": "Repeated collect calls without a bucket share state."
+        }
+      ],
+      "baseFiles": {
+        "items.py": "# Each omitted bucket starts an independent collection.\ndef collect(value, bucket=None):\n    if bucket is None: bucket = []\n    bucket.append(value)\n    return bucket\n"
+      },
+      "headFiles": {
+        "items.py": "# Each omitted bucket starts an independent collection.\ndef collect(value, bucket=[]):\n    bucket.append(value)\n    return bucket\n"
+      },
+      "baseSha": "47cf9799174eaafbe7d7a648711deea96bdfe268",
+      "headSha": "94eb4f7fae06112b9f74d14d8563d55ad14eaa62"
+    },
+    {
+      "id": "single-falsey",
+      "repositoryIdentity": "mergewarden-controlled-python-v02-r2/single-falsey",
+      "expected": "defect",
+      "category": "single-file",
+      "crossFile": false,
+      "severity": "medium",
+      "relevantLocation": {
+        "path": "limit.py",
+        "startLine": 3,
+        "endLine": 3
+      },
+      "behavior": "limit(0) becomes 100 and re-enables disabled results.",
+      "humanRationale": "None and zero have different declared semantics.",
+      "annotationProvenance": "Agent-authored and statically reviewed in a user-authorized r2 revision after exposure to r1 A/B results; frozen before r2 model runs; not independent human review. See corpus-revision.json.",
+      "expectedFindings": [
+        {
+          "id": "single-falsey-bug",
+          "path": "limit.py",
+          "startLine": 3,
+          "endLine": 3,
+          "severity": "medium",
+          "behavior": "limit(0) becomes 100 and re-enables disabled results."
+        }
+      ],
+      "baseFiles": {
+        "limit.py": "# None selects 100; zero explicitly disables results.\ndef limit(value):\n    return 100 if value is None else value\n"
+      },
+      "headFiles": {
+        "limit.py": "# None selects 100; zero explicitly disables results.\ndef limit(value):\n    return 100 if not value else value\n"
+      },
+      "baseSha": "8b5124297a2e6915d0fe7ab23cc27590711a3bb2",
+      "headSha": "e042d5998f8248282a800d836b5c0266f7eb949a"
+    },
+    {
+      "id": "cross-units",
+      "repositoryIdentity": "mergewarden-controlled-python-v02-r2/cross-units",
+      "expected": "defect",
+      "category": "cross-file",
+      "crossFile": true,
+      "severity": "medium",
+      "relevantLocation": {
+        "path": "units.py",
+        "startLine": 2,
+        "endLine": 2
+      },
+      "behavior": "deadline(0,2) returns 2 milliseconds instead of 2000.",
+      "humanRationale": "The caller still supplies seconds and consumes milliseconds.",
+      "annotationProvenance": "Agent-authored and statically reviewed in a user-authorized r2 revision after exposure to r1 A/B results; frozen before r2 model runs; not independent human review. See corpus-revision.json.",
+      "expectedFindings": [
+        {
+          "id": "cross-units-bug",
+          "path": "units.py",
+          "startLine": 2,
+          "endLine": 2,
+          "severity": "medium",
+          "behavior": "deadline(0,2) returns 2 milliseconds instead of 2000."
+        }
+      ],
+      "baseFiles": {
+        "units.py": "def milliseconds(seconds):\n    return seconds * 1000\n",
+        "timer.py": "from units import milliseconds\n# now_ms and deadline are integer milliseconds.\ndef deadline(now_ms, delay_seconds):\n    return now_ms + milliseconds(delay_seconds)\n"
+      },
+      "headFiles": {
+        "units.py": "def milliseconds(seconds):\n    return seconds\n",
+        "timer.py": "from units import milliseconds\n# now_ms and deadline are integer milliseconds.\ndef deadline(now_ms, delay_seconds):\n    return now_ms + milliseconds(delay_seconds)\n"
+      },
+      "baseSha": "fe6bc35417570e9e5fa5e31419e0687aa984e94a",
+      "headSha": "d805a390cc23fb41b14e4de328eb2a6eaf4243f1"
+    },
+    {
+      "id": "cross-key",
+      "repositoryIdentity": "mergewarden-controlled-python-v02-r2/cross-key",
+      "expected": "defect",
+      "category": "cross-file",
+      "crossFile": true,
+      "severity": "medium",
+      "relevantLocation": {
+        "path": "user.py",
+        "startLine": 2,
+        "endLine": 2
+      },
+      "behavior": "identifier(1) raises KeyError after the producer key rename.",
+      "humanRationale": "Consumer indexing contract was not migrated.",
+      "annotationProvenance": "Agent-authored and statically reviewed in a user-authorized r2 revision after exposure to r1 A/B results; frozen before r2 model runs; not independent human review. See corpus-revision.json.",
+      "expectedFindings": [
+        {
+          "id": "cross-key-bug",
+          "path": "user.py",
+          "startLine": 2,
+          "endLine": 2,
+          "severity": "medium",
+          "behavior": "identifier(1) raises KeyError after the producer key rename."
+        }
+      ],
+      "baseFiles": {
+        "user.py": "def user_record(uid):\n    return {\"id\": uid}\n",
+        "view.py": "from user import user_record\ndef identifier(uid):\n    return user_record(uid)[\"id\"]\n"
+      },
+      "headFiles": {
+        "user.py": "def user_record(uid):\n    return {\"user_id\": uid}\n",
+        "view.py": "from user import user_record\ndef identifier(uid):\n    return user_record(uid)[\"id\"]\n"
+      },
+      "baseSha": "49035ac26cb2216cae221fc9404fd679d96ca562",
+      "headSha": "13bd76ed2f50057b8a2091a70225509aa73615be"
+    },
+    {
+      "id": "cross-optional",
+      "repositoryIdentity": "mergewarden-controlled-python-v02-r2/cross-optional",
+      "expected": "defect",
+      "category": "cross-file",
+      "crossFile": true,
+      "severity": "medium",
+      "relevantLocation": {
+        "path": "store.py",
+        "startLine": 2,
+        "endLine": 2
+      },
+      "behavior": "display({},\"x\") raises KeyError rather than returning missing.",
+      "humanRationale": "The consumer distinguishes absence using the None sentinel.",
+      "annotationProvenance": "Agent-authored and statically reviewed in a user-authorized r2 revision after exposure to r1 A/B results; frozen before r2 model runs; not independent human review. See corpus-revision.json.",
+      "expectedFindings": [
+        {
+          "id": "cross-optional-bug",
+          "path": "store.py",
+          "startLine": 2,
+          "endLine": 2,
+          "severity": "medium",
+          "behavior": "display({},\"x\") raises KeyError rather than returning missing."
+        }
+      ],
+      "baseFiles": {
+        "store.py": "def lookup(rows, key):\n    return rows.get(key)\n",
+        "view.py": "from store import lookup\ndef display(rows, key):\n    row = lookup(rows, key)\n    return \"missing\" if row is None else row[\"name\"]\n"
+      },
+      "headFiles": {
+        "store.py": "def lookup(rows, key):\n    return rows.get(key, {})\n",
+        "view.py": "from store import lookup\ndef display(rows, key):\n    row = lookup(rows, key)\n    return \"missing\" if row is None else row[\"name\"]\n"
+      },
+      "baseSha": "64b5aca5da5e02f1658a502d2b2bf77ef53dacce",
+      "headSha": "4d1043e4ff01b88651ada63b5a1303fc0cdf2849"
+    },
+    {
+      "id": "cross-sentinel",
+      "repositoryIdentity": "mergewarden-controlled-python-v02-r2/cross-sentinel",
+      "expected": "defect",
+      "category": "cross-file",
+      "crossFile": true,
+      "severity": "high",
+      "relevantLocation": {
+        "path": "index.py",
+        "startLine": 2,
+        "endLine": 2
+      },
+      "behavior": "Removing an absent item deletes the first unrelated item.",
+      "humanRationale": "Zero is a valid index; the caller uses a negative sentinel.",
+      "annotationProvenance": "Agent-authored and statically reviewed in a user-authorized r2 revision after exposure to r1 A/B results; frozen before r2 model runs; not independent human review. See corpus-revision.json.",
+      "expectedFindings": [
+        {
+          "id": "cross-sentinel-bug",
+          "path": "index.py",
+          "startLine": 2,
+          "endLine": 2,
+          "severity": "high",
+          "behavior": "Removing an absent item deletes the first unrelated item."
+        }
+      ],
+      "baseFiles": {
+        "index.py": "def find_index(items, needle):\n    return items.index(needle) if needle in items else -1\n",
+        "delete.py": "from index import find_index\ndef remove(items, needle):\n    idx = find_index(items, needle)\n    if idx >= 0: items.pop(idx)\n"
+      },
+      "headFiles": {
+        "index.py": "def find_index(items, needle):\n    return items.index(needle) if needle in items else 0\n",
+        "delete.py": "from index import find_index\ndef remove(items, needle):\n    idx = find_index(items, needle)\n    if idx >= 0: items.pop(idx)\n"
+      },
+      "baseSha": "f064e561e9f6a5feea5a6c112b0d2a8e7d00d22c",
+      "headSha": "c7140df7242e1ad46badbafdb40c119d6cf70dd4"
+    },
+    {
+      "id": "multihop-retry",
+      "repositoryIdentity": "mergewarden-controlled-python-v02-r2/multihop-retry",
+      "expected": "defect",
+      "category": "multi-hop",
+      "crossFile": true,
+      "severity": "medium",
+      "relevantLocation": {
+        "path": "policy.py",
+        "startLine": 3,
+        "endLine": 3
+      },
+      "behavior": "service.schedule(0) loses the required initial attempt: [] instead of [0].",
+      "humanRationale": "The policy off-by-one propagates through total_attempts to schedule. schedule(2) also loses one attempt, returning [0,1] instead of [0,1,2]. This is a retry-count contract, not a second unit-conversion fixture.",
+      "annotationProvenance": "Agent-authored and statically reviewed in a user-authorized r2 revision after exposure to r1 A/B results; frozen before r2 model runs; not independent human review. See corpus-revision.json.",
+      "expectedFindings": [
+        {
+          "id": "multihop-retry-bug",
+          "path": "policy.py",
+          "startLine": 3,
+          "endLine": 3,
+          "severity": "medium",
+          "behavior": "service.schedule(0) loses the required initial attempt: [] instead of [0]."
+        }
+      ],
+      "baseFiles": {
+        "policy.py": "# Internal: retries counts additional attempts after the initial attempt.\ndef attempts(retries):\n    return retries + 1\n",
+        "adapter.py": "from policy import attempts\ndef total_attempts(retries):\n    return attempts(retries)\n",
+        "service.py": "from adapter import total_attempts\n# Public API: retries is a builtin nonnegative integer.\n# Return attempt indices including the initial attempt, even when retries=0.\ndef schedule(retries):\n    return list(range(total_attempts(retries)))\n"
+      },
+      "headFiles": {
+        "policy.py": "# Internal: retries counts additional attempts after the initial attempt.\ndef attempts(retries):\n    return retries\n",
+        "adapter.py": "from policy import attempts\ndef total_attempts(retries):\n    return attempts(retries)\n",
+        "service.py": "from adapter import total_attempts\n# Public API: retries is a builtin nonnegative integer.\n# Return attempt indices including the initial attempt, even when retries=0.\ndef schedule(retries):\n    return list(range(total_attempts(retries)))\n"
+      },
+      "baseSha": "5517fe62c98998ffe0f50e67e13b506eb234ed27",
+      "headSha": "7667d5d01886a55bfa8a9c48eea3a09e04b88f8c"
+    },
+    {
+      "id": "multihop-filter",
+      "repositoryIdentity": "mergewarden-controlled-python-v02-r2/multihop-filter",
+      "expected": "defect",
+      "category": "multi-hop",
+      "crossFile": true,
+      "severity": "high",
+      "relevantLocation": {
+        "path": "predicate.py",
+        "startLine": 2,
+        "endLine": 2
+      },
+      "behavior": "API exposes deleted rows and drops active rows.",
+      "humanRationale": "The inverted predicate propagates through filtering to the API contract.",
+      "annotationProvenance": "Agent-authored and statically reviewed in a user-authorized r2 revision after exposure to r1 A/B results; frozen before r2 model runs; not independent human review. See corpus-revision.json.",
+      "expectedFindings": [
+        {
+          "id": "multihop-filter-bug",
+          "path": "predicate.py",
+          "startLine": 2,
+          "endLine": 2,
+          "severity": "high",
+          "behavior": "API exposes deleted rows and drops active rows."
+        }
+      ],
+      "baseFiles": {
+        "predicate.py": "def keep(row):\n    return not row[\"deleted\"]\n",
+        "filtering.py": "from predicate import keep\ndef visible(rows):\n    return [row for row in rows if keep(row)]\n",
+        "api.py": "from filtering import visible\n# Deleted records must never be returned.\ndef response(rows):\n    return {\"items\": visible(rows)}\n"
+      },
+      "headFiles": {
+        "predicate.py": "def keep(row):\n    return row[\"deleted\"]\n",
+        "filtering.py": "from predicate import keep\ndef visible(rows):\n    return [row for row in rows if keep(row)]\n",
+        "api.py": "from filtering import visible\n# Deleted records must never be returned.\ndef response(rows):\n    return {\"items\": visible(rows)}\n"
+      },
+      "baseSha": "248df722b4b25fae2574a800cf43804dab5a67d3",
+      "headSha": "cf69e4860a340307be6ea093c5ca22b49dac5f3f"
+    },
+    {
+      "id": "alias-normalize",
+      "repositoryIdentity": "mergewarden-controlled-python-v02-r2/alias-normalize",
+      "expected": "defect",
+      "category": "import-scope",
+      "crossFile": true,
+      "severity": "medium",
+      "relevantLocation": {
+        "path": "helpers.py",
+        "startLine": 2,
+        "endLine": 2
+      },
+      "behavior": "lookup(\"ADMIN\") now raises KeyError.",
+      "humanRationale": "The alias binds helpers.normalize, not the unrelated same-name function.",
+      "annotationProvenance": "Agent-authored and statically reviewed in a user-authorized r2 revision after exposure to r1 A/B results; frozen before r2 model runs; not independent human review. See corpus-revision.json.",
+      "expectedFindings": [
+        {
+          "id": "alias-normalize-bug",
+          "path": "helpers.py",
+          "startLine": 2,
+          "endLine": 2,
+          "severity": "medium",
+          "behavior": "lookup(\"ADMIN\") now raises KeyError."
+        }
+      ],
+      "baseFiles": {
+        "helpers.py": "def normalize(key):\n    return key.lower()\n",
+        "other.py": "def normalize(key):\n    return key\n",
+        "lookup.py": "from helpers import normalize as clean\ndef lookup(key):\n    return {\"admin\": 1}[clean(key)]\n"
+      },
+      "headFiles": {
+        "helpers.py": "def normalize(key):\n    return key\n",
+        "other.py": "def normalize(key):\n    return key\n",
+        "lookup.py": "from helpers import normalize as clean\ndef lookup(key):\n    return {\"admin\": 1}[clean(key)]\n"
+      },
+      "baseSha": "c8d998edb2e1a748f35170eea16a6c6eb87d63da",
+      "headSha": "7485f1ad8ef1676789bcb94a41c7c82516dde7d3"
+    },
+    {
+      "id": "scope-boundary",
+      "repositoryIdentity": "mergewarden-controlled-python-v02-r2/scope-boundary",
+      "expected": "defect",
+      "category": "import-scope",
+      "crossFile": false,
+      "severity": "medium",
+      "relevantLocation": {
+        "path": "scope.py",
+        "startLine": 6,
+        "endLine": 6
+      },
+      "behavior": "check(0) accepts a value forbidden by its local rule.",
+      "humanRationale": "The nested function shadows the module-level allowed function.",
+      "annotationProvenance": "Agent-authored and statically reviewed in a user-authorized r2 revision after exposure to r1 A/B results; frozen before r2 model runs; not independent human review. See corpus-revision.json.",
+      "expectedFindings": [
+        {
+          "id": "scope-boundary-bug",
+          "path": "scope.py",
+          "startLine": 6,
+          "endLine": 6,
+          "severity": "medium",
+          "behavior": "check(0) accepts a value forbidden by its local rule."
+        }
+      ],
+      "baseFiles": {
+        "scope.py": "def allowed(value):\n    return value >= 0\n# Local rule requires strictly positive values.\ndef check(value):\n    def allowed(value):\n        return value > 0\n    return allowed(value)\n"
+      },
+      "headFiles": {
+        "scope.py": "def allowed(value):\n    return value >= 0\n# Local rule requires strictly positive values.\ndef check(value):\n    def allowed(value):\n        return value >= 0\n    return allowed(value)\n"
+      },
+      "baseSha": "83c311043c60a078330544de508ed33515cfe755",
+      "headSha": "11db3caf56f64e308d711cfd15ee2b555204069f"
+    },
+    {
+      "id": "clean-guard",
+      "repositoryIdentity": "mergewarden-controlled-python-v02-r2/clean-guard",
+      "expected": "clean",
+      "category": "hard-negative",
+      "crossFile": true,
+      "severity": "none",
+      "relevantLocation": {
+        "path": "ratio.py",
+        "startLine": 3,
+        "endLine": 3
+      },
+      "behavior": "api.ratio preserves zero, positive fractional and >=1 counts because the caller normalizes the helper input.",
+      "humanRationale": "Both revisions clamp positive count to at least one before the private helper. ratio(1,0.5)=1.0, ratio(1,0)=0 and ratio(2,2)=1.0 in both; no integer-only assumption.",
+      "annotationProvenance": "Agent-authored and statically reviewed in a user-authorized r2 revision after exposure to r1 A/B results; frozen before r2 model runs; not independent human review. See corpus-revision.json.",
+      "expectedFindings": [],
+      "baseFiles": {
+        "ratio.py": "# Internal helper: finite builtin numeric inputs; count >= 1.\ndef _ratio(total, count):\n    return total / max(count, 1)\n",
+        "api.py": "from ratio import _ratio\n# Public API: finite builtin int/float inputs, including fractional count.\n# count <= 0 returns zero; 0 < count < 1 is clamped to one.\ndef ratio(total, count):\n    if count <= 0: return 0\n    return _ratio(total, max(count, 1))\n"
+      },
+      "headFiles": {
+        "ratio.py": "# Internal helper: finite builtin numeric inputs; count >= 1.\ndef _ratio(total, count):\n    return total / count\n",
+        "api.py": "from ratio import _ratio\n# Public API: finite builtin int/float inputs, including fractional count.\n# count <= 0 returns zero; 0 < count < 1 is clamped to one.\ndef ratio(total, count):\n    if count <= 0: return 0\n    return _ratio(total, max(count, 1))\n"
+      },
+      "baseSha": "fb406f33227c28220f1309fd914cf2c671c3387c",
+      "headSha": "27302df990500d44bdef9fb20fe7034b7f5a7836"
+    },
+    {
+      "id": "clean-key-migration",
+      "repositoryIdentity": "mergewarden-controlled-python-v02-r2/clean-key-migration",
+      "expected": "clean",
+      "category": "hard-negative",
+      "crossFile": true,
+      "severity": "none",
+      "relevantLocation": {
+        "path": "user.py",
+        "startLine": 3,
+        "endLine": 3
+      },
+      "behavior": "The public identifier API preserves uid while its internal producer and consumer migrate the key together.",
+      "humanRationale": "The API boundary is visible in both snapshots. _record is internal; identifier(1)=1 in both revisions. No unseen public consumer is assumed.",
+      "annotationProvenance": "Agent-authored and statically reviewed in a user-authorized r2 revision after exposure to r1 A/B results; frozen before r2 model runs; not independent human review. See corpus-revision.json.",
+      "expectedFindings": [],
+      "baseFiles": {
+        "user.py": "# Internal helper; only view.identifier is public.\ndef _record(uid):\n    return {\"id\": uid}\n",
+        "view.py": "from user import _record\n# Public API: identifier returns the supplied builtin integer uid.\ndef identifier(uid):\n    return _record(uid)[\"id\"]\n"
+      },
+      "headFiles": {
+        "user.py": "# Internal helper; only view.identifier is public.\ndef _record(uid):\n    return {\"user_id\": uid}\n",
+        "view.py": "from user import _record\n# Public API: identifier returns the supplied builtin integer uid.\ndef identifier(uid):\n    return _record(uid)[\"user_id\"]\n"
+      },
+      "baseSha": "8657d568ef43ce65df92025636c111531e740a26",
+      "headSha": "3ce88ec5cb6c02c5b3662c68f2bfa7ba6b43a5aa"
+    },
+    {
+      "id": "clean-shadow",
+      "repositoryIdentity": "mergewarden-controlled-python-v02-r2/clean-shadow",
+      "expected": "clean",
+      "category": "hard-negative",
+      "crossFile": false,
+      "severity": "none",
+      "relevantLocation": {
+        "path": "scope.py",
+        "startLine": 4,
+        "endLine": 4
+      },
+      "behavior": "check preserves its nonnegative integer rule despite a real behavior change in the unused module helper.",
+      "humanRationale": "The changed private module _valid differs at zero, but check binds its own nested _valid. check(-1), check(0), check(1) remain False, True, True. The public boundary excludes the unused module helper.",
+      "annotationProvenance": "Agent-authored and statically reviewed in a user-authorized r2 revision after exposure to r1 A/B results; frozen before r2 model runs; not independent human review. See corpus-revision.json.",
+      "expectedFindings": [],
+      "baseFiles": {
+        "scope.py": "# Only check is public; x is a builtin integer.\n# This module helper is internal and has no callers.\ndef _valid(x):\n    return x > 0\ndef check(x):\n    def _valid(x): return x >= 0\n    return _valid(x)\n"
+      },
+      "headFiles": {
+        "scope.py": "# Only check is public; x is a builtin integer.\n# This module helper is internal and has no callers.\ndef _valid(x):\n    return x >= 0\ndef check(x):\n    def _valid(x): return x >= 0\n    return _valid(x)\n"
+      },
+      "baseSha": "d6cff5c1ec6ca3aeed8d740dbeef513d8df79dc8",
+      "headSha": "15913fa3a5cd4184cfbeab4be0478b6a5926ef9f"
+    },
+    {
+      "id": "clean-alias",
+      "repositoryIdentity": "mergewarden-controlled-python-v02-r2/clean-alias",
+      "expected": "clean",
+      "category": "hard-negative",
+      "crossFile": true,
+      "severity": "none",
+      "relevantLocation": {
+        "path": "pkg/use.py",
+        "startLine": 1,
+        "endLine": 3
+      },
+      "behavior": "The public get API preserves normalization and KeyError behavior while a private relative-import alias is renamed.",
+      "humanRationale": "The relative target stays helper.clean, get(\"ADMIN\") remains 1, unknown keys still raise KeyError. The renamed binding is explicitly internal; this is a moderate/easy negative, not proof of difficult retrieval.",
+      "annotationProvenance": "Agent-authored and statically reviewed in a user-authorized r2 revision after exposure to r1 A/B results; frozen before r2 model runs; not independent human review. See corpus-revision.json.",
+      "expectedFindings": [],
+      "baseFiles": {
+        "pkg/__init__.py": "# Public API: pkg.use.get only.\n",
+        "pkg/helper.py": "# Internal normalization helper; keys are builtin strings.\ndef clean(key): return key.lower()\n",
+        "pkg/use.py": "from .helper import clean as _normalize\n# Only get is public; imported underscore bindings are internal.\ndef get(key): return {\"admin\": 1}[_normalize(key)]\n"
+      },
+      "headFiles": {
+        "pkg/__init__.py": "# Public API: pkg.use.get only.\n",
+        "pkg/helper.py": "# Internal normalization helper; keys are builtin strings.\ndef clean(key): return key.lower()\n",
+        "pkg/use.py": "from .helper import clean as _canonical\n# Only get is public; imported underscore bindings are internal.\ndef get(key): return {\"admin\": 1}[_canonical(key)]\n"
+      },
+      "baseSha": "442793978ba7fe0ace96bdf20252efb106c7d39d",
+      "headSha": "6ea0a02402ea899ffe7a01c7b828e717d8b61530"
+    },
+    {
+      "id": "clean-none",
+      "repositoryIdentity": "mergewarden-controlled-python-v02-r2/clean-none",
+      "expected": "clean",
+      "category": "hard-negative",
+      "crossFile": false,
+      "severity": "none",
+      "relevantLocation": {
+        "path": "limit.py",
+        "startLine": 4,
+        "endLine": 4
+      },
+      "behavior": "The validation guard excludes all falsey numeric values before defaulting.",
+      "humanRationale": "Unlike the defect case, zero is rejected before this expression.",
+      "annotationProvenance": "Agent-authored and statically reviewed in a user-authorized r2 revision after exposure to r1 A/B results; frozen before r2 model runs; not independent human review. See corpus-revision.json.",
+      "expectedFindings": [],
+      "baseFiles": {
+        "limit.py": "# value is None or a strictly positive integer.\ndef limit(value):\n    if value is not None and value <= 0: raise ValueError()\n    return 100 if value is None else value\n"
+      },
+      "headFiles": {
+        "limit.py": "# value is None or a strictly positive integer.\ndef limit(value):\n    if value is not None and value <= 0: raise ValueError()\n    return 100 if not value else value\n"
+      },
+      "baseSha": "84f1c1d47c408e438db3ffb2f74bc2b5734ed26c",
+      "headSha": "cf8fa19e201a4d2cb594240171130c982bcd4970"
+    },
+    {
+      "id": "clean-conversion",
+      "repositoryIdentity": "mergewarden-controlled-python-v02-r2/clean-conversion",
+      "expected": "clean",
+      "category": "hard-negative",
+      "crossFile": true,
+      "severity": "none",
+      "relevantLocation": {
+        "path": "units.py",
+        "startLine": 2,
+        "endLine": 2
+      },
+      "behavior": "Moving multiplication from private _convert to delay preserves both public delay and deadline APIs.",
+      "humanRationale": "The exact arithmetic chain remains seconds * 1000 at the public boundary: delay(2)=2000 and deadline(1000,2)=3000. _convert is explicitly internal; its return value is allowed to change.",
+      "annotationProvenance": "Agent-authored and statically reviewed in a user-authorized r2 revision after exposure to r1 A/B results; frozen before r2 model runs; not independent human review. See corpus-revision.json.",
+      "expectedFindings": [],
+      "baseFiles": {
+        "units.py": "# Internal helper; only adapter.delay and service.deadline are public.\ndef _convert(seconds): return seconds * 1000\n",
+        "adapter.py": "from units import _convert\n# Public API: finite builtin numeric seconds -> milliseconds.\ndef delay(seconds): return _convert(seconds)\n",
+        "service.py": "from adapter import delay\n# Public API: finite builtin numeric now_ms and seconds; result is milliseconds.\ndef deadline(now_ms, seconds): return now_ms + delay(seconds)\n"
+      },
+      "headFiles": {
+        "units.py": "# Internal helper; only adapter.delay and service.deadline are public.\ndef _convert(seconds): return seconds\n",
+        "adapter.py": "from units import _convert\n# Public API: finite builtin numeric seconds -> milliseconds.\ndef delay(seconds): return _convert(seconds) * 1000\n",
+        "service.py": "from adapter import delay\n# Public API: finite builtin numeric now_ms and seconds; result is milliseconds.\ndef deadline(now_ms, seconds): return now_ms + delay(seconds)\n"
+      },
+      "baseSha": "6541dda112fae5f12dafdcb657d1df2de112fccb",
+      "headSha": "19afecb47882b6df3405c6c8705a0a367576811c"
+    },
+    {
+      "id": "clean-empty",
+      "repositoryIdentity": "mergewarden-controlled-python-v02-r2/clean-empty",
+      "expected": "clean",
+      "category": "hard-negative",
+      "crossFile": false,
+      "severity": "none",
+      "relevantLocation": {
+        "path": "rows.py",
+        "startLine": 4,
+        "endLine": 4
+      },
+      "behavior": "Removing the private helper empty check preserves public first because the caller rejects empty lists before calling it.",
+      "humanRationale": "The public guard remains. first([])=None, first([0])=0 and first([None])=None in both revisions. Direct _first([]) is outside the explicitly private helper precondition.",
+      "annotationProvenance": "Agent-authored and statically reviewed in a user-authorized r2 revision after exposure to r1 A/B results; frozen before r2 model runs; not independent human review. See corpus-revision.json.",
+      "expectedFindings": [],
+      "baseFiles": {
+        "rows.py": "# Only first is public; rows is always a builtin list, including [].\n# Internal helper is called only with nonempty lists.\ndef _first(rows):\n    if not rows: return None\n    return rows[0]\ndef first(rows):\n    if not rows: return None\n    return _first(rows)\n"
+      },
+      "headFiles": {
+        "rows.py": "# Only first is public; rows is always a builtin list, including [].\n# Internal helper is called only with nonempty lists.\ndef _first(rows):\n    return rows[0]\ndef first(rows):\n    if not rows: return None\n    return _first(rows)\n"
+      },
+      "baseSha": "950bac585b8eb6cfa1fa39814f33333fe3820307",
+      "headSha": "e4a8c58d6a71ac4136903efceac11919caea8582"
+    },
+    {
+      "id": "clean-default",
+      "repositoryIdentity": "mergewarden-controlled-python-v02-r2/clean-default",
+      "expected": "clean",
+      "category": "hard-negative",
+      "crossFile": false,
+      "severity": "none",
+      "relevantLocation": {
+        "path": "items.py",
+        "startLine": 3,
+        "endLine": 3
+      },
+      "behavior": "The apparent mutable-default hazard in private _append is unreachable through public collect, which always passes a list.",
+      "humanRationale": "Two omitted-bucket collect calls allocate separate lists; an explicit list retains identity. _append is private and always receives that list, so its default is never used. This judges observable API regressions, not a style recommendation.",
+      "annotationProvenance": "Agent-authored and statically reviewed in a user-authorized r2 revision after exposure to r1 A/B results; frozen before r2 model runs; not independent human review. See corpus-revision.json.",
+      "expectedFindings": [],
+      "baseFiles": {
+        "items.py": "# Only collect is public: bucket is None or a builtin list.\n# Internal _append always receives an explicit list from collect.\ndef _append(value, bucket=None):\n    if bucket is None: bucket = []\n    bucket.append(value)\n    return bucket\ndef collect(value, bucket=None):\n    if bucket is None: bucket = []\n    return _append(value, bucket)\n"
+      },
+      "headFiles": {
+        "items.py": "# Only collect is public: bucket is None or a builtin list.\n# Internal _append always receives an explicit list from collect.\ndef _append(value, bucket=[]):\n    bucket.append(value)\n    return bucket\ndef collect(value, bucket=None):\n    if bucket is None: bucket = []\n    return _append(value, bucket)\n"
+      },
+      "baseSha": "b49a7a1c4e2867421e26fcd36dd6b5966e2e68b9",
+      "headSha": "8a392b846680e2c37139751595b1c62d60246c2f"
+    }
+  ]
+}

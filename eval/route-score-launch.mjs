@@ -1,0 +1,12 @@
+import {mkdir} from 'node:fs/promises';
+import {resolve,join} from 'node:path';
+import {spawnSync} from 'node:child_process';
+import assert from 'node:assert/strict';
+import {read,save} from './candidate-dataset-context.mjs';
+const out=resolve(process.argv[2]),repo=resolve(import.meta.dirname,'..'),{plans}=await read(join(out,'universe.json'));
+const readPaths=[out,join(repo,'eval'),join(repo,'src'),join(repo,'package.json'),...plans.filter(p=>p.group==='DEFECT_ROUTE_HIT').map(p=>p.historicalArtifactIdentity.trace.path)];
+const writePaths=['phase-b','candidate-rules','gray-zone','funnel.json','metrics.json'].map(p=>join(out,p));
+for(const p of writePaths.slice(0,3))await mkdir(p,{recursive:true});
+await save(join(out,'counterfactual-access-policy.json'),{read:readPaths,write:writePaths,phaseAWriteAllowed:false,networkAllowed:false,childProcessAllowed:false});
+const args=['--experimental-strip-types','--permission',...readPaths.map(p=>'--allow-fs-read='+p),...writePaths.map(p=>'--allow-fs-write='+p),join(repo,'eval/route-diagnostic-score.mjs'),out];
+const r=spawnSync(process.execPath,args,{cwd:repo,encoding:'utf8',maxBuffer:2e6});process.stdout.write(r.stdout??'');process.stderr.write(r.stderr??'');assert.equal(r.status,0);

@@ -1,0 +1,10 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { checkEvidence } from '../src/application/evidence-check.ts';
+import { UnavailableGraph } from '../src/graph/unavailable-graph.ts';
+import { candidate,snippet } from './helpers.mjs';
+test('source evidence hash can be checked without a model',async()=>{const c=candidate();const result=await checkEvidence(c,{read:async()=>({text:snippet,actualSha256:c.evidence[0].contentSha256})});assert.equal(result.ok,true);});
+test('changed source invalidates evidence',async()=>{const c=candidate();const result=await checkEvidence(c,{read:async()=>({text:'changed',actualSha256:c.evidence[0].contentSha256})});assert.equal(result.ok,false);});
+test('source access failure is explicit',async()=>{const result=await checkEvidence(candidate(),{read:async()=>{throw Error('not available');}});assert.equal(result.ok,false);assert.match(result.failures[0],/unavailable/);});
+test('unattached graph is not interpreted as empty successful lookup',async()=>{const graph=new UnavailableGraph();const r=await graph.lookup({snapshotId:'s',query:'save',limit:10});assert.equal(r.status,'not_indexed');assert.deepEqual(r.items,[]);assert.ok(r.warnings.length);});
+test('unattached neighbors also exposes coverage limitation',async()=>{const graph=new UnavailableGraph();const r=await graph.neighbors({snapshotId:'s',symbolId:'x',relation:'CALLS',direction:'incoming',limit:10});assert.equal(r.status,'not_indexed');assert.equal(r.coverage.indexedFiles,0);});

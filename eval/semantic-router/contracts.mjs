@@ -1,0 +1,3 @@
+export const DECISIONS=Object.freeze(['ESCALATE','NO_ESCALATION','UNCERTAIN']);
+export const OUTPUT_SCHEMA=Object.freeze({type:'object',additionalProperties:false,required:['decision','rationale'],properties:{decision:{type:'string',enum:DECISIONS},rationale:{type:'string',minLength:1}}});
+export const MODEL_CONFIG=Object.freeze({provider:'bigmodel',modelId:'glm-5.3-flash',apiKeyEnv:'MERGEWARDEN_API_KEY',temperature:0,top_p:1,reasoning:'low',thinking:{type:'enabled',clear_thinking:false},maxTokens:8192,timeoutMs:180000,maxRetries:0,tools:[],thinkingProvenance:'Explicit low through the shared Pi model policy and native thinkingLevelMap; old experiment locks require re-preparation.'});

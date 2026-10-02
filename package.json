@@ -1,0 +1,43 @@
+{
+  "name": "mergewarden",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Evidence-first review engine foundation with isolated Pi and Tree-sitter adapters",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/takagibit18/MergeWarden.git"
+  },
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "test": "node --experimental-strip-types --test tests/*.test.mjs",
+    "demo": "node --experimental-strip-types src/cli/main.ts demo",
+    "status": "node --experimental-strip-types src/cli/main.ts status",
+    "typecheck": "tsc --noEmit",
+    "check": "npm test && npm run typecheck",
+    "test:integrations": "npm --prefix integrations/pi test && npm --prefix integrations/tree-sitter test && npm --prefix integrations/mcp test",
+    "typecheck:integrations": "npm --prefix integrations/pi run typecheck && npm --prefix integrations/tree-sitter run typecheck && npm --prefix integrations/mcp run typecheck",
+    "verify": "npm run check && npm run typecheck:integrations && npm run test:integrations && npm run test:real-corpus && npm run demo && npm run status",
+    "cli": "node --experimental-strip-types src/cli/main.ts",
+    "mcp": "node --experimental-strip-types integrations/mcp/src/main.ts",
+    "eval": "node --experimental-strip-types eval/run.mjs",
+    "graph:smoke": "node --experimental-strip-types eval/smoke.mjs",
+    "graph:hot-acceptance": "node --experimental-strip-types eval/graph-hot-acceptance.mjs",
+    "eval:traces": "node --experimental-strip-types eval/traces.mjs",
+    "eval:human-review": "node --experimental-strip-types eval/human-review.mjs",
+    "eval:real:build": "python -B eval/real/tools/realgolden.py",
+    "eval:real:probe": "node --experimental-strip-types eval/real/probe.mjs",
+    "eval:real-live": "node --experimental-strip-types eval/real/live.mjs",
+    "eval:real:admission": "node --experimental-strip-types eval/real/cli.mjs",
+    "test:real-corpus": "python -B -m unittest discover -s eval/real/tests -v"
+  },
+  "devDependencies": {
+    "@types/node": "24.12.4",
+    "snowball-stemmers": "0.6.0",
+    "typescript": "5.9.3"
+  }
+}
