@@ -1,4 +1,10 @@
-# 当前实现状态 · 2026-10-01
+# 当前实现状态 · 2026-10-02
+
+## Codex 插件
+
+`mergewarden` 插件将本地 MCP、审查 skill 和固定配置启动器一起分发。Git marketplace 使用明确版本 ref；Release ZIP 保留四份依赖 lockfile，首次配置通过 `npm ci --ignore-scripts` 安装依赖。配置绑定一个 checkout 和模型，存放在仓库之外；Pi OAuth 独立登录，API Key 仅通过明确环境变量名传递。安装后及配置变更后需要新的 Codex 会话。
+
+打包及首次配置说明见 [Codex 插件安装](../README.md#codex-plugin)。本地已验证 Codex CLI 0.159.2 的插件加载、skill 发现和五个 MCP 工具注册；实际 STDIO 测试覆盖无变更任务与断线后持久查询。无变更测试不代表模型审查质量，模型目录也不代表账号权限。CI 在 Windows/Linux、Node 22/24 矩阵中运行原有完整验证并检查插件打包。
 
 ## 本地 Codex MCP
 

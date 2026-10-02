@@ -8,6 +8,8 @@ The configuration and live review workflow were tested with Codex CLI **0.159.2*
 
 ## Configure Codex
 
+For the packaged plugin (skill + fixed-profile launcher), follow the root [Codex plugin instructions](../../README.md#codex-plugin). The manual configuration below remains available. Enable one entry for the same checkout rather than running both the plugin and an older standalone server. The plugin's `setup`/`login` commands select the same independent Pi authentication and existing state directory; installation does not import Codex credentials.
+
 Authenticate MergeWarden first, using its existing CLI and the same state directory:
 
 ```sh
