@@ -229,16 +229,9 @@ npm run cli -- rerun --repo /path/to/repository --run RUN_ID --provider openai-c
 
 ## 工作方式
 
-```mermaid
-flowchart LR
-    A[Git 提交 / 暂存区 / 工作区] --> B[固定审查范围与源码快照]
-    B --> C[审查 Agent]
-    C <--> D[差异 / 文本搜索 / 源码读取]
-    C <--> E[Python CodeGraph 导航]
-    C --> F[整理问题与审查覆盖信息]
-    F --> G[证据完整性校验]
-    G --> H[JSON / Markdown 报告]
-```
+![MergeWarden 核心审查流程：Git 变更固定为不可变快照，由单一 Pi Agent 结合文本、图导航与源码读取进行审查，再经证据和覆盖校验交付 JSON / Markdown 报告](docs/assets/mergewarden-workflow.gif)
+
+[查看静态流程图](docs/assets/mergewarden-workflow.png)
 
 审查以只读方式访问代码。模型接入、会话与工具循环由 Pi 承载；MergeWarden 管理源码快照、导航工具、操作预算、证据校验和报告交付。
 
