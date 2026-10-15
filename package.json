@@ -18,7 +18,7 @@
     "integrations/pi/package.json", "integrations/pi/package-lock.json", "integrations/pi/src",
     "integrations/tree-sitter/package.json", "integrations/tree-sitter/package-lock.json", "integrations/tree-sitter/src", "integrations/tree-sitter/grammars/python.lock.json",
     "integrations/mcp/package.json", "integrations/mcp/package-lock.json", "integrations/mcp/src", "integrations/mcp/README.md",
-    "package-lock.json"
+    "packages/contracts/src/constants.ts", "package-lock.json"
   ],
   "scripts": {
     "setup": "node scripts/setup.mjs",
