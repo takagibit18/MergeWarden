@@ -26,6 +26,9 @@ jobs:
             integrations/pi/package-lock.json
             integrations/tree-sitter/package-lock.json
             integrations/mcp/package-lock.json
+            packages/contracts/package-lock.json
+            integrations/workbench/package-lock.json
+            apps/workbench/package-lock.json
       - run: npm run setup
       - run: npm run verify
         env:

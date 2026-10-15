@@ -8,6 +8,8 @@ MergeWarden 是面向开发者的 AI 代码审查工具。它从 Git 提交、�
 
 [Codex 插件安装](#codex-plugin) · [CLI 快速开始](#quick-start) · [性能表现](#performance) · [常用命令](#commands) · [下载发布包](https://github.com/takagibit18/MergeWarden/releases/tag/codex-plugin-v0.1.0) · [项目主页](https://merge-warden.vercel.app)
 
+本地 React Web 工作台提供项目与工作树隔离的审查历史、报告详情、冻结证据和带语法配色的源码 diff。SQLite 保存显式登记的项目目录及可重建历史索引；原生报告和快照仍是审查结果与源码证据的依据。工作台只允许登记本地项目元数据，不启动或取消审查；启动与访问说明见 [Web 工作台](integrations/workbench/README.md)。
+
 ## 为什么使用 MergeWarden
 
 代码审查不止是检查修改的几行。一次参数调整可能影响调用方，一次继承变化可能破坏子类约定，一次返回值修改可能改变其他模块的行为。MergeWarden 围绕这些依赖关系寻找上下文，并将结论关联到可直接核查的源码。
@@ -159,6 +161,19 @@ npm run cli -- evidence --run RUN_ID --finding FINDING_ID
 
 `show` 查看已保存报告，`evidence` 读取指定问题关联的源码。
 
+### 使用 Web 工作台
+
+```sh
+npm run build:workbench
+npm run workbench -- --repo /path/to/repository --state /path/to/mergewarden-state
+```
+
+打开终端输出的本地 URL。`--state` 指向已有审查数据目录，工作台在其中建立独立的 `workbench.sqlite` 项目注册表和可重建历史索引。工作台只监听本机回环地址，进程退出后访问凭据失效；关闭浏览器页面不会终止该进程。
+
+`--repo` 会成为默认项目。工作台可登记其他 Git 仓库，并将共享同一 Git common directory 的主目录和 worktree 归到一个项目；目录必须由用户显式登记。项目历史支持按工作树、状态和审查范围筛选并游标分页。记录标题复用已验证报告摘要，摘要缺失时显示范围和时间。
+
+详情页重新验证原生报告交付，再从对应冻结快照读取证据。源码展示语法颜色、证据引用范围和 base/head 增删行 diff，并提供分页。网页不启动或取消审查，也不提交反馈、执行学习或共享 Skill；项目登记接口只接收明确的目录路径与显示名。
+
 ### 使用 API Key
 
 在当前终端中设置 `MERGEWARDEN_API_KEY` 环境变量，再指定供应商和模型：
@@ -266,6 +281,8 @@ MergeWarden 以只读工具访问被审仓库，不执行项目导入、构建�
 ```sh
 npm run verify
 ```
+
+`npm run setup` 安装七个包的锁定依赖并构建共享接口，安装过程禁用生命周期脚本。`npm run verify` 包含原有引擎和适配器检查，以及接口契约、工作台 HTTP 测试、前端组件测试、lint 和生产构建。日常前端联调使用 `npm run build:workbench` 后启动工作台，由同一 HTTP 服务提供页面与 API。
 
 生成 Codex 插件发布包和逐文件 SHA-256 清单：
 
