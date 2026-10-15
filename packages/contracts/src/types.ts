@@ -1,7 +1,9 @@
-export type ReviewScope = 'staged' | 'worktree' | 'commits';
-export type ReviewStatus = 'accepted' | 'running' | 'completed' | 'partial' | 'failed' | 'cancelled' | 'no_changes' | 'delivery_failed' | 'interrupted';
-export type ReportStatus = 'completed' | 'partial' | 'failed' | 'cancelled';
-export type Severity = 'critical' | 'high' | 'medium' | 'low';
+import type { REPORT_STATUSES, REVIEW_SCOPES, REVIEW_STATUSES, SEVERITIES } from './constants.js';
+
+export type ReviewScope = typeof REVIEW_SCOPES[number];
+export type ReviewStatus = typeof REVIEW_STATUSES[number];
+export type ReportStatus = typeof REPORT_STATUSES[number];
+export type Severity = typeof SEVERITIES[number];
 
 export interface HistoryQuery {
   workspaceId?: string | undefined;

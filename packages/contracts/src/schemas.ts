@@ -1,4 +1,5 @@
 import { z } from 'zod/v4';
+import { REPORT_STATUSES, REVIEW_SCOPES, REVIEW_STATUSES, SEVERITIES } from './constants.js';
 import type {
   ConfigResponse, ErrorResponse, EvidenceRefDto, EvidenceResponse, FindingDto,
   HistoryItem, HistoryResponse, ReportDto, ReportResponse, SnapshotIdentityDto,
@@ -8,10 +9,10 @@ import type {
 
 export const idSchema = z.string().regex(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/);
 export const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
-export const reviewScopeSchema = z.enum(['staged', 'worktree', 'commits']);
-export const reviewStatusSchema = z.enum(['accepted', 'running', 'completed', 'partial', 'failed', 'cancelled', 'no_changes', 'delivery_failed', 'interrupted']);
-export const reportStatusSchema = z.enum(['completed', 'partial', 'failed', 'cancelled']);
-export const severitySchema = z.enum(['critical', 'high', 'medium', 'low']);
+export const reviewScopeSchema = z.enum(REVIEW_SCOPES);
+export const reviewStatusSchema = z.enum(REVIEW_STATUSES);
+export const reportStatusSchema = z.enum(REPORT_STATUSES);
+export const severitySchema = z.enum(SEVERITIES);
 const timestamp = z.string().datetime({ offset: true });
 const count = z.number().int().nonnegative();
 

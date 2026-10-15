@@ -41,3 +41,12 @@ export function assertCandidate(value: unknown, snapshotId: string): asserts val
     requireCondition(typeof evidence.contentSha256 === "string" && /^[a-f0-9]{64}$/i.test(evidence.contentSha256), "invalid content hash");
   }
 }
+export const isUuid = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value);
+export const isSha256 = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+/** Exactly the output of Date#toISOString; used for timestamps this process writes. */
+export const isCanonicalTimestamp = (value: unknown): value is string =>
+  typeof value === "string" && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
+/** UTC timestamps written by native artifacts, which may carry up to nanosecond precision. */
+export const isNativeTimestamp = (value: unknown): value is string =>
+  typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/.test(value) &&
+  Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0, 19) === value.slice(0, 19);
