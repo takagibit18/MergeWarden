@@ -51,7 +51,7 @@ The public API exposes these read routes:
 Review reads have no unscoped form. Use `defaultProjectId` from the config response
 for the repository the adapter was launched with.
 
-The app can explicitly register a project with `POST /api/v1/projects` and a same-repository worktree with `POST /api/v1/projects/:projectId/workspaces`. Both endpoints require the authenticated same-origin session and accept only an absolute Git root plus an optional display name. Registration does not scan or execute repository files. Review history, report, evidence and diff routes remain read-only; review start/cancel, feedback and learning routes are absent.
+The app can explicitly register a project with `POST /api/v1/projects` and a same-repository worktree with `POST /api/v1/projects/:projectId/workspaces`. A directory submitted to `POST /api/v1/projects` whose Git common directory already belongs to a registered project joins that project as a worktree instead of creating a second project. Both endpoints require the authenticated same-origin session and accept only an absolute Git root plus an optional display name. Registration does not scan or execute repository files. Review history, report, evidence and diff routes remain read-only; review start/cancel, feedback and learning routes are absent.
 
 For the finding path segment, use `encodeFindingId(rawId)` from
 `@mergewarden/contracts`; the adapter decodes and validates the opaque `f_`

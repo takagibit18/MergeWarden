@@ -62,6 +62,15 @@ export class ProjectRegistry implements ProjectRegistryPort {
     return (this.sql.prepare('SELECT project_id FROM project_workspaces WHERE workspace_id=?').get(repositoryId) as { project_id: string } | undefined)?.project_id;
   }
 
+  private addWorktree(projectId: string, repositoryId: string, input: ProjectRegistration): ProjectDto {
+    const count = this.sql.prepare('SELECT count(*) AS n FROM project_workspaces WHERE project_id=?').get(projectId) as { n: number };
+    if (count.n >= MAX_WORKSPACES) throw new WorkbenchError('REGISTRY_LIMIT', `A project supports at most ${MAX_WORKSPACES} registered directories.`, 409);
+    this.sql.prepare(`INSERT INTO project_workspaces(workspace_id,project_id,name,kind,registered_at) VALUES(?,?,?,'worktree',?)`)
+      .run(repositoryId, projectId, input.name, input.registeredAt);
+    return this.project(projectId);
+  }
+
+  /** A directory whose Git common directory already belongs to a project joins it as a worktree. */
   registerProject(input: ProjectRegistration): ProjectDto {
     return this.database.transaction(() => {
       const repositoryId = this.registerRepository(input.repositoryPath);
@@ -72,6 +81,9 @@ export class ProjectRegistry implements ProjectRegistryPort {
         }
         return this.project(existing);
       }
+      const sibling = this.sql.prepare('SELECT project_id FROM projects WHERE common_git_directory=? ORDER BY created_at,project_id LIMIT 1')
+        .get(input.commonGitDirectory) as { project_id: string } | undefined;
+      if (sibling) return this.addWorktree(sibling.project_id, repositoryId, input);
       const count = this.sql.prepare('SELECT count(*) AS n FROM projects').get() as { n: number };
       if (count.n >= MAX_PROJECTS) throw new WorkbenchError('REGISTRY_LIMIT', `The workbench supports at most ${MAX_PROJECTS} registered projects.`, 409);
       const id = randomUUID();
@@ -93,11 +105,7 @@ export class ProjectRegistry implements ProjectRegistryPort {
         if (existing !== projectId) throw new WorkbenchError('WORKSPACE_CONFLICT', 'This directory is registered to another project.', 409);
         return this.project(projectId);
       }
-      const count = this.sql.prepare('SELECT count(*) AS n FROM project_workspaces WHERE project_id=?').get(projectId) as { n: number };
-      if (count.n >= MAX_WORKSPACES) throw new WorkbenchError('REGISTRY_LIMIT', `A project supports at most ${MAX_WORKSPACES} registered directories.`, 409);
-      this.sql.prepare(`INSERT INTO project_workspaces(workspace_id,project_id,name,kind,registered_at) VALUES(?,?,?,'worktree',?)`)
-        .run(repositoryId, projectId, input.name, input.registeredAt);
-      return this.project(projectId);
+      return this.addWorktree(projectId, repositoryId, input);
     });
   }
 }
