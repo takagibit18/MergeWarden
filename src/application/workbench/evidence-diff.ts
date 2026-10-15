@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import type { DiffQuery, DiffRowDto, DiffSideDto, FrozenDiffDto } from '../../packages/contracts/src/types.ts';
-import { WorkbenchError } from '../ports/workbench-errors.ts';
+import type { DiffQuery, DiffRowDto, DiffSideDto, FrozenDiffDto } from '../../../packages/contracts/src/types.ts';
+import { WorkbenchError } from '../../ports/workbench.ts';
 
 export interface EvidenceDiffInput {
   snapshotId: string;
@@ -10,6 +10,15 @@ export interface EvidenceDiffInput {
   after: string | null;
   baseMode: string | null;
   headMode: string | null;
+}
+
+/** One side of a frozen file whose revision cannot be shown as text (binary, oversized or unreadable). */
+export interface FrozenFileFacts {
+  exists: boolean;
+  /** Verified text when that side is text; null otherwise. */
+  text: string | null;
+  mode: string | null;
+  hash: string | null;
 }
 
 /** Internal fault-injection limits. HTTP callers cannot supply or raise these limits. */
@@ -218,4 +227,14 @@ export function buildEvidenceDiff(input: EvidenceDiffInput, query: DiffQuery = {
   const truncated = next < all.length;
   return { ...metadata, status: 'ok', rows, offset, totalRows: all.length, nextOffset: truncated ? next : null, truncated,
     warnings: truncated ? ['Frozen diff display is paginated; additional rows remain.'] : [] };
+}
+
+/** Metadata-only diff for a frozen file whose base or head revision is not text. */
+export function unsupportedEvidenceDiff(snapshotId: string, path: string, base: FrozenFileFacts, head: FrozenFileFacts): FrozenDiffDto {
+  const facts = (file: FrozenFileFacts): DiffSideDto => ({ ...side(file.text, file.mode), exists: file.exists, mode: file.mode });
+  const kind = !base.exists && head.exists ? 'added' : base.exists && !head.exists ? 'deleted'
+    : base.hash === head.hash && base.mode === head.mode ? 'unchanged' : 'modified';
+  return { snapshotId, path, status: 'unavailable', changeType: kind, base: facts(base), head: facts(head),
+    rows: [], offset: 0, totalRows: 0, nextOffset: null, truncated: false,
+    warnings: ['The frozen file has an unsupported revision; a text diff is unavailable.'] };
 }

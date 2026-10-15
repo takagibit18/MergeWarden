@@ -1,14 +1,10 @@
 import { lstat, realpath } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import type { RepositoryDirectory } from '../../ports/workbench.ts';
 import { git } from '../git.ts';
 
-export interface RegisteredRepositoryDirectory {
-  repositoryPath: string;
-  commonGitDirectory: string;
-}
-
 /** Resolve only a directory explicitly supplied by the host. No worktrees are discovered. */
-export async function repositoryDirectory(path: string): Promise<RegisteredRepositoryDirectory> {
+export async function repositoryDirectory(path: string): Promise<RepositoryDirectory> {
   if (typeof path !== 'string' || !path.trim() || path.length > 4096 || /[\x00-\x1f]/.test(path)) {
     throw new Error('A repository root directory is required');
   }

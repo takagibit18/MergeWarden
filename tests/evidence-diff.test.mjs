@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
-import { buildEvidenceDiff } from '../src/application/evidence-diff.ts';
+import { buildEvidenceDiff } from '../src/application/workbench/index.ts';
 
 const HASH = 'a'.repeat(64);
 const input = (before, after, overrides = {}) => ({ snapshotId: HASH, path: 'app.py', before, after,

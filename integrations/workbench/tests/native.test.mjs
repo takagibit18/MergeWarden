@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { encodeFindingId } from '@mergewarden/contracts';
 import { MemoryJournal } from '../../../src/adapters/memory-journal.ts';
-import { WorkbenchService } from '../../../src/application/workbench-service.ts';
+import { openWorkbench } from '../../../src/composition/workbench.ts';
 import { ReviewEngine } from '../../../src/engine/review.ts';
 import { repositoryFixture } from '../../../tests/repository-fixture.mjs';
 import { launchWorkbench } from '../src/launch.ts';
@@ -43,11 +43,12 @@ test('HTTP reads a real SQLite projection, verified native report and frozen sou
   t.after(async () => { if (server) await server.close(); else await service?.close(); });
   const f = await deliveredFixture(t);
   const assets = await assetsFixture(t);
-  service = await WorkbenchService.create({ repositoryPath: f.repository, stateDir: f.state });
+  service = await openWorkbench({ repositoryPath: f.repository, stateDir: f.state });
   server = createWorkbenchServer({ service, assetsDir: assets.assetsDir, origin: ORIGIN });
   const cookie = await authenticate(server), runId = f.result.runId;
+  const api = `/api/v1/projects/${service.defaultProjectId}`;
 
-  const history = await get(server.app, '/api/v1/reviews', cookie);
+  const history = await get(server.app, `${api}/reviews`, cookie);
   assert.equal(history.statusCode, 200, history.body);
   assert.equal(history.json().items.length, 1);
   assert.equal(history.json().items[0].id, runId);
@@ -55,13 +56,13 @@ test('HTTP reads a real SQLite projection, verified native report and frozen sou
   assert.equal(history.json().items[0].reportAvailability, 'verified');
   const sqlite = await readFile(join(f.state, 'workbench.sqlite'));
   assert.equal(sqlite.subarray(0, 16).toString(), 'SQLite format 3\0');
-  assertError(await get(server.app, '/api/v1/reviews?cursor=not-a-cursor', cookie), 400, 'INVALID_QUERY');
+  assertError(await get(server.app, `${api}/reviews?cursor=not-a-cursor`, cookie), 400, 'INVALID_QUERY');
 
-  const task = await get(server.app, `/api/v1/tasks/${runId}`, cookie);
+  const task = await get(server.app, `${api}/tasks/${runId}`, cookie);
   assert.equal(task.statusCode, 200, task.body);
   assert.equal(task.json().done, true);
   assert.equal(task.json().canCancel, false);
-  const report = await get(server.app, `/api/v1/runs/${runId}/report`, cookie);
+  const report = await get(server.app, `${api}/runs/${runId}/report`, cookie);
   assert.equal(report.statusCode, 200, report.body);
   assert.equal(report.json().deliveryVerified, true);
   assert.equal(report.json().report.findings[0].id, f.findingId);
@@ -70,7 +71,7 @@ test('HTTP reads a real SQLite projection, verified native report and frozen sou
 
   // Changing the working file cannot alter the evidence retained by this run.
   await f.write('app.py', 'changed after review\n');
-  const path = `/api/v1/runs/${runId}/findings/${encodeFindingId(f.findingId)}/evidence/0`;
+  const path = `${api}/runs/${runId}/findings/${encodeFindingId(f.findingId)}/evidence/0`;
   const evidence = await get(server.app, path, cookie);
   assert.equal(evidence.statusCode, 200, evidence.body);
   assert.match(evidence.json().source.text, /return total \/ count/);
@@ -78,15 +79,15 @@ test('HTTP reads a real SQLite projection, verified native report and frozen sou
   assert.equal(evidence.json().source.contentSha256, report.json().report.findings[0].evidence[0].contentSha256);
 
   await writeFile(f.result.reportPath, `${await readFile(f.result.reportPath, 'utf8')} `);
-  assertError(await get(server.app, `/api/v1/runs/${runId}/report`, cookie), 409, 'REPORT_INTEGRITY');
-  const corruptTask = await get(server.app, `/api/v1/tasks/${runId}`, cookie);
+  assertError(await get(server.app, `${api}/runs/${runId}/report`, cookie), 409, 'REPORT_INTEGRITY');
+  const corruptTask = await get(server.app, `${api}/tasks/${runId}`, cookie);
   assert.equal(corruptTask.statusCode, 200, corruptTask.body);
   assert.equal(corruptTask.json().done, false);
   assert.equal(corruptTask.json().item.status, null);
   assert.equal(corruptTask.json().item.reportAvailability, 'unavailable');
   assert.equal(corruptTask.json().item.error.code, 'REPORT_INTEGRITY');
   assertError(await get(server.app, path, cookie), 409, 'REPORT_INTEGRITY');
-  const invalidated = await get(server.app, '/api/v1/reviews', cookie);
+  const invalidated = await get(server.app, `${api}/reviews`, cookie);
   assert.equal(invalidated.statusCode, 200, invalidated.body);
   assert.ok(invalidated.json().sync.skipped >= 1);
   assert.ok(!invalidated.json().items.some(item => item.id === runId && item.reportAvailability === 'verified'));
@@ -114,8 +115,9 @@ test('actual port-zero loopback launcher serves app and API with a maximal opaqu
   assert.ok((await page.text()).includes('Compiled app fixture'));
   const config = await fetch(`${running.origin}/api/v1/config`, { headers: { cookie } });
   assert.equal(config.status, 200);
-  assert.equal((await config.json()).capabilities.startReview, false);
-  const evidence = await fetch(`${running.origin}/api/v1/runs/${f.result.runId}/findings/${encodeFindingId(findingId)}/evidence/0`, { headers: { cookie } });
+  const { capabilities, defaultProjectId } = await config.json();
+  assert.equal(capabilities.startReview, false);
+  const evidence = await fetch(`${running.origin}/api/v1/projects/${defaultProjectId}/runs/${f.result.runId}/findings/${encodeFindingId(findingId)}/evidence/0`, { headers: { cookie } });
   assert.equal(evidence.status, 200, await evidence.clone().text());
   assert.equal((await evidence.json()).findingId, findingId);
   const origin = running.origin;

@@ -2,13 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { opendir } from 'node:fs/promises';
 import type { Dir } from 'node:fs';
 import { join } from 'node:path';
-import type { CompletedHistorySweep, HistorySourceKind } from '../../ports/workbench-history.ts';
-
-export interface ScannedSource { kind: HistorySourceKind; id: string; directory: boolean; epoch: string }
-export interface ScanBatch { sources: ScannedSource[]; completed: CompletedHistorySweep[]; truncated: boolean }
+import type { HistoryScanner, HistorySourceKind, ScanBatch, ScannedSource } from '../../ports/workbench.ts';
 
 /** Directory handles advance between batches without loading the whole state tree. */
-export class NativeHistoryScanner {
+export class NativeHistoryScanner implements HistoryScanner {
   private stateDir: string;
   private directories = new Map<HistorySourceKind, { handle: Dir; epoch: string; startedAt: string }>();
   private pending: HistorySourceKind[] = ['run', 'task'];

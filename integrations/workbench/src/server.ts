@@ -11,8 +11,8 @@ import {
   diffQuerySchema, evidenceDiffResponseSchema,
 } from '@mergewarden/contracts';
 import type { ConfigResponse } from '@mergewarden/contracts';
-import { WorkbenchError } from '../../../src/application/workbench-service.ts';
-import type { WorkbenchService } from '../../../src/application/workbench-service.ts';
+import { WorkbenchError } from '../../../src/application/workbench/index.ts';
+import type { WorkbenchService } from '../../../src/application/workbench/index.ts';
 import { AssetStore, requestPath } from './assets.ts';
 import { bootstrapCsp, bootstrapHtml } from './bootstrap.ts';
 import { HttpError } from './http-error.ts';
@@ -59,9 +59,8 @@ function sendError(request: FastifyRequest, reply: FastifyReply, code: string, m
 }
 const config = (service: ReadService): ConfigResponse => ({
   apiVersion: 'v1', repository: { path: service.repositoryPath, name: basename(service.repositoryPath) },
-  ...(service.defaultProjectId ? { defaultProjectId: service.defaultProjectId } : {}),
-  capabilities: { readHistory: true, readReport: true, readEvidence: true,
-    ...(service.defaultProjectId ? { manageProjects: true, readDiff: true } : {}),
+  defaultProjectId: service.defaultProjectId,
+  capabilities: { readHistory: true, readReport: true, readEvidence: true, manageProjects: true, readDiff: true,
     startReview: false, cancelReview: false, feedback: false, learning: false },
   history: { defaultLimit: 20, maxLimit: 50 },
 });
@@ -124,9 +123,9 @@ export function createWorkbenchServer(options: ServerOptions): WorkbenchHttpServ
     return output(configResponseSchema, config(options.service));
   });
 
-  const projectId = (request: FastifyRequest): string | undefined => {
+  const projectId = (request: FastifyRequest): string => {
     const raw = request.params as Record<string, unknown>;
-    return raw.projectId === undefined ? undefined : input(taskParamsSchema, { id: raw.projectId }, 'INVALID_PARAMS').id;
+    return input(taskParamsSchema, { id: raw.projectId }, 'INVALID_PARAMS').id;
   };
   const runId = (request: FastifyRequest): string => {
     const raw = request.params as Record<string, unknown>;
@@ -151,40 +150,37 @@ export function createWorkbenchServer(options: ServerOptions): WorkbenchHttpServ
   });
   app.post('/api/v1/projects/:projectId/workspaces', { bodyLimit: 16 * 1024 }, async request => {
     input(noQuerySchema, request.query);
-    const id = projectId(request)!;
+    const id = projectId(request);
     const registration = input(workspaceRegistrationSchema, request.body, 'INVALID_BODY');
     return output(projectSchema, await options.service.registerWorkspace(id, registration));
   });
 
-  for (const prefix of ['/api/v1', '/api/v1/projects/:projectId']) {
-    app.get(`${prefix}/reviews`, async request => {
-      const id = projectId(request);
-      const query = input(historyQuerySchema, request.query);
-      return output(historyResponseSchema, await options.service.listReviews(query, id));
-    });
-    app.get(`${prefix}/tasks/:id`, async request => {
-      input(noQuerySchema, request.query);
-      const id = projectId(request);
-      return output(taskResponseSchema, await options.service.task(runId(request), id));
-    });
-    app.get(`${prefix}/runs/:id/report`, async request => {
-      input(noQuerySchema, request.query);
-      const id = projectId(request);
-      return output(reportResponseSchema, await options.service.report(runId(request), id));
-    });
-    app.get(`${prefix}/runs/:id/findings/:findingId/evidence/:index`, async request => {
-      input(noQuerySchema, request.query);
-      const project = projectId(request);
-      const { id, findingId, index } = evidenceParams(request);
-      return output(evidenceResponseSchema, await options.service.evidence(id, findingId, index, project));
-    });
-    app.get(`${prefix}/runs/:id/findings/:findingId/evidence/:index/diff`, async request => {
-      const project = projectId(request);
-      const { id, findingId, index } = evidenceParams(request);
-      const query = input(diffQuerySchema, request.query);
-      return output(evidenceDiffResponseSchema, await options.service.evidenceDiff(id, findingId, index, query, project));
-    });
-  }
+  const prefix = '/api/v1/projects/:projectId';
+  app.get(`${prefix}/reviews`, async request => {
+    const project = projectId(request);
+    const query = input(historyQuerySchema, request.query);
+    return output(historyResponseSchema, await options.service.listReviews(project, query));
+  });
+  app.get(`${prefix}/tasks/:id`, async request => {
+    input(noQuerySchema, request.query);
+    return output(taskResponseSchema, await options.service.task(projectId(request), runId(request)));
+  });
+  app.get(`${prefix}/runs/:id/report`, async request => {
+    input(noQuerySchema, request.query);
+    return output(reportResponseSchema, await options.service.report(projectId(request), runId(request)));
+  });
+  app.get(`${prefix}/runs/:id/findings/:findingId/evidence/:index`, async request => {
+    input(noQuerySchema, request.query);
+    const project = projectId(request);
+    const { id, findingId, index } = evidenceParams(request);
+    return output(evidenceResponseSchema, await options.service.evidence(project, id, findingId, index));
+  });
+  app.get(`${prefix}/runs/:id/findings/:findingId/evidence/:index/diff`, async request => {
+    const project = projectId(request);
+    const { id, findingId, index } = evidenceParams(request);
+    const query = input(diffQuerySchema, request.query);
+    return output(evidenceDiffResponseSchema, await options.service.evidenceDiff(project, id, findingId, index, query));
+  });
 
   const page = async (request: FastifyRequest, reply: FastifyReply) => {
     const path = requestPath(request.raw.url ?? request.url);

@@ -1,4 +1,4 @@
-import { WorkbenchService } from '../../../src/application/workbench-service.ts';
+import { openWorkbench } from '../../../src/composition/workbench.ts';
 import { HttpError } from './http-error.ts';
 import { createWorkbenchServer } from './server.ts';
 import type { WorkbenchHttpServer } from './server.ts';
@@ -21,7 +21,7 @@ export interface RunningWorkbench {
 export async function launchWorkbench(options: LaunchOptions): Promise<RunningWorkbench> {
   const port = options.port ?? 0;
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new HttpError('CONFIGURATION', 'Port must be an integer between 0 and 65535.', 400);
-  const service = await WorkbenchService.create({
+  const service = await openWorkbench({
     repositoryPath: options.repositoryPath, stateDir: options.stateDir,
     ...(options.syncBatchSize !== undefined ? { syncBatchSize: options.syncBatchSize } : {}),
   });

@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HttpError } from './http-error.ts';
 import type { LaunchOptions } from './launch.ts';
-import { WorkbenchError } from '../../../src/ports/workbench-errors.ts';
+import { WorkbenchError } from '../../../src/application/workbench/index.ts';
 
 export const HELP = `MergeWarden local read-only Workbench (Node.js 22.19+)
 node --experimental-strip-types integrations/workbench/src/main.ts --repo PATH [--state OUTSIDE_PATH] [--port N]

@@ -5,13 +5,16 @@ import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Worker } from 'node:worker_threads';
-import { WorkbenchService, WorkbenchError } from '../src/application/workbench-service.ts';
+import { WorkbenchError } from '../src/application/workbench/index.ts';
+import { openWorkbench } from '../src/composition/workbench.ts';
 import { MemoryJournal } from '../src/adapters/memory-journal.ts';
 import { ReviewEngine } from '../src/engine/review.ts';
 import { deliver, readReport, readRun, runPath } from '../src/engine/reports.ts';
-import { WorkbenchIndex } from '../src/infrastructure/workbench-db/index.ts';
+import { WorkbenchDatabase } from '../src/infrastructure/workbench-db/database.ts';
+import { HistoryProjection } from '../src/infrastructure/workbench-db/history-projection.ts';
+import { ProjectRegistry } from '../src/infrastructure/workbench-db/project-registry.ts';
 import { migrateWorkbenchDatabase, WORKBENCH_SCHEMA_VERSION } from '../src/infrastructure/workbench-db/migrations.ts';
-import { repositoryDirectory } from '../src/infrastructure/workbench-db/registration.ts';
+import { repositoryDirectory } from '../src/infrastructure/workbench-fs/git-registration.ts';
 import { sha256, writeJson } from '../src/infrastructure/files.ts';
 import { SnapshotStore } from '../src/snapshot/store.ts';
 import { repositoryFixture } from './repository-fixture.mjs';
@@ -38,7 +41,7 @@ async function fixture(t) {
   const options = { repositoryPath: f.repository, stateDir: f.state, model, skills: 'off', learn: 'off', input: { kind: 'commits', base: f.base, head } };
   return { ...f, options,
     async review(script = submit, overrides = {}) { return new ReviewEngine(runtime(script)).run({ ...options, ...overrides }); },
-    async service(overrides = {}) { const service = await WorkbenchService.create({ repositoryPath: f.repository, stateDir: f.state, ...overrides }); services.push(service); return service; },
+    async service(overrides = {}) { const service = await openWorkbench({ repositoryPath: f.repository, stateDir: f.state, ...overrides }); services.push(service); return service; },
     track(service) { services.push(service); return service; } };
 }
 async function copyRun(f, originalId, overrides = {}) {
@@ -60,7 +63,7 @@ async function receipt(f, fields = {}) {
 }
 async function fullSweep(service) {
   for (let attempt = 0; attempt < 200; attempt++) {
-    const page = await service.listReviews({ limit: 50 });
+    const page = await service.listReviews(service.defaultProjectId, { limit: 50 });
     if (!page.sync.truncated) return page;
   }
   throw new Error('Bounded native scan did not finish');
@@ -80,13 +83,13 @@ test('workbench projects real native delivery and reads unchanged frozen evidenc
   assert.equal(page.items[0].findingCount, 1);
   assert.equal(page.items[0].reportAvailability, 'verified');
   assert.doesNotMatch(JSON.stringify(page), /credential-must-not-leak|private-manifest-field|runtimeConfiguration/);
-  assert.deepEqual((await service.report(result.runId)).report, result.report);
+  assert.deepEqual((await service.report(service.defaultProjectId, result.runId)).report, result.report);
   await f.write('app.py', 'worktree contents changed\n');
-  const evidence = await service.evidence(result.runId, 'division');
+  const evidence = await service.evidence(service.defaultProjectId, result.runId, 'division');
   assert.equal(evidence.source.text, 'def ratio(total, count):\n    return total / count');
   assert.equal(evidence.source.contentSha256, result.report.findings[0].evidence[0].contentSha256);
-  assert.equal((await service.task(result.runId)).canCancel, false);
-  assert.equal((await service.task(result.runId)).done, true);
+  assert.equal((await service.task(service.defaultProjectId, result.runId)).canCancel, false);
+  assert.equal((await service.task(service.defaultProjectId, result.runId)).done, true);
 });
 
 test('workbench public reports drop unexpected report and nested reference fields', async t => {
@@ -95,7 +98,7 @@ test('workbench public reports drop unexpected report and nested reference field
   report.secret = 'untrusted-extra-report'; report.snapshot.secret = 'untrusted-extra-snapshot';
   report.findings[0].secret = 'untrusted-extra-finding'; report.findings[0].evidence[0].secret = 'untrusted-extra-evidence';
   await deliver(f.state, await readRun(f.state, result.runId), report);
-  const output = await service.report(result.runId);
+  const output = await service.report(service.defaultProjectId, result.runId);
   assert.deepEqual(output.report, result.report);
   assert.doesNotMatch(JSON.stringify(output), /untrusted-extra/);
 });
@@ -131,18 +134,18 @@ test('history normalizes legacy ISO timestamps and keyset pages ties without dup
   const found = [];
   let cursor;
   do {
-    const page = await service.listReviews({ status: 'completed', scope: 'commits', limit: 2, ...(cursor ? { cursor } : {}) });
+    const page = await service.listReviews(service.defaultProjectId, { status: 'completed', scope: 'commits', limit: 2, ...(cursor ? { cursor } : {}) });
     found.push(...page.items.map(item => item.id)); cursor = page.nextCursor;
   } while (cursor);
   assert.equal(found.length, 5); assert.equal(new Set(found).size, 5);
-  assert.equal((await service.listReviews({ status: 'partial' })).items.length, 1);
-  assert.equal((await service.listReviews({ scope: 'staged' })).items.length, 0);
-  const first = await service.listReviews({ status: 'completed', limit: 1 });
-  await assert.rejects(service.listReviews({ status: 'partial', cursor: first.nextCursor }), errorCode('INVALID_QUERY', 400));
-  await assert.rejects(service.listReviews({ limit: 51 }), errorCode('INVALID_QUERY', 400));
-  await assert.rejects(service.listReviews({ status: "completed' OR 1=1" }), errorCode('INVALID_QUERY', 400));
-  await assert.rejects(service.listReviews({ cursor: 'not-a-valid-cursor' }), errorCode('INVALID_QUERY', 400));
-  await assert.rejects(service.listReviews({ repositoryPath: f.repository }), errorCode('INVALID_QUERY', 400));
+  assert.equal((await service.listReviews(service.defaultProjectId, { status: 'partial' })).items.length, 1);
+  assert.equal((await service.listReviews(service.defaultProjectId, { scope: 'staged' })).items.length, 0);
+  const first = await service.listReviews(service.defaultProjectId, { status: 'completed', limit: 1 });
+  await assert.rejects(service.listReviews(service.defaultProjectId, { status: 'partial', cursor: first.nextCursor }), errorCode('INVALID_QUERY', 400));
+  await assert.rejects(service.listReviews(service.defaultProjectId, { limit: 51 }), errorCode('INVALID_QUERY', 400));
+  await assert.rejects(service.listReviews(service.defaultProjectId, { status: "completed' OR 1=1" }), errorCode('INVALID_QUERY', 400));
+  await assert.rejects(service.listReviews(service.defaultProjectId, { cursor: 'not-a-valid-cursor' }), errorCode('INVALID_QUERY', 400));
+  await assert.rejects(service.listReviews(service.defaultProjectId, { repositoryPath: f.repository }), errorCode('INVALID_QUERY', 400));
 });
 
 test('actual history SQL uses the order/filter and preferred-source indexes without a sort', async t => {
@@ -154,8 +157,8 @@ test('actual history SQL uses the order/filter and preferred-source indexes with
     if (sql.startsWith('SELECT e.item_json')) queries.push(sql);
     return prepare.call(this, sql);
   });
-  await service.listReviews({ limit: 1 });
-  await service.listReviews({ status: 'completed', scope: 'commits', limit: 1 });
+  await service.listReviews(service.defaultProjectId, { limit: 1 });
+  await service.listReviews(service.defaultProjectId, { status: 'completed', scope: 'commits', limit: 1 });
   const database = new DatabaseSync(join(f.state, 'workbench.sqlite'), { readOnly: true });
   const unfiltered = database.prepare(`EXPLAIN QUERY PLAN ${queries[0]}`).all(sha256(f.repository), 2).map(row => row.detail).join('\n');
   const filtered = database.prepare(`EXPLAIN QUERY PLAN ${queries[1]}`).all(sha256(f.repository), 'completed', 'commits', 2).map(row => row.detail).join('\n');
@@ -169,17 +172,17 @@ test('shared-state repository filtering and cursors never include foreign review
   const f = await fixture(t), other = await fixture(t);
   const local = await f.review(); await copyRun(f, local.runId);
   const foreign = await other.review(submit, { stateDir: f.state });
-  const service = await f.service(), foreignService = f.track(await WorkbenchService.create({ repositoryPath: other.repository, stateDir: f.state }));
+  const service = await f.service(), foreignService = f.track(await openWorkbench({ repositoryPath: other.repository, stateDir: f.state }));
   const page = await fullSweep(service);
   assert.equal(page.items.length, 2); assert.equal(page.sync.skipped, 0);
   assert.ok(page.items.every(item => item.repositoryPath === f.repository && item.runId !== foreign.runId));
-  await assert.rejects(service.report(foreign.runId), errorCode('REPOSITORY_MISMATCH', 404));
-  await assert.rejects(service.evidence(foreign.runId, 'division'), errorCode('REPOSITORY_MISMATCH', 404));
-  await assert.rejects(service.task(foreign.runId), errorCode('NOT_FOUND', 404));
-  const cursor = (await service.listReviews({ limit: 1 })).nextCursor;
-  await assert.rejects(foreignService.listReviews({ cursor }), errorCode('INVALID_QUERY', 400));
+  await assert.rejects(service.report(service.defaultProjectId, foreign.runId), errorCode('REPOSITORY_MISMATCH', 404));
+  await assert.rejects(service.evidence(service.defaultProjectId, foreign.runId, 'division'), errorCode('REPOSITORY_MISMATCH', 404));
+  await assert.rejects(service.task(service.defaultProjectId, foreign.runId), errorCode('NOT_FOUND', 404));
+  const cursor = (await service.listReviews(service.defaultProjectId, { limit: 1 })).nextCursor;
+  await assert.rejects(foreignService.listReviews(foreignService.defaultProjectId, { cursor }), errorCode('INVALID_QUERY', 400));
   const taskId = await receipt(f, { runId: foreign.runId });
-  const task = await service.task(taskId);
+  const task = await service.task(service.defaultProjectId, taskId);
   assert.equal(task.item.status, null); assert.equal(task.item.reportAvailability, 'unavailable');
   assert.equal(task.item.model, undefined); assert.equal(task.item.snapshotId, undefined); assert.equal(task.item.findingCount, undefined);
 });
@@ -188,8 +191,8 @@ test('native JSON/Markdown corruption invalidates cached success and details rev
   const f = await fixture(t), result = await f.review(), service = await f.service();
   await fullSweep(service);
   await writeFile(result.markdownPath, 'tampered private-report-payload');
-  await assert.rejects(service.report(result.runId), errorCode('REPORT_INTEGRITY', 409));
-  await assert.rejects(service.evidence(result.runId, 'division'), errorCode('REPORT_INTEGRITY', 409));
+  await assert.rejects(service.report(service.defaultProjectId, result.runId), errorCode('REPORT_INTEGRITY', 409));
+  await assert.rejects(service.evidence(service.defaultProjectId, result.runId, 'division'), errorCode('REPORT_INTEGRITY', 409));
   const page = await fullSweep(service);
   assert.equal(page.items[0].status, null); assert.equal(page.items[0].reportAvailability, 'unavailable');
   assert.equal(page.items[0].findingCount, undefined); assert.equal(page.sync.skipped, 1);
@@ -204,24 +207,24 @@ test('snapshot tampering and mismatched completed coverage cannot pass valid del
   const f = await fixture(t), result = await f.review(), service = await f.service();
   const invalid = structuredClone(result.report); invalid.coverage['app.py'] = 'pending';
   await deliver(f.state, await readRun(f.state, result.runId), invalid);
-  await assert.rejects(service.report(result.runId), errorCode('REPORT_INTEGRITY', 409));
+  await assert.rejects(service.report(service.defaultProjectId, result.runId), errorCode('REPORT_INTEGRITY', 409));
   assert.equal((await fullSweep(service)).items[0].status, null);
   await deliver(f.state, await readRun(f.state, result.runId), result.report);
   const path = join(f.state, 'snapshots', result.report.snapshot.id + '.json');
   const snapshot = JSON.parse(await readFile(path, 'utf8'));
   await writeJson(path, { ...snapshot, repositoryPath: f.repository + '-foreign' });
-  await assert.rejects(service.report(result.runId), errorCode('REPORT_INTEGRITY', 409));
+  await assert.rejects(service.report(service.defaultProjectId, result.runId), errorCode('REPORT_INTEGRITY', 409));
   assert.equal((await fullSweep(service)).items[0].reportAvailability, 'unavailable');
 });
 
 test('evidence selection and frozen blob integrity use the native source checks', async t => {
   const f = await fixture(t), result = await f.review(), service = await f.service();
-  await assert.rejects(service.evidence(result.runId, 'unknown'), errorCode('NOT_FOUND', 404));
-  await assert.rejects(service.evidence(result.runId, 'division', 1), errorCode('NOT_FOUND', 404));
-  await assert.rejects(service.evidence(result.runId, 'division', -1), errorCode('INVALID_QUERY', 400));
+  await assert.rejects(service.evidence(service.defaultProjectId, result.runId, 'unknown'), errorCode('NOT_FOUND', 404));
+  await assert.rejects(service.evidence(service.defaultProjectId, result.runId, 'division', 1), errorCode('NOT_FOUND', 404));
+  await assert.rejects(service.evidence(service.defaultProjectId, result.runId, 'division', -1), errorCode('INVALID_QUERY', 400));
   const snapshot = await SnapshotStore.load(f.state, result.report.snapshot.id);
   await writeFile(join(f.state, 'blobs', snapshot.manifest.head['app.py'].hash), 'corrupted-frozen-source');
-  await assert.rejects(service.evidence(result.runId, 'division'), errorCode('EVIDENCE_INTEGRITY', 409));
+  await assert.rejects(service.evidence(service.defaultProjectId, result.runId, 'division'), errorCode('EVIDENCE_INTEGRITY', 409));
 });
 
 test('task projection handles no-run no_changes and never invents completion from receipts or running manifests', async t => {
@@ -235,20 +238,20 @@ test('task projection handles no-run no_changes and never invents completion fro
   const accepted = await receipt(f);
   const interrupted = await receipt(f, { owner: { id: randomUUID(), pid: 2147483647 } });
   const invalid = await receipt(f, { finishedAt: done, noChanges: { snapshotId: result.report.snapshot.id } });
-  assert.equal((await service.task(unchanged)).item.status, 'no_changes');
-  assert.equal((await service.task(unchanged)).item.runId, undefined);
-  assert.equal((await service.task(unchanged)).item.reportAvailability, 'not_delivered');
-  assert.equal((await service.task(failed)).item.status, 'failed');
-  assert.equal((await service.task(cancelled)).item.status, 'cancelled');
-  assert.equal((await service.task(accepted)).item.status, 'accepted');
-  assert.equal((await service.task(accepted)).done, false);
-  assert.equal((await service.task(interrupted)).item.status, 'interrupted');
-  assert.equal((await service.task(invalid)).item.status, null);
+  assert.equal((await service.task(service.defaultProjectId, unchanged)).item.status, 'no_changes');
+  assert.equal((await service.task(service.defaultProjectId, unchanged)).item.runId, undefined);
+  assert.equal((await service.task(service.defaultProjectId, unchanged)).item.reportAvailability, 'not_delivered');
+  assert.equal((await service.task(service.defaultProjectId, failed)).item.status, 'failed');
+  assert.equal((await service.task(service.defaultProjectId, cancelled)).item.status, 'cancelled');
+  assert.equal((await service.task(service.defaultProjectId, accepted)).item.status, 'accepted');
+  assert.equal((await service.task(service.defaultProjectId, accepted)).done, false);
+  assert.equal((await service.task(service.defaultProjectId, interrupted)).item.status, 'interrupted');
+  assert.equal((await service.task(service.defaultProjectId, invalid)).item.status, null);
   const manifest = await readRun(f.state, result.runId), runningId = randomUUID();
   await writeJson(join(runPath(f.state, runningId), 'run.json'), { ...manifest, runId: runningId, status: 'running' });
-  const running = await service.task(runningId);
+  const running = await service.task(service.defaultProjectId, runningId);
   assert.equal(running.item.status, 'running'); assert.equal(running.item.liveness, 'unknown'); assert.equal(running.done, false);
-  await assert.rejects(service.report(runningId), errorCode('NOT_DELIVERED', 409));
+  await assert.rejects(service.report(service.defaultProjectId, runningId), errorCode('NOT_DELIVERED', 409));
   const linked = await receipt(f, { runId: result.runId, finishedAt: done, failure: 'failed' });
   const page = await fullSweep(service);
   const native = page.items.filter(item => item.runId === result.runId);
@@ -260,7 +263,7 @@ test('partial native delivery after agent end remains partial with zero findings
   assert.equal(result.report.status, 'partial');
   const item = (await fullSweep(service)).items[0];
   assert.equal(item.status, 'partial'); assert.equal(item.findingCount, 0);
-  assert.equal((await service.report(result.runId)).report.status, 'partial');
+  assert.equal((await service.report(service.defaultProjectId, result.runId)).report.status, 'partial');
 });
 
 test('bounded sync advances, survives restart and removes disappeared native sources after a full sweep', async t => {
@@ -271,7 +274,7 @@ test('bounded sync advances, survives restart and removes disappeared native sou
     await writeJson(join(runPath(f.state, id), 'run.json'), { ...manifest, runId: id, status: 'running' });
   }
   const first = await f.service({ syncBatchSize: 3 });
-  const batch = await first.listReviews();
+  const batch = await first.listReviews(first.defaultProjectId);
   assert.ok(batch.sync.scanned <= 3); assert.equal(batch.sync.truncated, true); assert.ok(batch.items.length <= 3);
   await first.close();
   const restarted = await f.service({ syncBatchSize: 3 });
@@ -283,18 +286,36 @@ test('bounded sync advances, survives restart and removes disappeared native sou
   assert.equal(after.items.length, ids.length - 1); assert.ok(after.items.every(item => item.id !== ids[0]));
 });
 
+test('projection keeps verified summary titles and drops stored fallback titles', async t => {
+  const f = await fixture(t), database = new WorkbenchDatabase(join(f.state, 'titles.sqlite'));
+  const directory = await repositoryDirectory(f.repository), createdAt = new Date().toISOString();
+  const project = new ProjectRegistry(database).registerProject({ ...directory, name: 'Fixture', registeredAt: createdAt });
+  const projection = new HistoryProjection(database);
+  const item = id => ({ id, runId: id, repositoryPath: f.repository, createdAt, status: 'running', scope: 'commits', reportAvailability: 'not_delivered' });
+  const summary = randomUUID(), legacy = randomUUID();
+  projection.apply(project, [
+    { kind: 'run', sourceId: summary, epoch: 'fixture', item: { ...item(summary), title: 'Verified summary line' } },
+    { kind: 'run', sourceId: legacy, epoch: 'fixture', item: { ...item(legacy), title: '提交审查 · 2026-10-11 08:00 UTC', titleSource: 'fallback' } },
+  ], [], createdAt);
+  const titles = new Map(projection.list(project, { limit: 20 }).items.map(entry => [entry.id, entry]));
+  assert.equal(titles.get(summary)?.title, 'Verified summary line');
+  assert.equal('title' in titles.get(legacy), false);
+  assert.equal('titleSource' in titles.get(summary), false);
+  database.close();
+});
+
 test('projection failures roll back batches, reject future schemas and do not reset corrupt storage', async t => {
   const f = await fixture(t), path = join(f.state, 'transaction.sqlite');
-  const index = new WorkbenchIndex(path, f.repository);
+  const database = new WorkbenchDatabase(path), projection = new HistoryProjection(database);
   const id = randomUUID(), createdAt = new Date().toISOString();
   const directory = await repositoryDirectory(f.repository);
-  index.registerProject({ ...directory, name: 'Fixture', registeredAt: createdAt });
+  const project = new ProjectRegistry(database).registerProject({ ...directory, name: 'Fixture', registeredAt: createdAt });
   const item = { id, runId: id, repositoryPath: f.repository, createdAt, status: 'running', scope: 'commits', reportAvailability: 'not_delivered' };
-  assert.throws(() => index.apply([
+  assert.throws(() => projection.apply(project, [
     { kind: 'run', sourceId: id, epoch: 'fixture', item },
     { kind: 'run', sourceId: randomUUID(), epoch: 'fixture', item: { ...item, repositoryPath: f.repository + '-other' } },
   ], [], createdAt), /membership mismatch/);
-  assert.equal(index.list({ limit: 20 }).items.length, 0); assert.equal(index.lastSyncedAt(), null); index.close();
+  assert.equal(projection.list(project, { limit: 20 }).items.length, 0); assert.equal(projection.lastSyncedAt(project), null); database.close();
   const memory = new DatabaseSync(':memory:');
   memory.exec('CREATE TABLE history_entries(dummy TEXT)');
   assert.throws(() => migrateWorkbenchDatabase(memory), /already exists/);
@@ -310,10 +331,10 @@ test('projection failures roll back batches, reject future schemas and do not re
 test('schema v2 upgrades to the current version and keeps history after explicit project registration', async t => {
   const f = await fixture(t), path = join(f.state, 'upgrade.sqlite'), id = randomUUID(), createdAt = new Date().toISOString();
   const item = { id, runId: id, repositoryPath: f.repository, createdAt, status: 'running', scope: 'commits', reportAvailability: 'not_delivered' };
-  const original = new WorkbenchIndex(path, f.repository);
+  const original = new WorkbenchDatabase(path);
   const directory = await repositoryDirectory(f.repository);
-  original.registerProject({ ...directory, name: 'Fixture', registeredAt: createdAt });
-  original.apply([{ kind: 'run', sourceId: id, epoch: 'legacy', item }], [], createdAt); original.close();
+  const legacyProject = new ProjectRegistry(original).registerProject({ ...directory, name: 'Fixture', registeredAt: createdAt });
+  new HistoryProjection(original).apply(legacyProject, [{ kind: 'run', sourceId: id, epoch: 'legacy', item }], [], createdAt); original.close();
   const old = new DatabaseSync(path);
   const legacyItem = JSON.parse(old.prepare('SELECT item_json FROM history_entries').get().item_json);
   delete legacyItem.projectId; delete legacyItem.workspaceId;
@@ -332,13 +353,14 @@ test('schema v2 upgrades to the current version and keeps history after explicit
     CREATE INDEX history_preferred ON history_entries(repository_id,history_id,delivery_verified DESC,source_kind DESC,source_id DESC);
     CREATE INDEX history_sources ON history_entries(repository_id,source_kind,seen_epoch); PRAGMA user_version=2;`);
   old.close();
-  const upgraded = new WorkbenchIndex(path, f.repository);
-  assert.equal(upgraded.projects().length, 0);
-  const project = upgraded.registerProject({ ...directory, name: 'Fixture', registeredAt: createdAt });
-  const migratedItems = upgraded.list({ limit: 20 }).items;
+  const upgraded = new WorkbenchDatabase(path), registry = new ProjectRegistry(upgraded), projection = new HistoryProjection(upgraded);
+  assert.equal(registry.projects().length, 0);
+  const project = registry.registerProject({ ...directory, name: 'Fixture', registeredAt: createdAt });
+  projection.adopt(project);
+  const migratedItems = projection.list(project, { limit: 20 }).items;
   assert.equal(migratedItems.length, 1); assert.equal(migratedItems[0]?.runId, id);
   assert.equal(migratedItems[0]?.projectId, project.id);
-  assert.equal(upgraded.lastSyncedAt(), createdAt); upgraded.close();
+  assert.equal(projection.lastSyncedAt(project), createdAt); upgraded.close();
   const verified = new DatabaseSync(path, { readOnly: true });
   assert.equal(verified.prepare('PRAGMA user_version').get().user_version, WORKBENCH_SCHEMA_VERSION);
   assert.equal(verified.prepare('SELECT seen_at FROM history_entries').get().seen_at, ''); verified.close();
@@ -383,8 +405,8 @@ test('interleaved service scanners preserve observations from another completed 
     await writeJson(join(runPath(f.state, id), 'run.json'), { ...manifest, runId: id, status: 'running' });
   }
   const first = await f.service({ syncBatchSize: 2 }), second = await f.service({ syncBatchSize: 2 });
-  await first.listReviews(); await second.listReviews();
-  await first.listReviews(); await second.listReviews();
+  await first.listReviews(first.defaultProjectId); await second.listReviews(second.defaultProjectId);
+  await first.listReviews(first.defaultProjectId); await second.listReviews(second.defaultProjectId);
   const completed = await fullSweep(first);
   assert.equal(completed.items.length, ids.length);
   assert.deepEqual(new Set(completed.items.map(item => item.id)), new Set(ids));
@@ -393,10 +415,10 @@ test('interleaved service scanners preserve observations from another completed 
 
 test('concurrent history reads serialize bounded sync and service close is idempotent', async t => {
   const f = await fixture(t), result = await f.review(), service = await f.service({ syncBatchSize: 1 });
-  const pages = await Promise.all(Array.from({ length: 6 }, () => service.listReviews()));
+  const pages = await Promise.all(Array.from({ length: 6 }, () => service.listReviews(service.defaultProjectId)));
   assert.ok(pages.every(page => page.sync.scanned <= 1));
   assert.equal(pages.at(-1).items[0].runId, result.runId);
   await service.close(); await service.close();
-  await assert.rejects(service.listReviews(), errorCode('STORAGE_UNAVAILABLE', 503));
-  await assert.rejects(service.report(result.runId), errorCode('STORAGE_UNAVAILABLE', 503));
+  await assert.rejects(service.listReviews(service.defaultProjectId), errorCode('STORAGE_UNAVAILABLE', 503));
+  await assert.rejects(service.report(service.defaultProjectId, result.runId), errorCode('STORAGE_UNAVAILABLE', 503));
 });

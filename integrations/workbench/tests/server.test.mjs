@@ -3,7 +3,7 @@ import { mkdir, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
 import { encodeFindingId } from '@mergewarden/contracts';
-import { WorkbenchError } from '../../../src/application/workbench-service.ts';
+import { WorkbenchError } from '../../../src/application/workbench/index.ts';
 import { bootstrapHtml, scrubFragmentScript } from '../src/bootstrap.ts';
 import { requestPath } from '../src/assets.ts';
 import { parseLaunchOptions } from '../src/main.ts';
@@ -58,18 +58,19 @@ test('only whitelisted DTO fields are exposed and review mutation remains unavai
   const { server, app } = await serverFixture(t);
   const cookie = await authenticate(server);
   const config = (await get(app, '/api/v1/config', cookie)).json();
-  assert.deepEqual(Object.keys(config).sort(), ['apiVersion', 'capabilities', 'history', 'repository']);
+  assert.deepEqual(Object.keys(config).sort(), ['apiVersion', 'capabilities', 'defaultProjectId', 'history', 'repository']);
+  assert.equal(config.defaultProjectId, PROJECT_ID);
   assert.equal(config.capabilities.startReview, false);
   assert.equal(config.capabilities.cancelReview, false);
   assert.equal(config.capabilities.feedback, false);
   assert.equal(config.capabilities.learning, false);
-  const history = await get(app, '/api/v1/reviews?status=completed&scope=staged&limit=20', cookie);
+  const history = await get(app, `/api/v1/projects/${PROJECT_ID}/reviews?status=completed&scope=staged&limit=20`, cookie);
   assert.deepEqual(history.json().items, [ITEM]);
-  assert.equal((await get(app, `/api/v1/tasks/${RUN_ID}`, cookie)).json().canCancel, false);
-  assert.deepEqual((await get(app, `/api/v1/runs/${RUN_ID}/report`, cookie)).json(), REPORT);
-  const evidence = await get(app, `/api/v1/runs/${RUN_ID}/findings/${encodeFindingId('division')}/evidence/0`, cookie);
+  assert.equal((await get(app, `/api/v1/projects/${PROJECT_ID}/tasks/${RUN_ID}`, cookie)).json().canCancel, false);
+  assert.deepEqual((await get(app, `/api/v1/projects/${PROJECT_ID}/runs/${RUN_ID}/report`, cookie)).json(), REPORT);
+  const evidence = await get(app, `/api/v1/projects/${PROJECT_ID}/runs/${RUN_ID}/findings/${encodeFindingId('division')}/evidence/0`, cookie);
   assert.equal(evidence.json().findingId, 'division');
-  assertError(await app.inject({ method: 'POST', url: '/api/v1/reviews', headers: { host: HOST, cookie }, payload: {} }), 405, 'METHOD_NOT_ALLOWED');
+  assertError(await app.inject({ method: 'POST', url: `/api/v1/projects/${PROJECT_ID}/reviews`, headers: { host: HOST, cookie }, payload: {} }), 405, 'METHOD_NOT_ALLOWED');
   assertError(await get(app, '/api/v1/skills', cookie), 404, 'NOT_FOUND');
 });
 
@@ -108,11 +109,11 @@ test('project read routes pass the explicit project and frozen diff query withou
   const calls = [];
   const original = fakeService();
   const service = fakeService({
-    async listReviews(query, projectId) { calls.push(['history', query, projectId]); return original.listReviews(); },
-    async task(id, projectId) { calls.push(['task', id, projectId]); return original.task(); },
-    async report(id, projectId) { calls.push(['report', id, projectId]); return original.report(); },
-    async evidence(id, findingId, index, projectId) { calls.push(['evidence', id, findingId, index, projectId]); return original.evidence(id, findingId, index); },
-    async evidenceDiff(id, findingId, index, query, projectId) { calls.push(['diff', id, findingId, index, query, projectId]); return original.evidenceDiff(id, findingId, index, query); },
+    async listReviews(projectId, query) { calls.push(['history', query, projectId]); return original.listReviews(); },
+    async task(projectId, id) { calls.push(['task', id, projectId]); return original.task(); },
+    async report(projectId, id) { calls.push(['report', id, projectId]); return original.report(); },
+    async evidence(projectId, id, findingId, index) { calls.push(['evidence', id, findingId, index, projectId]); return original.evidence(projectId, id, findingId, index); },
+    async evidenceDiff(projectId, id, findingId, index, query) { calls.push(['diff', id, findingId, index, query, projectId]); return original.evidenceDiff(projectId, id, findingId, index, query); },
   });
   const { server, app } = await serverFixture(t, service), cookie = await authenticate(server);
   const prefix = `/api/v1/projects/${PROJECT_ID}`, findingId = '../中文/%';
@@ -132,9 +133,8 @@ test('project read routes pass the explicit project and frozen diff query withou
   }
   assertError(await get(app, `/api/v1/projects/invalid${evidencePath}/diff`, cookie), 400, 'INVALID_PARAMS');
   assert.equal(calls.length, 5);
-  const defaultDiff = await get(app, `/api/v1${evidencePath}/diff`, cookie);
-  assert.equal(defaultDiff.statusCode, 200, defaultDiff.body);
-  assert.deepEqual(calls.at(-1), ['diff', RUN_ID, findingId, 0, { limit: 200 }, undefined]);
+  assertError(await get(app, `/api/v1${evidencePath}/diff`, cookie), 404, 'NOT_FOUND');
+  assert.equal(calls.length, 5);
 });
 
 test('registry and diff outputs enforce whitelists and exact frozen evidence identity', async t => {
@@ -154,7 +154,7 @@ test('registry and diff outputs enforce whitelists and exact frozen evidence ide
   assertError(projects, 409, 'RESPONSE_INVALID'); assert.ok(!projects.body.includes(secret));
   const registered = await app.inject({ method: 'POST', url: '/api/v1/projects', headers: { host: HOST, cookie, origin: ORIGIN }, payload: { repositoryPath: '/fixture/new' } });
   assertError(registered, 500, 'INTERNAL_ERROR'); assert.ok(!registered.body.includes(secret));
-  const path = `/api/v1/runs/${RUN_ID}/findings/${encodeFindingId('division')}/evidence/0/diff`;
+  const path = `/api/v1/projects/${PROJECT_ID}/runs/${RUN_ID}/findings/${encodeFindingId('division')}/evidence/0/diff`;
   const extra = await get(app, path, cookie);
   assertError(extra, 409, 'RESPONSE_INVALID'); assert.ok(!extra.body.includes(secret));
   invalidDiff = true;
@@ -165,14 +165,15 @@ test('query and route schemas reject invalid input without calling storage', asy
   let calls = 0;
   const { server, app } = await serverFixture(t, fakeService({ async listReviews() { calls++; throw Error('must not call'); } }));
   const cookie = await authenticate(server);
-  for (const path of ['/api/v1/reviews?limit=0', '/api/v1/reviews?limit=51', '/api/v1/reviews?scope=unknown', '/api/v1/reviews?repo=outside', '/api/v1/reviews?limit=1&limit=2']) {
+  for (const path of [`/api/v1/projects/${PROJECT_ID}/reviews?limit=0`, `/api/v1/projects/${PROJECT_ID}/reviews?limit=51`, `/api/v1/projects/${PROJECT_ID}/reviews?scope=unknown`, `/api/v1/projects/${PROJECT_ID}/reviews?repo=outside`, `/api/v1/projects/${PROJECT_ID}/reviews?limit=1&limit=2`]) {
     assertError(await get(app, path, cookie), 400, 'INVALID_QUERY');
   }
   assert.equal(calls, 0);
   assertError(await get(app, '/api/v1/config?apiKey=hidden', cookie), 400, 'INVALID_QUERY');
-  assertError(await get(app, '/api/v1/tasks/not-a-uuid', cookie), 400, 'INVALID_PARAMS');
-  assertError(await get(app, `/api/v1/runs/${RUN_ID}/findings/${encodeFindingId('division')}/evidence/20`, cookie), 400, 'INVALID_PARAMS');
-  assertError(await get(app, `/api/v1/runs/${RUN_ID}/findings/raw-division/evidence/0`, cookie), 400, 'INVALID_PARAMS');
+  for (const path of ['/api/v1/reviews', `/api/v1/tasks/${RUN_ID}`, `/api/v1/runs/${RUN_ID}/report`]) assertError(await get(app, path, cookie), 404, 'NOT_FOUND');
+  assertError(await get(app, `/api/v1/projects/${PROJECT_ID}/tasks/not-a-uuid`, cookie), 400, 'INVALID_PARAMS');
+  assertError(await get(app, `/api/v1/projects/${PROJECT_ID}/runs/${RUN_ID}/findings/${encodeFindingId('division')}/evidence/20`, cookie), 400, 'INVALID_PARAMS');
+  assertError(await get(app, `/api/v1/projects/${PROJECT_ID}/runs/${RUN_ID}/findings/raw-division/evidence/0`, cookie), 400, 'INVALID_PARAMS');
 });
 
 test('opaque finding segments preserve Unicode, percent, slash, dot-only and long IDs', async t => {
@@ -180,11 +181,11 @@ test('opaque finding segments preserve Unicode, percent, slash, dot-only and lon
   const received = [];
   const service = fakeService();
   const original = service.evidence;
-  service.evidence = async (run, finding, index) => { received.push(finding); return original(run, finding, index); };
+  service.evidence = async (project, run, finding, index) => { received.push(finding); return original(project, run, finding, index); };
   const { server, app } = await serverFixture(t, service);
   const cookie = await authenticate(server);
   for (const value of values) {
-    const response = await get(app, `/api/v1/runs/${RUN_ID}/findings/${encodeFindingId(value)}/evidence/0`, cookie);
+    const response = await get(app, `/api/v1/projects/${PROJECT_ID}/runs/${RUN_ID}/findings/${encodeFindingId(value)}/evidence/0`, cookie);
     assert.equal(response.statusCode, 200, response.body);
     assert.equal(response.json().findingId, value);
   }
@@ -235,13 +236,13 @@ test('invalid output, storage exceptions and malformed bootstrap bodies never di
     async task() { throw new WorkbenchError('NOT_FOUND', 'Review was not found.', 404); },
   }));
   const cookie = await authenticate(server);
-  const invalid = await get(app, '/api/v1/reviews', cookie);
+  const invalid = await get(app, `/api/v1/projects/${PROJECT_ID}/reviews`, cookie);
   assertError(invalid, 409, 'RESPONSE_INVALID');
   assert.ok(!invalid.body.includes(secret));
-  const failure = await get(app, `/api/v1/runs/${RUN_ID}/report`, cookie);
+  const failure = await get(app, `/api/v1/projects/${PROJECT_ID}/runs/${RUN_ID}/report`, cookie);
   assertError(failure, 500, 'INTERNAL_ERROR');
   assert.ok(!failure.body.includes(secret));
-  assertError(await get(app, `/api/v1/tasks/${RUN_ID}`, cookie), 404, 'NOT_FOUND');
+  assertError(await get(app, `/api/v1/projects/${PROJECT_ID}/tasks/${RUN_ID}`, cookie), 404, 'NOT_FOUND');
   const malformed = await app.inject({ method: 'POST', url: '/_workbench/session', headers: { host: HOST, origin: ORIGIN, 'content-type': 'application/json' }, payload: '{"token":' });
   assertError(malformed, 400, 'INVALID_BODY');
   const oversized = await app.inject({ method: 'POST', url: '/_workbench/session', headers: { host: HOST, origin: ORIGIN, 'content-type': 'application/json' }, payload: JSON.stringify({ token: 'a'.repeat(2000) }) });
