@@ -7,6 +7,9 @@ export default defineConfig({
   server: { host: '127.0.0.1', strictPort: true },
   build: {
     sourcemap: false,
+    // The largest chunk is Shiki's C++ grammar (~780 KiB), loaded only when a C++ file is viewed.
+    // Initial-route chunks stay well below this limit.
+    chunkSizeWarningLimit: 850,
     rolldownOptions: {
       output: {
         strictExecutionOrder: true,
