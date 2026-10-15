@@ -23,7 +23,7 @@ export function finding(overrides: Partial<FindingDto> = {}): FindingDto {
 }
 
 export function historyItem(overrides: Partial<HistoryItem> = {}): HistoryItem {
-  return { id: runId, projectId, workspaceId, title: '检查请求读取的空值边界', titleSource: 'summary', runId, taskId, repositoryPath, createdAt: '2026-10-10T09:00:00.000Z', finishedAt: '2026-10-10T09:03:00.000Z', status: 'completed', scope: 'staged', snapshotId, findingCount: 1, reportAvailability: 'verified', model: { provider: 'fixture-provider', modelId: 'fixture-model' }, ...overrides };
+  return { id: runId, projectId, workspaceId, title: '检查请求读取的空值边界', runId, taskId, repositoryPath, createdAt: '2026-10-10T09:00:00.000Z', finishedAt: '2026-10-10T09:03:00.000Z', status: 'completed', scope: 'staged', snapshotId, findingCount: 1, reportAvailability: 'verified', model: { provider: 'fixture-provider', modelId: 'fixture-model' }, ...overrides };
 }
 
 export function historyResponse(overrides: Partial<HistoryResponse> = {}): HistoryResponse {

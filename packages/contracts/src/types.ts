@@ -20,8 +20,8 @@ export interface HistoryItem {
   repositoryPath: string;
   projectId?: string | undefined;
   workspaceId?: string | undefined;
+  /** First line of the verified report summary. Absent when no verified summary exists; clients format a fallback. */
   title?: string | undefined;
-  titleSource?: 'summary' | 'fallback' | undefined;
   createdAt: string;
   finishedAt?: string | undefined;
   status: ReviewStatus | null;
@@ -57,14 +57,14 @@ export interface TaskResponse {
 
 export interface ConfigResponse {
   apiVersion: 'v1';
-  defaultProjectId?: string | undefined;
+  defaultProjectId: string;
   repository: { path: string; name: string };
   capabilities: {
     readHistory: true;
     readReport: true;
     readEvidence: true;
-    readDiff?: true | undefined;
-    manageProjects?: true | undefined;
+    readDiff: true;
+    manageProjects: true;
     startReview: false;
     cancelReview: false;
     feedback: false;

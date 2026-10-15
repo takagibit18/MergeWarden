@@ -11,12 +11,14 @@ test('history accepts bounded filters and rejects undeclared host configuration'
 
 test('M1 contract does not permit review execution or cancellation', () => {
   const config = {
-    apiVersion: 'v1', repository: { path: '/repo', name: 'repo' },
-    capabilities: { readHistory: true, readReport: true, readEvidence: true, startReview: false, cancelReview: false, feedback: false, learning: false },
+    apiVersion: 'v1', defaultProjectId: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', repository: { path: '/repo', name: 'repo' },
+    capabilities: { readHistory: true, readReport: true, readEvidence: true, readDiff: true, manageProjects: true, startReview: false, cancelReview: false, feedback: false, learning: false },
     history: { defaultLimit: 20, maxLimit: 50 },
   };
   assert.equal(configResponseSchema.safeParse(config).success, true);
   assert.equal(configResponseSchema.safeParse({ ...config, capabilities: { ...config.capabilities, startReview: true } }).success, false);
+  const { defaultProjectId: _project, ...withoutProject } = config;
+  assert.equal(configResponseSchema.safeParse(withoutProject).success, false);
   const runId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', hash = 'a'.repeat(64);
   const item = { id: runId, runId, repositoryPath: '/repo', createdAt: '2026-10-11T00:00:00.000Z',
     status: 'completed', scope: 'commits', snapshotId: hash, findingCount: 0, reportAvailability: 'verified' };

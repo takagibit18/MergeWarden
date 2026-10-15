@@ -32,7 +32,6 @@ export const historyItemSchema: z.ZodType<HistoryItem> = z.object({
   projectId: idSchema.optional(),
   workspaceId: sha256Schema.optional(),
   title: z.string().min(1).max(160).optional(),
-  titleSource: z.enum(['summary', 'fallback']).optional(),
   createdAt: timestamp,
   finishedAt: timestamp.optional(),
   status: reviewStatusSchema.nullable(),
@@ -57,11 +56,11 @@ export const taskResponseSchema: z.ZodType<TaskResponse> = z.object({
 }).strict();
 export const configResponseSchema: z.ZodType<ConfigResponse> = z.object({
   apiVersion: z.literal('v1'),
-  defaultProjectId: idSchema.optional(),
+  defaultProjectId: idSchema,
   repository: z.object({ path: z.string(), name: z.string() }).strict(),
   capabilities: z.object({
     readHistory: z.literal(true), readReport: z.literal(true), readEvidence: z.literal(true),
-    readDiff: z.literal(true).optional(), manageProjects: z.literal(true).optional(),
+    readDiff: z.literal(true), manageProjects: z.literal(true),
     startReview: z.literal(false), cancelReview: z.literal(false), feedback: z.literal(false), learning: z.literal(false),
   }).strict(),
   history: z.object({ defaultLimit: z.literal(20), maxLimit: z.literal(50) }).strict(),

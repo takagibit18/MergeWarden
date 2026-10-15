@@ -1,8 +1,11 @@
 # Local Workbench HTTP adapter
 
 This Node.js 22.19+ foreground adapter provides the read-only M0/M1 Workbench.
-It reuses `WorkbenchService`, the rebuildable SQLite history projection, native
-delivery verification and frozen source evidence. It does not load Pi or require
+It is a thin transport over `src/application/workbench`, wired to SQLite and native
+file storage by `src/composition/workbench.ts`. The application layer depends only
+on `src/ports/workbench.ts`; `tests/workbench-layering.test.mjs` enforces that
+direction. The project registry is durable, while the history projection can be
+dropped and rebuilt from native delivery artifacts at any time. It does not load Pi or require
 model credentials.
 
 From the repository root, install locked packages with lifecycle scripts disabled,
@@ -37,15 +40,16 @@ The public API exposes these read routes:
 
 | Route | Response |
 | --- | --- |
-| `GET /api/v1/config` | Fixed repository and read-only capability flags |
+| `GET /api/v1/config` | Fixed repository, default project ID and read-only capability flags |
 | `GET /api/v1/projects` | Registered project and directory metadata |
-| `GET /api/v1/reviews?status=&scope=&workspaceId=&limit=&cursor=` | Default project's bounded history page and sync diagnostics |
-| `GET /api/v1/projects/:projectId/reviews?...` | Project history, optionally filtered to a registered directory |
-| `GET /api/v1/tasks/:id` | Native task/run status; cancellation is unavailable |
-| `GET /api/v1/runs/:id/report` | Freshly verified delivery and public report DTO |
-| `GET /api/v1/runs/:id/findings/:findingId/evidence/:index` | Verified frozen evidence and source |
-| `GET /api/v1/runs/:id/findings/:findingId/evidence/:index/diff?offset=&limit=` | Bounded base/head diff from the frozen snapshot |
-| `/api/v1/projects/:projectId/...` | Project-scoped versions of task, report, evidence and diff reads |
+| `GET /api/v1/projects/:projectId/reviews?status=&scope=&workspaceId=&limit=&cursor=` | Bounded history page and sync diagnostics, optionally filtered to a registered directory |
+| `GET /api/v1/projects/:projectId/tasks/:id` | Native task/run status; cancellation is unavailable |
+| `GET /api/v1/projects/:projectId/runs/:id/report` | Freshly verified delivery and public report DTO |
+| `GET /api/v1/projects/:projectId/runs/:id/findings/:findingId/evidence/:index` | Verified frozen evidence and source |
+| `GET /api/v1/projects/:projectId/runs/:id/findings/:findingId/evidence/:index/diff?offset=&limit=` | Bounded base/head diff from the frozen snapshot |
+
+Review reads have no unscoped form. Use `defaultProjectId` from the config response
+for the repository the adapter was launched with.
 
 The app can explicitly register a project with `POST /api/v1/projects` and a same-repository worktree with `POST /api/v1/projects/:projectId/workspaces`. Both endpoints require the authenticated same-origin session and accept only an absolute Git root plus an optional display name. Registration does not scan or execute repository files. Review history, report, evidence and diff routes remain read-only; review start/cancel, feedback and learning routes are absent.
 
