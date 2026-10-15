@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "mergewarden": {
+      "command": "node",
+      "args": ["--experimental-strip-types", "scripts/codex-plugin.mjs", "mcp"],
+      "cwd": "./",
+      "env_vars": [
+        "MERGEWARDEN_PLUGIN_CONFIG", "MERGEWARDEN_API_KEY",
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS",
+        "http_proxy", "https_proxy", "all_proxy", "no_proxy"
+      ],
+      "startup_timeout_sec": 30,
+      "tool_timeout_sec": 60
+    }
+  }
+}

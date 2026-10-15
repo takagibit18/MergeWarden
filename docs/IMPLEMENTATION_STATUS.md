@@ -8,6 +8,12 @@ React/TypeScript 工作台通过同源本地 HTTP 服务读取原生审查历史
 
 HTTP 服务只监听 loopback，启动凭据交换为进程内 HttpOnly 会话。网页仅通过同源 POST 写项目登记元数据；审查、报告、证据和 diff 查询保持只读。M1 不包含网页启动/取消审查、人工反馈、Skill 学习或跨 worktree Skill 共享。合成 provider 仅用于验证本地数据流，不证明模型审查质量。
 
+## Codex 插件
+
+`mergewarden` 插件将本地 MCP、审查 skill 和固定配置启动器一起分发。Git marketplace 使用明确版本 ref；Release ZIP 保留四份依赖 lockfile，首次配置通过 `npm ci --ignore-scripts` 安装依赖。配置绑定一个 checkout 和模型，存放在仓库之外；Pi OAuth 独立登录，API Key 仅通过明确环境变量名传递。安装后及配置变更后需要新的 Codex 会话。
+
+打包及首次配置说明见 [Codex 插件安装](../README.md#codex-plugin)。本地已验证 Codex CLI 0.159.2 的插件加载、skill 发现和五个 MCP 工具注册；实际 STDIO 测试覆盖无变更任务与断线后持久查询。无变更测试不代表模型审查质量，模型目录也不代表账号权限。CI 在 Windows/Linux、Node 22/24 矩阵中运行原有完整验证并检查插件打包。
+
 ## 本地 Codex MCP
 
 `integrations/mcp` 使用官方 TypeScript SDK v2 的 STDIO 入口与五个工具，直接调用现有 ReviewEngine/Pi。启动快速返回 taskId，后续查询复用原生 run/Report 与交付 hash 校验；证据经原 SnapshotStore/checkEvidence 读取。薄任务 receipt 仅保存启动与 run 关联，关闭连接请求取消，硬中断不升级为成功。仓库/state/模型/认证由宿主固定，MCP 不暴露凭据、任意文件或写代码能力。自动化验证包含新旧协议、实际 STDIO、真实 Pi SDK 的脚本 provider 与持久化故障；脚本响应不代表模型质量。安装、配置、状态与恢复边界见 [Codex MCP 接口](../integrations/mcp/README.md)。

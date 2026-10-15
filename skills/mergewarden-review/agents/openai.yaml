@@ -1,0 +1,4 @@
+interface:
+  display_name: "MergeWarden Review"
+  short_description: "Review Git changes and inspect frozen evidence"
+  default_prompt: "Use $mergewarden-review to review the requested Git changes and verify the saved evidence."
