@@ -24,6 +24,11 @@ npm run cli -- feedback --run ID --comment TEXT [--finding ID] [--path FILE --st
 npm run cli -- skills list|learn|unlock [--state PATH]
 npm run cli -- skills show|disable --id SKILL_ID [--state PATH]
 npm run cli -- skills rollback --id SKILL_ID --revision N [--state PATH]
+npm run cli -- skills pending|usage [--state PATH]
+npm run cli -- skills curate [--stage true] [--state PATH]   (report only unless --stage stages retirements for approval)
+npm run cli -- skills diff --proposal ID [--state PATH]
+npm run cli -- skills approve|reject --proposal ID|all [--note TEXT] [--state PATH]
+npm run cli -- skills pin --id SKILL_ID [--note TEXT] | unpin --id SKILL_ID [--state PATH]
 npm run cli -- history [--state PATH]
 npm run cli -- show --run ID [--state PATH]
 npm run cli -- evidence --run ID --finding ID [--state PATH]
@@ -36,13 +41,14 @@ Options: --skills auto|off|replay, --learn auto|off, --comment-file OUTSIDE_PATH
          --thinking LEVEL (must be supported by the selected model), --max-output-tokens 8192,
          --auth oauth (use explicit Pi login instead of --api-key-env),
          --include-untracked PATH (repeat; worktree only, ignored files excluded)
+Learned Skill changes are staged for approval; reviews never read a pending proposal.
 API keys come only from the named environment variable; OAuth uses STATE/auth/auth.json.
 No repository model config or existing Pi/Codex login is read. Models lists catalog capabilities, not account entitlements.
 Exit codes: 0 completed/read-only/no_changes; 2 input or persistence failure; 3 incomplete/failed/cancelled.
 No cost estimate is produced. Model requests occur in review/rerun (including bounded learning), and explicitly authenticated feedback/skills learn.`;
 function parse(argv: string[]) {
   const values = new Map<string, string[]>();
-  const known = new Set(["repo", "state", "scope", "base", "head", "provider", "model", "auth", "api-key-env", "timeout-ms", "max-tools", "thinking", "max-output-tokens", "include-untracked", "run", "finding", "skills", "learn", "id", "revision", "comment", "comment-file", "event", "version", "path", "start-line", "end-line", "verdict", "withdrawn", "retry", "max-jobs"]);
+  const known = new Set(["repo", "state", "scope", "base", "head", "provider", "model", "auth", "api-key-env", "timeout-ms", "max-tools", "thinking", "max-output-tokens", "include-untracked", "run", "finding", "skills", "learn", "id", "revision", "comment", "comment-file", "event", "version", "path", "start-line", "end-line", "verdict", "withdrawn", "retry", "max-jobs", "proposal", "note", "stage"]);
   for (let i = 0; i < argv.length; i += 2) {
     const flag = argv[i]!; const value = argv[i + 1]; const key = flag.slice(2);
     if (!flag.startsWith("--") || !known.has(key) || !value || value.startsWith("--")) throw new Error(`Invalid option: ${flag}`);
@@ -112,6 +118,25 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     else if(skillAction==='disable'||skillAction==='rollback') result=await bank.manage(options.require('id'),skillAction==='rollback'?Number(options.require('revision')):undefined);
     else if(skillAction==='learn') {if(options.get('retry')&&!['true','false'].includes(options.get('retry')!))throw Error('Invalid --retry');const learner=await learningAdapter();await recoverDelivered(admittedState);result=await learnPending(admittedState,learner,learningOptions());}
     else if(skillAction==='unlock') {await bank.recoverLock('write');await bank.recoverLock('learning');result={unlocked:true};}
+    else if(skillAction==='pending') {
+      const { viewProposal } = await import('../skills/proposal-view.ts');
+      result=await Promise.all((await bank.proposals()).filter(p=>p.status==='pending').map(async p=>{const v=await viewProposal(bank,p);return {id:v.id,origin:v.origin,createdAt:v.createdAt,changes:v.changes.map(c=>`${c.op} ${c.id} r${c.revision.from}→r${c.revision.to} ${c.state.to}: ${c.title}`),warnings:v.warnings.length};}));
+    }
+    else if(skillAction==='diff') {
+      const { viewProposal, formatProposal } = await import('../skills/proposal-view.ts');
+      console.log(formatProposal(await viewProposal(bank,await bank.proposal(options.require('proposal')))));return 0;
+    }
+    else if(skillAction==='approve'||skillAction==='reject') {
+      const note=options.get('note');if(note!==undefined&&(!note.trim()||note.length>1000))throw Error('Invalid --note');
+      const target=options.require('proposal'),ids=target==='all'?(await bank.proposals()).filter(p=>p.status==='pending').map(p=>p.id):[target];
+      const decision={by:'local_user' as const,at:new Date().toISOString(),...(note?{note}:{})};
+      const outcomes=[];for(const id of ids){try{outcomes.push({id,...(skillAction==='approve'?await bank.approve(id,decision):{status:(await bank.reject(id,decision)).status})});}catch(e){outcomes.push({id,error:e instanceof Error?e.message:'Decision failed'});}}
+      result=outcomes;
+    }
+    else if(skillAction==='curate') {if(options.get('stage')&&!['true','false'].includes(options.get('stage')!))throw Error('Invalid --stage');const { curate } = await import('../skills/curation.ts');result=await curate(admittedState,{stage:options.get('stage')==='true'});}
+    else if(skillAction==='usage') {const { refreshUsage } = await import('../skills/usage.ts');result=await refreshUsage(admittedState);}
+    else if(skillAction==='pin') {await bank.pin(options.require('id'),options.get('note'));result={pinned:options.require('id')};}
+    else if(skillAction==='unpin') {await bank.unpin(options.require('id'));result={unpinned:options.require('id')};}
     else throw Error('Invalid skills command');
     console.log(JSON.stringify(result,null,2));return 0;
   }

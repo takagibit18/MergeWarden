@@ -1,5 +1,7 @@
 import { digest, contentOf } from './bank.ts';
-import type { LearningInput, LearningResult, SkillContent } from './contracts.ts';
+import type { ComparisonEntry, LearningInput, LearningOperation, LearningResult, SkillContent } from './contracts.ts';
+import { checkComparison } from './novelty.ts';
+import { parseReferences, parseSkillMarkdown, renderSkillMarkdown } from './skill-md.ts';
 
 /** Per-input capability names: the model selects names; only this host binds identities. */
 export function learningIdentity(input: LearningInput) {
@@ -11,6 +13,9 @@ export function learningIdentity(input: LearningInput) {
   if(context && (new Set(context.catalog.map(c=>c.id)).size!==context.catalog.length || context.catalog.some(c=>c.bodyProvided!==bodyRefs.has(c.id)||c.readOnly===c.bodyProvided) || frozen.relevantSkills.some(s=>!context.catalog.some(c=>c.id===s.id&&c.revision===s.revision))))throw Error('Learning catalog/body identity mismatch');
   const pages = new Map((frozen.sourcePages as Array<Record<string, unknown>>).map((p, i) => [`evidence_${scope}_${i + 1}`, p]));
   const newTargets = Array.from({length: 3}, (_, i) => `new_${scope}_${i + 1}`);
+  // Every Skill the learner was shown, by the opaque ref it saw. Comparison entries resolve through this map only.
+  const shownRefs = new Map((context?.catalog ?? []).map((c, i) => [bodyRefs.get(c.id) ?? `catalog_${scope}_${i + 1}`, {id: c.id, revision: c.revision}]));
+  const shown = [...shownRefs.values()];
   const strip = (value: unknown): unknown => {
     if (Array.isArray(value)) return value.map(strip);
     if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).filter(([k]) => !['snapshotId','runId','contentSha256','fileHash','hash','reportSha256','sources','eventId','feedbackMetadata'].includes(k)).map(([k,v]) => [k,strip(v)]));
@@ -19,7 +24,10 @@ export function learningIdentity(input: LearningInput) {
   const visible = {
     policy: frozen.policy, source: {...strip(frozen.source) as object, id: sourceRef, ref: sourceRef},
     report: strip(frozen.report), sourcePages: [...pages].map(([ref,p]) => ({...strip(p) as object,ref})),
-    relevantSkills: [...skills].map(([ref,s]) => ({ref, state:s.state, ...strip(contentOf(s)) as object, dependencies: s.dependencies.map(d => ({path:d.path, historical:true}))})),
+    relevantSkills: [...skills].map(([ref,s]) => s.name
+      // skill-md-1 knowledge is shown as the SKILL.md the learner must return when revising it.
+      ? ({ref, state:s.state, markdown:renderSkillMarkdown(contentOf(s)), references:s.references ?? {}, dependencies: s.dependencies.map(d => ({path:d.path, historical:true}))})
+      : ({ref, state:s.state, ...strip(contentOf(s)) as object, dependencies: s.dependencies.map(d => ({path:d.path, historical:true}))})),
     ...(context?{existingSkills:{version:context.version,limits:context.limits,bankCount:context.bankCount,candidateCount:context.candidateCount,rankedCount:context.rankedCount,catalogOmittedCount:context.catalogOmittedCount,bodyOmittedCount:context.bodyOmittedCount,
       catalog:context.catalog.map(({id,revision:_revision,...entry},i)=>({...entry,ref:bodyRefs.get(id)??`catalog_${scope}_${i+1}`}))}}:{}),
     newTargets, toolEvents: strip(frozen.toolEvents), fixedRules:frozen.fixedRules,
@@ -35,7 +43,8 @@ export function learningIdentity(input: LearningInput) {
         if (ops.length !== 1 || Object.keys(op).some(k => !['op','reason'].includes(k))) throw Error('Invalid noop');
         return {op:'noop' as const,reason:op.reason as string};
       }
-      if (Object.keys(op).some(k => !['op','targetRef','sourceRefs','reason','content','conflict'].includes(k))) throw Error('Invalid raw identity field');
+      if (Object.keys(op).some(k => !['op','targetRef','sourceRefs','reason','content','skill','conflict','comparison'].includes(k))) throw Error('Invalid raw identity field');
+      if (op.content && op.skill) throw Error('Return either skill or content, not both');
       if (!['add','revise','attach_source','retire'].includes(op.op as string)) throw Error('Invalid identity operation');
       if (!Array.isArray(op.sourceRefs) || op.sourceRefs.length !== 1 || op.sourceRefs[0] !== sourceRef) throw Error('Unknown or duplicate source ref');
       const target = op.targetRef as string, old = skills.get(target);
@@ -43,8 +52,16 @@ export function learningIdentity(input: LearningInput) {
       if (op.op === 'add' ? !newTargets.includes(target) : !old) throw Error('Unknown or cross-input target ref');
       if(old&&(old.owner!=='learner'||old.repositoryKey!==frozen.source.repositoryKey||!['trial','active'].includes(old.state)))throw Error('Target is not mutable managed knowledge');
       let content: SkillContent | undefined;
-      if (op.content) {
-        const c = op.content as Record<string, unknown>;
+      let raw = op.content as Record<string, unknown> | undefined;
+      if (op.skill) {
+        // skill-md-1: frontmatter + Markdown body, plus optional reference Markdown files. Scripts are refused.
+        const skill = op.skill as Record<string, unknown>;
+        if (!skill || typeof skill !== 'object' || Object.keys(skill).some(k => !['markdown','references'].includes(k))) throw Error('Skill must contain markdown and optional references only');
+        const parsed = parseSkillMarkdown(skill.markdown as string), references = parseReferences(skill.references);
+        raw = {...parsed.content, ...(references ? {references} : {}), dependencyRefs: parsed.dependencyRefs};
+      }
+      if (raw) {
+        const c = raw;
         if ('dependencies' in c || !Array.isArray(c.dependencyRefs)) throw Error('Invalid raw dependency hash; use dependencyRefs');
         if (new Set(c.dependencyRefs).size !== c.dependencyRefs.length) throw Error('Duplicate dependency ref');
         const {dependencyRefs,...body} = c;
@@ -55,7 +72,20 @@ export function learningIdentity(input: LearningInput) {
           return {path:page.path as string,hash:page.fileHash};
         })} as unknown as SkillContent;
       }
-      return {op:op.op as 'add'|'revise'|'attach_source'|'retire',id:old?.id ?? `sk_${scope}_${newTargets.indexOf(target)+1}`,expectedRevision:old?.revision ?? 0,sourceIds:[frozen.source.id],reason:op.reason as string,...(content ? {content}:{}),...(op.conflict !== undefined ? {conflict:op.conflict as boolean}:{})};
+      let comparison: ComparisonEntry[] | undefined;
+      if (op.comparison !== undefined) {
+        if (!Array.isArray(op.comparison)) throw Error('Novelty comparison must be an array');
+        comparison = op.comparison.map((entry: Record<string, unknown>) => {
+          if (!entry || typeof entry !== 'object' || Object.keys(entry).some(k => !['ref','relation','note'].includes(k))) throw Error('Invalid novelty comparison entry');
+          const known = shownRefs.get(entry.ref as string);
+          if (!known) throw Error('Novelty comparison names a Skill that was not shown');
+          return {id: known.id, revision: known.revision, relation: entry.relation as ComparisonEntry['relation'], note: entry.note as string};
+        });
+      }
+      const resolved: Exclude<LearningOperation, {op:'noop'}> = {op:op.op as 'add'|'revise'|'attach_source'|'retire',id:old?.id ?? `sk_${scope}_${newTargets.indexOf(target)+1}`,expectedRevision:old?.revision ?? 0,sourceIds:[frozen.source.id],reason:op.reason as string,...(content ? {content}:{}),...(op.conflict !== undefined ? {conflict:op.conflict as boolean}:{}),...(comparison ? {comparison} : {})};
+      // Only inputs that carried a knowledge catalog require Layer 1; legacy inputs keep their old contract.
+      if (context) resolved.comparison = checkComparison(resolved, shown);
+      return resolved;
     })};
   }};
 }

@@ -30,7 +30,7 @@ const factory=async options=>createPiRuntime(options,await scripted((context,tur
  return [{type:'text',text:'Done'}];
 }));
 const model={provider:'fixture',modelId:'offline'},learner=runPiLearning(await scripted(context=>{const m=context.messages[0].content,input=JSON.parse(typeof m==='string'?m:m.filter(c=>c.type==='text').map(c=>c.text).join(''));return [{type:'text',text:JSON.stringify({operations:[{op:'add',id:'sk_denominator',expectedRevision:0,sourceIds:[input.source.id],reason:'Synthetic fixture procedure',content:{type:'review_procedure',title:'Check explicit denominator input',conditions:['When callers may pass zero.'],steps:['Read caller constraints for count.','Check changed division guards with those constraints.'],counterexamples:['Validated positive count excludes zero.'],stopConditions:['Stop once current source establishes the permitted input range.'],paths:['app.py'],languages:['Python'],keywords:['count'],dependencies:[]}}]})}];}));
-const options={repositoryPath:repository,stateDir:state,input:{kind:'commits',base,head},model,evaluation:{tools:'text-only'},skills:'auto',learn:'auto'};
+const options={repositoryPath:repository,stateDir:state,input:{kind:'commits',base,head},model,evaluation:{tools:'text-only'},skills:'auto',learn:'auto',skillApproval:'auto'};
 const first=await new ReviewEngine(factory,undefined,learner).run(options);const second=await new ReviewEngine(factory).run({...options,learn:'off'});
 if(first.learning?.status!=='applied'||second.report.status!=='completed'||second.report.findings.length!==1)throw Error('Offline mechanism gate failed');
 await readReport(state,first.runId);await readReport(state,second.runId);const skills=await new SkillBank(state).skills();

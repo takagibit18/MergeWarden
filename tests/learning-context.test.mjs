@@ -18,7 +18,9 @@ test('catalog and full bodies are separate; catalog-only opaque refs grant no up
  const result=selectLearningContext(base(),Array.from({length:10},(_,i)=>skill(`sk_${i}`)));assert.equal(result.existingSkills.catalog.length,8);assert.equal(result.relevantSkills.length,3);assert.equal(result.existingSkills.catalogOmittedCount,2);assert.equal(result.existingSkills.bodyOmittedCount,7);
  const identity=learningIdentity(result),catalog=identity.visible.existingSkills.catalog;assert.equal(catalog.filter(c=>c.bodyProvided).length,3);assert(catalog.filter(c=>c.readOnly).every(c=>!c.bodyProvided));assert(!JSON.stringify(identity.visible).includes('sk_0'));
  const readOnly=catalog.find(c=>!c.bodyProvided);for(const op of ['revise','attach_source','retire'])assert.throws(()=>identity.resolve({operations:[{op,targetRef:readOnly.ref,sourceRefs:[identity.visible.source.ref],reason:'Summary alone'}]}),/Unknown/);
- const full=catalog.find(c=>c.bodyProvided);assert(identity.visible.relevantSkills.some(s=>s.ref===full.ref));assert.equal(identity.resolve({operations:[{op:'attach_source',targetRef:full.ref,sourceRefs:[identity.visible.source.ref],reason:'Bound source'}]}).operations[0].id,result.relevantSkills[0].id);
+ const full=catalog.find(c=>c.bodyProvided);assert(identity.visible.relevantSkills.some(s=>s.ref===full.ref));const comparison=catalog.map(c=>({ref:c.ref,relation:c.ref===full.ref?'same':'distinct',note:'Compared checking behaviour'}));
+ assert.equal(identity.resolve({operations:[{op:'attach_source',targetRef:full.ref,sourceRefs:[identity.visible.source.ref],reason:'Bound source',comparison}]}).operations[0].id,result.relevantSkills[0].id);
+ assert.throws(()=>identity.resolve({operations:[{op:'attach_source',targetRef:full.ref,sourceRefs:[identity.visible.source.ref],reason:'Bound source',comparison:comparison.slice(1)}]}),/incomplete|Target/);
  const original=structuredClone(result);result.relevantSkills.pop();assert.throws(()=>identity.resolve({operations:[{op:'noop',reason:'none'}]},result),/hash mismatch/);assert.throws(()=>learningIdentity(result),/catalog\/body/);assert.equal(original.relevantSkills.length,3);
 });
 

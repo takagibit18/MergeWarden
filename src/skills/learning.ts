@@ -3,7 +3,7 @@ import { mkdir, readdir, readFile, open, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { digest, SkillBank } from './bank.ts';
 import { SKILL_LIMITS, SKILL_POLICY } from './contracts.ts';
-import type { Learner, LearningInput, LearningJob, SkillSource } from './contracts.ts';
+import type { ApprovalMode, Learner, LearningInput, LearningJob, SkillSource } from './contracts.ts';
 import type { InferenceOptions, ModelSelection } from '../engine/contracts.ts';
 import { readReport, readRun, runPath } from '../engine/reports.ts';
 import { SnapshotStore } from '../snapshot/store.ts';
@@ -63,7 +63,9 @@ export async function buildInput(state:string,ref:string):Promise<LearningInput>
   for(const ref of new Set(skills.filter(s=>s.repositoryKey===source.repositoryKey).flatMap(s=>s.sources)))supportSources[ref]=await bank.source(ref);
   return selectLearningContext({policy:SKILL_POLICY,source,report:boundedReport,sourcePages,toolEvents,fixedRules:BASE_SYSTEM_PROMPT,bankSnapshotId:current.id},skills,supportSources);
 }
-export async function learnPending(state:string,learner:Learner,options:{model:ModelSelection;inference?:InferenceOptions;maxJobs?:number;retryFailed?:boolean;feedbackOnly?:boolean;repositoryKey?:string;timeoutMs?:number}):Promise<LearningJob[]> {
+/** Extract pending sources. With approval 'required' (the default) results are staged as proposals, never published directly. */
+export async function learnPending(state:string,learner:Learner,options:{model:ModelSelection;inference?:InferenceOptions;maxJobs?:number;retryFailed?:boolean;feedbackOnly?:boolean;repositoryKey?:string;timeoutMs?:number;approval?:ApprovalMode}):Promise<LearningJob[]> {
+  const approval=options.approval??'required';if(!['required','auto'].includes(approval))throw Error('Invalid learning approval mode');
   const max=options.maxJobs??1;if(!Number.isInteger(max)||max<1||max>3)throw Error('Learning batch must contain 1..3 jobs');
   const timeout=options.timeoutMs??SKILL_LIMITS.timeoutMs;if(timeout<1||!Number.isInteger(timeout)||timeout>120000)throw Error('Invalid learning timeout');
   const bank=new SkillBank(state);await mkdir(join(bank.root,'jobs'),{recursive:true});
@@ -72,6 +74,14 @@ export async function learnPending(state:string,learner:Learner,options:{model:M
     await claim.writeFile(JSON.stringify({pid:process.pid}));await claim.sync();
     for(const ref of Object.values((await bank.current()).snapshot.sources).slice(-100))await enqueue(state,ref);
     const jobs:LearningJob[]=[];for(const name of (await readdir(join(bank.root,'jobs'))).sort())if(/^[a-f0-9]{64}\.json$/.test(name))jobs.push(JSON.parse(await readFile(join(bank.root,'jobs',name),'utf8')));
+    // Approval decisions happen outside learning. Sync them first so status-only updates never consume the batch.
+    const decided=(await bank.current()).snapshot.applied;
+    for(const job of jobs) {
+      const record=decided[job.id];
+      if(job.status!=='proposed')continue;
+      if(record&&(job.status!==record.outcome||job.proposalId!==record.proposalId)){job.status=record.outcome;if(record.proposalId)job.proposalId=record.proposalId;await writeJson(join(bank.root,'jobs',job.id+'.json'),job);}
+      else if(!record){job.status='pending';delete job.proposalId;await writeJson(join(bank.root,'jobs',job.id+'.json'),job);}
+    }
     const candidates=[];for(const job of jobs) {const source=await bank.source(job.sourceId);if(options.repositoryKey&&source.repositoryKey!==options.repositoryKey||options.feedbackOnly&&source.kind!=='feedback')continue;if(['pending','running'].includes(job.status)||options.retryFailed&&job.status==='failed')candidates.push({job,source});}
     candidates.sort((a,b)=>Number(b.source.kind==='feedback')-Number(a.source.kind==='feedback')||a.source.createdAt.localeCompare(b.source.createdAt));
     const results:LearningJob[]=[];
@@ -91,8 +101,9 @@ export async function learnPending(state:string,learner:Learner,options:{model:M
         let stop:()=>void=()=>{};const cancelled=new Promise<never>((_,reject)=>{stop=()=>reject(Error('Learning deadline exceeded'));abort.signal.addEventListener('abort',stop,{once:true});});
         let result;try {result=await Promise.race([learner(input,{directory,model:options.model,...(options.inference?{inference:options.inference}:{}),signal:abort.signal,timeoutMs:timeout}),cancelled]);}finally{abort.signal.removeEventListener('abort',stop);}
         abort.signal.throwIfAborted();job.usage=result.usage;job.requests=result.requests;await writeJson(join(directory,'output.json'),result);
-        const receipt=await bank.apply(job.id,input,result.result);job.status=receipt.outcome;job.snapshotId=receipt.snapshotId;await writeJson(join(directory,'receipt.json'),receipt);
-      } catch(e) {job.status='failed';job.error=e instanceof Error&&/^(Source |Knowledge |Invalid |Skill |Learning |Expected |Unknown |Duplicate |Weak |Target |Retirement |Procedure |Conditional |Unexpected |Dependency |Operation |Missing |Repository )/.test(e.message)?e.message:'Learning failed; inspect preserved attempt';job.usage??=null;job.requests??=null;try{const metrics=JSON.parse(await readFile(join(directory,'metrics.json'),'utf8'));job.usage=metrics.usage;job.requests=metrics.requests;}catch{/* Unknown provider usage remains null. */}}
+        const receipt=approval==='auto'?await bank.apply(job.id,input,result.result):await bank.propose(job.id,input,result.result);
+        job.status=receipt.outcome;job.snapshotId=receipt.snapshotId;if(receipt.proposalId)job.proposalId=receipt.proposalId;await writeJson(join(directory,'receipt.json'),receipt);
+      } catch(e) {job.status='failed';job.error=e instanceof Error&&/^(Source |Knowledge |Invalid |Skill |Learning |Expected |Unknown |Duplicate |Weak |Target |Retirement |Procedure |Conditional |Unexpected |Dependency |Operation |Missing |Repository |Novelty |Same experience |Near-duplicate |Review methods |SKILL.md |At most |Learned Skills |Return either |Unsupported |Learning output )/.test(e.message)?e.message:'Learning failed; inspect preserved attempt';job.usage??=null;job.requests??=null;try{const metrics=JSON.parse(await readFile(join(directory,'metrics.json'),'utf8'));job.usage=metrics.usage;job.requests=metrics.requests;}catch{/* Unknown provider usage remains null. */}}
       finally {clearTimeout(timer);job.latencyMs=performance.now()-started;delete job.pid;await writeJson(jobPath,job);await writeJson(join(directory,'job.json'),job);}
       results.push(job);
     }

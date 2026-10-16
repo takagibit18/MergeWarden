@@ -16,7 +16,7 @@ const approved=await read(join(root,'evaluation/comments-validated.json'));asser
 const catalog=await createOAuthModelRuntime(ex.model.provider,auth),learner=runPiLearning(catalog,true),records=[];
 for(let i=0;i<(phase==='B'?6:12);i++){
  let consumed=ex.learningCallsPrior;for(const arm of ['B','C']){try{for(const f of await readdir(join(dir,arm,'skills/jobs'))){const j=await read(join(dir,arm,'skills/jobs',f));consumed+=j.attempts;}}catch(e){if(e.code!=='ENOENT')throw e;}}
- assert(consumed<ex.learningCallsMax,'Learning allowance exhausted');const jobs=await learnPending(target,learner,{model:ex.model,inference:ex.inference,maxJobs:1,feedbackOnly:phase==='C'});if(!jobs.length)break;records.push(...jobs);console.log(JSON.stringify({arm:phase,jobs}));
+ assert(consumed<ex.learningCallsMax,'Learning allowance exhausted');const jobs=await learnPending(target,learner,{model:ex.model,inference:ex.inference,maxJobs:1,feedbackOnly:phase==='C',approval:'auto'});if(!jobs.length)break;records.push(...jobs);console.log(JSON.stringify({arm:phase,jobs}));
 }
 const bank=new SkillBank(target),current=await bank.current();await writeJson(join(dir,phase+'-frozen.json'),{status:'FROZEN',bankSnapshotId:current.id,skills:await bank.skills(),records,at:new Date().toISOString()});
 if(phase==='C')await writeJson(join(dir,'learning-frozen.json'),{status:'FROZEN',B:await read(join(dir,'B-frozen.json')),C:await read(join(dir,'C-frozen.json'))});

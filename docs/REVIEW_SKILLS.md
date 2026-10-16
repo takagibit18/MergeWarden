@@ -15,7 +15,18 @@ npm run cli -- skills learn --provider PROVIDER --model MODEL --auth oauth --max
 npm run cli -- skills disable --id SKILL_ID --state EXTERNAL_STATE
 npm run cli -- skills rollback --id SKILL_ID --revision 1 --state EXTERNAL_STATE
 npm run cli -- skills unlock --state EXTERNAL_STATE
+npm run cli -- skills pending --state EXTERNAL_STATE
+npm run cli -- skills diff --proposal PROPOSAL_ID --state EXTERNAL_STATE
+npm run cli -- skills approve --proposal PROPOSAL_ID|all --note "Reviewed" --state EXTERNAL_STATE
+npm run cli -- skills reject --proposal PROPOSAL_ID|all --note "Too broad" --state EXTERNAL_STATE
+npm run cli -- skills usage --state EXTERNAL_STATE
+npm run cli -- skills curate --stage true --state EXTERNAL_STATE
+npm run cli -- skills pin --id SKILL_ID --note "Keep" --state EXTERNAL_STATE
 ```
+
+Learned Skills use the SKILL.md format of [ADR 0019](adr/0019-skill-md-format.md): frontmatter with `name` and a trigger-oriented `description`, the sections *When to use*, *Procedure*, *Not a defect when* and *Stop when*, and up to two reference Markdown files; scripts are refused. Reviews see only name and description in the catalog, read the SKILL.md with `read_review_skill {id}` and open a listed reference with `read_review_skill {id, reference}`. Review methods are scoped by module directory. A run and feedback on the same change count as one support; run-derived Skills become active after support from two different changes.
+
+Governance follows [ADR 0018](adr/0018-skill-governance.md). Learning results are staged as proposals and become knowledge only after `skills approve`; reviews never read a pending proposal. Each learning operation must compare itself with every Skill the learner was shown (Layer 1). Writes are normalized and refused when they duplicate or nearly duplicate a stored or pending Skill (Layer 2). `skills usage` rebuilds exposure and read counts from run artifacts, and `skills curate` turns them into retire or review recommendations; `--stage true` stages retirements for approval (Layer 3).
 
 Every flag takes a value. `--finding` and `--verdict correction|missed_defect|contract|uncertain` are optional. A missed defect does not require a finding ID. Feedback is saved before any explicitly authenticated learning attempt. Without authentication it remains pending. Comments cannot select their identity or simulated status; only the evaluation host can select the separate simulation entry metadata. Pending does not mean published.
 
@@ -49,6 +60,6 @@ Learning uses one serial worker per local state directory. The worker holds `lea
 
 `jobs` and `attempts/JOB/N` retain pending/running/applied/noop/failed state, bounded input, model output, native Pi session, observed request parameters, usage and publication receipt. Job identity binds immutable source hash and extraction-policy version; the actual input hash is recorded separately. A committed receipt recovers an interrupted job without applying it twice. A job interrupted before publication can make another paid request on explicit retry/recovery; external model execution is not exactly once.
 
-Run-derived procedures default to trial. Contextual trusted corrections may become active automatically; active means usable support, not proven truth. Substantive unresolved conflicts are quarantined. Source edits and withdrawals preserve old versions, remove the old support, and quarantine affected current Skills before further extraction. Rollback creates a new revision, retains only still-current sources, and never resurrects revoked support. A model cannot modify unmanaged Skills or the fixed base rules. Repeated source observations have an `independenceKey`; run count and loading count are not independent corroboration.
+Run-derived procedures are proposed as trial. Contextual trusted corrections are proposed as active; both publish only after approval, and active means usable support, not proven truth. Substantive unresolved conflicts are quarantined. Source edits and withdrawals preserve old versions, remove the old support, and quarantine affected current Skills before further extraction. Rollback creates a new revision, retains only still-current sources, and never resurrects revoked support. A model cannot modify unmanaged Skills or the fixed base rules. Repeated source observations have an `independenceKey`; run count and loading count are not independent corroboration.
 
 The native learning session has its own fixed extraction instructions and no tools, ambient Skills, AGENTS files, templates or project extensions. It does not instantiate the Review Runtime with its review prompt. Its failure and usage records are separate from report delivery. Report reopening and evidence remain available when learning fails.

@@ -38,7 +38,8 @@ test('native Pi review → separate learning session → next review consumes fr
    return [{type:'text',text:'Done.'}];
  }));
  const options={repositoryPath:f.repository,stateDir:f.state,input:{kind:'commits',base:f.base,head},model:{provider:'fixture',modelId:'offline'},evaluation:{tools:'text-only'},skills:'auto',learn:'auto'};
- const first=await new ReviewEngine(factory,undefined,runPiLearning(learningRuntime)).run(options);assert.equal(first.report.status,'completed');assert.equal(first.learning.status,'applied');assert.equal(learningCalls,1);
+ const first=await new ReviewEngine(factory,undefined,runPiLearning(learningRuntime)).run(options);assert.equal(first.report.status,'completed');assert.equal(first.learning.status,'proposed');assert.equal(learningCalls,1);
+ const approval=await new SkillBank(f.state).approve(first.learning.jobs[0].proposalId,{by:'local_user',at:new Date().toISOString()});assert.equal(approval.outcome,'applied');
  const next=await new ReviewEngine(factory).run({...options,learn:'off'});assert.equal(next.report.status,'completed');assert.equal(next.report.findings.length,1);assert.deepEqual(await readReport(f.state,next.runId),next.report);assert.equal((await readRun(f.state,next.runId)).skills.available.length,1);assert.match(observed.systemPrompt,/fallible experience/);assert.doesNotMatch(observed.systemPrompt,/MALICIOUS_AMBIENT_MARKER/);
  const bank=new SkillBank(f.state),job=first.learning.jobs[0];const rows=(await readFile(join(bank.root,'attempts',job.id,'1','session.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);assert.ok(rows.some(r=>r.message?.role==='assistant'));assert.ok(rows.some(r=>r.message?.role==='user'));
  const reads=JSON.parse(await readFile(join(f.state,'runs',next.runId,'skill-reads.json'),'utf8'));assert.equal(reads.length,1);assert.equal(reads[0].ordinal,1);
