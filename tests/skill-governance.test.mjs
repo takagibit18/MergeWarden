@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { repositoryFixture } from './repository-fixture.mjs';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import { ReviewEngine } from '../src/engine/review.ts';
 import { MemoryJournal } from '../src/adapters/memory-journal.ts';
 import { SkillBank, digest } from '../src/skills/bank.ts';
@@ -199,4 +202,23 @@ test('Layer 3: curation recommends from usage, respects pins and stages retireme
   await f.bank.approve(proposal.id, { by: 'local_user', at: at(92).toISOString() });
   assert.equal((await f.bank.skills()).find(s => s.id === 'sk_cache').state, 'retired');
   assert.equal((await curate(f.state, { now: at(92) })).skipped.inactive, 1);
+});
+
+test('CLI lists, diffs, approves, curates and pins through real process boundaries', async t => {
+  const f = await fixture(t), cli = fileURLToPath(new URL('../src/cli/main.ts', import.meta.url)), exec = promisify(execFile);
+  const run = async args => { try { return { code: 0, ...await exec(process.execPath, ['--experimental-strip-types', cli, ...args, '--state', f.state], { windowsHide: true }) }; } catch (e) { return { code: e.code, stdout: e.stdout, stderr: e.stderr }; } };
+  const [job] = await learn(f, add('sk_denominator', procedure));
+  const pending = JSON.parse((await run(['skills', 'pending'])).stdout);
+  assert.deepEqual(pending.map(p => p.id), [job.proposalId]);
+  assert.match(pending[0].changes[0], /^add sk_denominator r0→r1 trial: Check denominator/);
+  const diff = await run(['skills', 'diff', '--proposal', job.proposalId]);
+  assert.equal(diff.code, 0); assert.match(diff.stdout, /ADD sk_denominator/); assert.match(diff.stdout, /\+ Read the caller/);
+  assert.equal((await run(['skills', 'approve', '--proposal', job.proposalId, '--note', ' '])).code, 2);
+  const approved = JSON.parse((await run(['skills', 'approve', '--proposal', 'all', '--note', 'Matches convention'])).stdout);
+  assert.deepEqual(approved.map(a => [a.id, a.outcome]), [[job.proposalId, 'applied']]);
+  assert.deepEqual(JSON.parse((await run(['skills', 'pending'])).stdout), []);
+  assert.equal(JSON.parse((await run(['skills', 'usage'])).stdout).skills.sk_denominator.exposures, 0);
+  assert.equal((await run(['skills', 'pin', '--id', 'sk_denominator'])).code, 0);
+  assert.deepEqual(JSON.parse((await run(['skills', 'curate'])).stdout).skipped.pinned, ['sk_denominator']);
+  assert.equal((await run(['skills', 'curate', '--stage', 'maybe'])).code, 2);
 });

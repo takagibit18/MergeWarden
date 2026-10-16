@@ -1,5 +1,7 @@
 # 顶层决策索引
 
+新增产品决策：[ADR 0018：Review Skill 治理](adr/0018-skill-governance.md)。学习结果先进入审批队列；提炼前必须与已展示的 Skill 逐条比对；写入时规范化并拦截重复与近似重复；基于使用统计定期给出退役与复核建议。Skill 对审查质量的增益仍未验证。
+
 新增实验契约：[ADR 0017：渐进式结构调查](adr/0017-progressive-structural-investigation.md)。
 `dispatch_v2` 已实现稳定调查、多 root、有界候选目录和主 Agent 候选展开。
 2026-09-26 工程回归与 Gate 1 通过；Gate 2 公开样本准入上限为 2，未达到 6，模型实验及 Gate 3 未运行。产品默认不变。
