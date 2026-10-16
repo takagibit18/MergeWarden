@@ -12,6 +12,7 @@ import { learningIdentity } from '../src/skills/identity.ts';
 import { normalizeContent, similarity, SIMILARITY_POLICY } from '../src/skills/normalize.ts';
 import { viewProposal, formatProposal } from '../src/skills/proposal-view.ts';
 import { SnapshotStore } from '../src/snapshot/store.ts';
+import { computeUsage, refreshUsage } from '../src/skills/usage.ts';
 
 const procedure = { type: 'review_procedure', title: 'Check denominator contract at call boundaries',
   conditions: ['When the denominator is an optional input.'],
@@ -139,4 +140,22 @@ test('automatic approval is limited to internal evaluation', async t => {
   const f = await fixture(t);
   const { evaluation: _evaluation, ...product } = f.options;
   await assert.rejects(new ReviewEngine(runtime(finish)).run({ ...product, skillApproval: 'auto' }), /limited to internal evaluation/);
+});
+
+test('usage is rebuilt from run artifacts: exposure, body reads and feedback on reading runs', async t => {
+  const f = await fixture(t);
+  await learn(f, add('sk_denominator', procedure), { approval: 'auto' });
+  let before = await computeUsage(f.state);
+  assert.deepEqual([before.skills.sk_denominator.exposures, before.skills.sk_denominator.reads], [0, 0]);
+  const reading = await new ReviewEngine(runtime(async tools => { await tools.read_review_skill({ id: 'sk_denominator' }); await tools.read_review_skill({ id: 'sk_denominator' }); await finish(tools); })).run({ ...f.options, learn: 'off' });
+  await new ReviewEngine(runtime(finish)).run({ ...f.options, learn: 'off' });
+  await feedback(f.state, { runId: reading.runId, comment: 'The loaded method found the right boundary.', range: { path: 'app.py', startLine: 1, endLine: 2 }, relationToReview: 'adds_context' });
+  const usage = await refreshUsage(f.state, new Date('2030-01-01T00:00:00Z'));
+  const s = usage.skills.sk_denominator;
+  assert.equal(s.exposures, 2, 'both later reviews exposed it in the catalog');
+  assert.equal(s.reads, 1, 'a repeated read in one run counts once');
+  assert.deepEqual(s.revisionsRead, [1]);
+  assert.equal(s.feedbackOnReadingRuns.addsContext, 1);
+  assert.equal(usage.runsWithSkills, 2); assert.equal(usage.computedAt, '2030-01-01T00:00:00.000Z');
+  assert.deepEqual(JSON.parse(await readFile(join(f.state, 'skills', 'usage.json'), 'utf8')), usage);
 });

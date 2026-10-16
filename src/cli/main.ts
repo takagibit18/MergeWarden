@@ -24,7 +24,7 @@ npm run cli -- feedback --run ID --comment TEXT [--finding ID] [--path FILE --st
 npm run cli -- skills list|learn|unlock [--state PATH]
 npm run cli -- skills show|disable --id SKILL_ID [--state PATH]
 npm run cli -- skills rollback --id SKILL_ID --revision N [--state PATH]
-npm run cli -- skills pending [--state PATH]
+npm run cli -- skills pending|usage [--state PATH]
 npm run cli -- skills diff --proposal ID [--state PATH]
 npm run cli -- skills approve|reject --proposal ID|all [--note TEXT] [--state PATH]
 npm run cli -- skills pin --id SKILL_ID [--note TEXT] | unpin --id SKILL_ID [--state PATH]
@@ -132,6 +132,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       const outcomes=[];for(const id of ids){try{outcomes.push({id,...(skillAction==='approve'?await bank.approve(id,decision):{status:(await bank.reject(id,decision)).status})});}catch(e){outcomes.push({id,error:e instanceof Error?e.message:'Decision failed'});}}
       result=outcomes;
     }
+    else if(skillAction==='usage') {const { refreshUsage } = await import('../skills/usage.ts');result=await refreshUsage(admittedState);}
     else if(skillAction==='pin') {await bank.pin(options.require('id'),options.get('note'));result={pinned:options.require('id')};}
     else if(skillAction==='unpin') {await bank.unpin(options.require('id'));result={unpinned:options.require('id')};}
     else throw Error('Invalid skills command');
