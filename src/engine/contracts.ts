@@ -12,6 +12,8 @@ export interface InferenceOptions {
 }
 export interface ReviewOptions {
   skills?: 'auto' | 'off' | 'replay'; learn?: 'auto' | 'off';
+  /** Learned Skill changes wait for human approval unless an internal evaluation explicitly selects 'auto'. */
+  skillApproval?: 'required' | 'auto';
   /** Host-controlled mapping only: never inferred from origin or reviewed configuration. */
   skillRepositoryKey?: string;
   repositoryPath: string; stateDir: string; input?: ReviewInput; rerunId?: string;

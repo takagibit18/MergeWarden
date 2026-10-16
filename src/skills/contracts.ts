@@ -1,5 +1,8 @@
 import type { InferenceOptions, ModelSelection } from '../engine/contracts.ts';
 export const SKILL_POLICY = 'review-skills-2';
+/** Write approval, novelty comparison, normalization/near-duplicate gates and usage-based curation. */
+export const SKILL_GOVERNANCE_POLICY = 'skill-governance-1';
+export type ApprovalMode = 'required' | 'auto';
 export const SKILL_LIMITS = Object.freeze({ catalog: 8, bodies: 3, trial: 1, bodyBytes: 6000, inputBytes: 40000, operations: 3, timeoutMs: 60000 });
 export type SkillState = 'trial' | 'active' | 'quarantined' | 'retired';
 export interface SkillContent {
@@ -33,7 +36,29 @@ export interface SimulatedFeedback {
 }
 export interface BankSnapshot {
   version: 1; parent: string | null; skills: Record<string, string>; sources: Record<string, string>;
-  applied: Record<string, { outcome: 'applied' | 'noop'; operations: string[] }>;
+  applied: Record<string, { outcome: 'applied' | 'noop' | 'proposed' | 'rejected'; operations: string[]; proposalId?: string }>;
+  /** Staged learning changesets, keyed by proposal ID. Absent in banks written before write approval. */
+  proposals?: Record<string, string>;
+  /** Skills excluded from curation recommendations. Governance metadata, not knowledge content. */
+  pins?: Record<string, { at: string; note?: string }>;
+}
+/** Layer 1: the learner's explicit judgement of each existing Skill it was shown. */
+export type ComparisonRelation = 'same' | 'overlaps' | 'distinct';
+export interface ComparisonEntry { id: string; revision: number; relation: ComparisonRelation; note: string }
+export interface ApprovalDecision { by: 'local_user' | 'host_auto'; at: string; note?: string }
+export interface ProposedChange {
+  op: 'add' | 'revise' | 'attach_source' | 'retire'; id: string; expectedRevision: number; reason: string;
+  /** Object ref of the Skill revision this change would publish. */
+  candidate: string;
+  /** Object ref of the revision being replaced; absent for add. */
+  previous?: string;
+}
+export interface Proposal {
+  schemaVersion: 1; id: string; origin: 'learning' | 'curation'; status: 'pending' | 'approved' | 'rejected' | 'stale';
+  jobId?: string; sourceRef?: string; baseSnapshotId: string; repositoryKey: string;
+  changes: ProposedChange[]; comparison: ComparisonEntry[];
+  /** Layer 2 findings that did not block staging, shown to the approver. */
+  warnings: string[]; createdAt: string; decision?: ApprovalDecision;
 }
 export interface LearningInput {
   policy: string; source: SkillSource; report: unknown; sourcePages: unknown[]; toolEvents: unknown[];
@@ -58,13 +83,16 @@ export interface LearningContext {
 export type LearningOperation = { op: 'noop'; reason: string } | {
   op: 'add' | 'revise' | 'attach_source' | 'retire'; id: string; expectedRevision: number;
   sourceIds: string[]; reason: string; content?: SkillContent; conflict?: boolean;
+  /** Required whenever the learning input carried an existing-knowledge catalog. */
+  comparison?: ComparisonEntry[];
 };
 export interface LearningResult { operations: LearningOperation[] }
 export type Learner = (input: LearningInput, options: { directory: string; model: ModelSelection; inference?: InferenceOptions; signal: AbortSignal; timeoutMs?: number }) => Promise<{
   result: unknown; usage: { input: number; output: number; total: number } | null; requests: number | null;
 }>;
 export interface LearningJob {
-  id: string; sourceId: string; status: 'pending' | 'running' | 'applied' | 'noop' | 'failed';
+  id: string; sourceId: string; status: 'pending' | 'running' | 'proposed' | 'applied' | 'noop' | 'rejected' | 'failed';
+  proposalId?: string;
   attempts: number; pid?: number; inputSha256?: string; snapshotId?: string; error?: string;
   usage?: { input: number; output: number; total: number } | null; requests?: number | null; latencyMs?: number;
 }

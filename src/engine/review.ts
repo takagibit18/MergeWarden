@@ -56,6 +56,8 @@ export class ReviewEngine {
   async run(options: ReviewOptions, onProgress: (event: ReviewProgress) => void = () => {}): Promise<ReviewResult> {
     if (options.skills && !['auto','off','replay'].includes(options.skills)) throw Error('Invalid skills mode');
     if (options.learn && !['auto','off'].includes(options.learn)) throw Error('Invalid learning mode');
+    if (options.skillApproval && !['required','auto'].includes(options.skillApproval)) throw Error('Invalid Skill approval mode');
+    if (options.skillApproval === 'auto' && !options.evaluation) throw Error('Automatic Skill approval is limited to internal evaluation');
     const learningPolicy = options.learn ?? (options.evaluation ? 'off' : 'auto');
     const reviewStarted = performance.now();
     const notify = (event: ReviewProgress) => { try { onProgress(event); } catch { /* UI observers cannot alter the run. */ } };
@@ -285,7 +287,7 @@ export class ReviewEngine {
       if (learningPolicy === 'auto') {
         try {
           await registerRun(stateDir,runId);
-          const jobs = this.learner ? await learnPending(stateDir,this.learner,{model:options.model,...(options.inference?{inference:options.inference}:{}),repositoryKey,maxJobs:1}) : undefined;
+          const jobs = this.learner ? await learnPending(stateDir,this.learner,{model:options.model,...(options.inference?{inference:options.inference}:{}),repositoryKey,maxJobs:1,approval:options.skillApproval??'required'}) : undefined;
           learning = jobs ? {status:jobs[0]?.status??'pending',jobs} : {status:'pending'};
         } catch { learning = {status:'failed; review remains delivered'}; }
       }
