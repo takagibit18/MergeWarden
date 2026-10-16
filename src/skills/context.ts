@@ -75,7 +75,10 @@ export function skillReader(pkg:SkillPackage, runDir:string) {
     }
     const entry=pkg.selected.find(s=>s.skill.id===input.id); if(!entry) throw Error('Skill outside frozen catalog');
     if(loaded.has(input.id)) return {materialType:'review_skill',evidenceEligible:false,status:'already_loaded',id:entry.skill.id,revision:entry.skill.revision};
-    const s=entry.skill; const body={materialType:'review_skill',evidenceEligible:false,id:s.id,revision:s.revision,state:s.state,freshness:entry.freshness,format:SKILL_FORMAT,markdown:renderSkillMarkdown(contentOf(s)),references:Object.keys(s.references??{})}; const size=Buffer.byteLength(JSON.stringify(body));
+    // Legacy Skills (no name/description) keep the body shape they were frozen with, so replays read the same material.
+    const s=entry.skill; const body=s.name&&s.description
+      ? {materialType:'review_skill',evidenceEligible:false,id:s.id,revision:s.revision,state:s.state,freshness:entry.freshness,format:SKILL_FORMAT,markdown:renderSkillMarkdown(contentOf(s)),references:Object.keys(s.references??{})}
+      : {materialType:'review_skill',evidenceEligible:false,skill:s,freshness:entry.freshness}; const size=Buffer.byteLength(JSON.stringify(body));
     if(events.length>=pkg.limits.bodies||bytes+size>pkg.limits.bodyBytes||(s.state==='trial'&&trial>=pkg.limits.trial)) throw Error('Skill reading budget exhausted');
     const event={id:s.id,revision:s.revision,contentSha256:s.contentSha256,ordinal,at:new Date().toISOString(),bytes:size,estimatedTokens:Math.ceil(size/4),truncated:false as const};
     // Persist observation before returning; it never registers current-source evidence.

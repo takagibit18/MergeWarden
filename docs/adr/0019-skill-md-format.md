@@ -33,8 +33,9 @@ not governance:
 3. **Progressive disclosure in review.** The catalog shows only `name` and `description` for
    SKILL.md knowledge; `read_review_skill {id}` returns the rendered SKILL.md and the list of
    references; `read_review_skill {id, reference}` opens one reference after its body was read,
-   within the same byte budget. Legacy catalog entries keep their frozen shape so replays of
-   old runs still verify.
+   within the same byte budget. Legacy Skills (no name and description) keep their frozen
+   catalog entry and their original `{ skill }` body, so replays of old runs verify and read
+   the same material.
 4. **Generalize, then file the incident.** The prompt (`skill-md-1`) asks whether the Skill
    would catch the next instance of the mistake in a different file; the concrete incident
    goes to `references/example.md`. The description names change shapes that should trigger
