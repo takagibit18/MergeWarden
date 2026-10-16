@@ -25,6 +25,7 @@ npm run cli -- skills list|learn|unlock [--state PATH]
 npm run cli -- skills show|disable --id SKILL_ID [--state PATH]
 npm run cli -- skills rollback --id SKILL_ID --revision N [--state PATH]
 npm run cli -- skills pending|usage [--state PATH]
+npm run cli -- skills curate [--stage true] [--state PATH]   (report only unless --stage stages retirements for approval)
 npm run cli -- skills diff --proposal ID [--state PATH]
 npm run cli -- skills approve|reject --proposal ID|all [--note TEXT] [--state PATH]
 npm run cli -- skills pin --id SKILL_ID [--note TEXT] | unpin --id SKILL_ID [--state PATH]
@@ -47,7 +48,7 @@ Exit codes: 0 completed/read-only/no_changes; 2 input or persistence failure; 3 
 No cost estimate is produced. Model requests occur in review/rerun (including bounded learning), and explicitly authenticated feedback/skills learn.`;
 function parse(argv: string[]) {
   const values = new Map<string, string[]>();
-  const known = new Set(["repo", "state", "scope", "base", "head", "provider", "model", "auth", "api-key-env", "timeout-ms", "max-tools", "thinking", "max-output-tokens", "include-untracked", "run", "finding", "skills", "learn", "id", "revision", "comment", "comment-file", "event", "version", "path", "start-line", "end-line", "verdict", "withdrawn", "retry", "max-jobs", "proposal", "note"]);
+  const known = new Set(["repo", "state", "scope", "base", "head", "provider", "model", "auth", "api-key-env", "timeout-ms", "max-tools", "thinking", "max-output-tokens", "include-untracked", "run", "finding", "skills", "learn", "id", "revision", "comment", "comment-file", "event", "version", "path", "start-line", "end-line", "verdict", "withdrawn", "retry", "max-jobs", "proposal", "note", "stage"]);
   for (let i = 0; i < argv.length; i += 2) {
     const flag = argv[i]!; const value = argv[i + 1]; const key = flag.slice(2);
     if (!flag.startsWith("--") || !known.has(key) || !value || value.startsWith("--")) throw new Error(`Invalid option: ${flag}`);
@@ -132,6 +133,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       const outcomes=[];for(const id of ids){try{outcomes.push({id,...(skillAction==='approve'?await bank.approve(id,decision):{status:(await bank.reject(id,decision)).status})});}catch(e){outcomes.push({id,error:e instanceof Error?e.message:'Decision failed'});}}
       result=outcomes;
     }
+    else if(skillAction==='curate') {if(options.get('stage')&&!['true','false'].includes(options.get('stage')!))throw Error('Invalid --stage');const { curate } = await import('../skills/curation.ts');result=await curate(admittedState,{stage:options.get('stage')==='true'});}
     else if(skillAction==='usage') {const { refreshUsage } = await import('../skills/usage.ts');result=await refreshUsage(admittedState);}
     else if(skillAction==='pin') {await bank.pin(options.require('id'),options.get('note'));result={pinned:options.require('id')};}
     else if(skillAction==='unpin') {await bank.unpin(options.require('id'));result={unpinned:options.require('id')};}

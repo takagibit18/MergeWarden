@@ -13,6 +13,7 @@ import { normalizeContent, similarity, SIMILARITY_POLICY } from '../src/skills/n
 import { viewProposal, formatProposal } from '../src/skills/proposal-view.ts';
 import { SnapshotStore } from '../src/snapshot/store.ts';
 import { computeUsage, refreshUsage } from '../src/skills/usage.ts';
+import { curate, CURATION_POLICY } from '../src/skills/curation.ts';
 
 const procedure = { type: 'review_procedure', title: 'Check denominator contract at call boundaries',
   conditions: ['When the denominator is an optional input.'],
@@ -158,4 +159,44 @@ test('usage is rebuilt from run artifacts: exposure, body reads and feedback on 
   assert.equal(s.feedbackOnReadingRuns.addsContext, 1);
   assert.equal(usage.runsWithSkills, 2); assert.equal(usage.computedAt, '2030-01-01T00:00:00.000Z');
   assert.deepEqual(JSON.parse(await readFile(join(f.state, 'skills', 'usage.json'), 'utf8')), usage);
+});
+
+test('Layer 3: curation recommends from usage, respects pins and stages retirements for approval only', async t => {
+  const f = await fixture(t);
+  await learn(f, add('sk_denominator', procedure), { approval: 'auto' });
+  const fb = await feedback(f.state, { runId: f.run.runId, comment: 'Cache reload is a separate concern.', range: { path: 'app.py', startLine: 1, endLine: 2 } });
+  const input = await buildInput(f.state, fb.job.sourceId);
+  await f.bank.apply('second', input, { operations: [{ op: 'add', id: 'sk_cache', expectedRevision: 0, sourceIds: [input.source.id], reason: 'Different method', content: { ...unrelated, paths: ['config/cache.py'] }, comparison: compare(input, null) }] });
+  const created = Date.parse((await f.bank.skills())[0].createdAt);
+  const at = days => new Date(created + days * 86_400_000);
+
+  assert.deepEqual((await curate(f.state, { now: at(CURATION_POLICY.minAgeDays - 1) })).recommendations, [], 'young revisions are not judged');
+  // Expose sk_denominator in reviews that never read it; leave sk_cache unexposed.
+  for (let i = 0; i < 2; i++) await new ReviewEngine(runtime(finish)).run({ ...f.options, learn: 'off' });
+  const exposed = (await computeUsage(f.state)).skills;
+  assert.deepEqual([exposed.sk_denominator.exposures, exposed.sk_denominator.reads], [2, 0]);
+  assert.equal(exposed.sk_cache.exposures, 0, 'its path never changes, so no review lists it');
+
+  const report = await curate(f.state, { now: at(31), policy: { unreadAfterExposures: 2 } });
+  const kinds = Object.fromEntries(report.recommendations.map(r => [r.id, [r.kind, r.action]]));
+  assert.equal(report.considered, 2);
+  assert.deepEqual(kinds, { sk_cache: ['unused', 'retire'], sk_denominator: ['unread', 'review'] });
+  assert.equal(report.stagedProposals, undefined, 'a report alone changes nothing');
+
+  await f.bank.pin('sk_cache', 'Kept for the reload migration');
+  const pinned = await curate(f.state, { now: at(31), policy: { unreadAfterExposures: 2 } });
+  assert.deepEqual(pinned.skipped.pinned, ['sk_cache']);
+  assert(!pinned.recommendations.some(r => r.id === 'sk_cache'));
+  await f.bank.unpin('sk_cache');
+
+  const staged = await curate(f.state, { now: at(91), stage: true, policy: { unreadAfterExposures: 1000 } });
+  assert.deepEqual(staged.recommendations.map(r => [r.id, r.action]), [['sk_cache', 'retire']]);
+  assert.equal(staged.stagedProposals.length, 1);
+  const proposal = await f.bank.proposal(staged.stagedProposals[0]);
+  assert.deepEqual([proposal.origin, proposal.status, proposal.changes.map(c => c.op)], ['curation', 'pending', ['retire']]);
+  assert.equal((await f.bank.skills()).find(s => s.id === 'sk_cache').state, 'active', 'nothing retires before approval');
+  assert.deepEqual((await curate(f.state, { now: at(91), policy: { unreadAfterExposures: 1000 } })).skipped.pendingProposal, ['sk_cache']);
+  await f.bank.approve(proposal.id, { by: 'local_user', at: at(92).toISOString() });
+  assert.equal((await f.bank.skills()).find(s => s.id === 'sk_cache').state, 'retired');
+  assert.equal((await curate(f.state, { now: at(92) })).skipped.inactive, 1);
 });
