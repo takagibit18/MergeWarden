@@ -7,9 +7,9 @@ import {reviewResources} from '../../integrations/pi/src/review-resources.ts';
 import {PiSessionJournal} from '../../integrations/pi/src/journal.ts';
 import {resolveModelPolicy,requestHash} from '../../integrations/pi/src/model-policy.ts';
 import {writeJson,sha256} from '../../src/infrastructure/files.ts';
-export async function modelCall(modelRuntime,model,directory,systemPrompt,input){
- await mkdir(directory);await writeJson(join(directory,'input.json'),input);await writeJson(join(directory,'started.json'),{at:new Date().toISOString(),prompt:systemPrompt,promptSha256:sha256(systemPrompt),model,inputSha256:sha256(JSON.stringify(input)),timeoutMs:60000,outputTokensRequestedMax:4096,firstAttemptOnly:true});
- const started=performance.now(),policy=resolveModelPolicy(modelRuntime.getModel(model.provider,model.modelId),{thinkingLevel:'max',maxOutputTokens:4096});
+export async function modelCall(modelRuntime,model,directory,systemPrompt,input,thinkingLevel='max'){
+ await mkdir(directory);await writeJson(join(directory,'input.json'),input);await writeJson(join(directory,'started.json'),{at:new Date().toISOString(),prompt:systemPrompt,promptSha256:sha256(systemPrompt),model,thinkingLevel,inputSha256:sha256(JSON.stringify(input)),timeoutMs:60000,outputTokensRequestedMax:4096,firstAttemptOnly:true});
+ const started=performance.now(),policy=resolveModelPolicy(modelRuntime.getModel(model.provider,model.modelId),{thinkingLevel,maxOutputTokens:4096});
  const settingsManager=SettingsManager.inMemory({compaction:{enabled:false},retry:{enabled:false,maxRetries:0,provider:{maxRetries:0,timeoutMs:60000}}});settingsManager.setProjectTrusted(false);
  let requests=0,journal;const extension=pi=>{pi.on('tool_call',()=>({block:true,reason:'Evaluation has no tools'}));pi.on('before_provider_request',event=>{requests++;if(requests>1)throw Error('Single-request evaluation budget');manager.appendCustomEntry('mergewarden.evaluation-request.v1',{ordinal:requests,sha256:requestHash(event.payload),model,policy:policy.configuration});journal.checkpoint();});};
  const resourceLoader=await reviewResources({cwd:directory,systemPrompt,extensionFactories:[extension]});await resourceLoader.reload();
