@@ -6,7 +6,7 @@ import type { Skill, SkillContent } from './contracts.ts';
  * the same experience restated with different whitespace, casing, ordering or wording overlap.
  */
 export const SIMILARITY_POLICY = Object.freeze({
-  version: 'skill-similarity-1',
+  version: 'skill-similarity-2',
   /** At or above: refuse the write and name the existing Skill. */
   block: 0.85,
   /** At or above: stage the write with a warning for the approver. */
@@ -39,6 +39,12 @@ export function normalizeContent(value: SkillContent): SkillContent {
   if (!value || typeof value !== 'object') return value;
   const c = { ...value };
   if (typeof c.title === 'string') c.title = text(c.title);
+  if (typeof c.name === 'string') c.name = text(c.name).toLowerCase();
+  if (typeof c.description === 'string') c.description = text(c.description);
+  if (c.references && typeof c.references === 'object') {
+    c.references = Object.fromEntries(Object.entries(c.references).sort(([a], [b]) => a.localeCompare(b))
+      .map(([k, v]) => [k, typeof v === 'string' ? v.replace(/\r\n?/g, '\n').replace(/[ \t]+$/gm, '').trim() + '\n' : v]));
+  }
   for (const key of ['conditions', 'steps', 'counterexamples', 'stopConditions', 'keywords'] as const) {
     if (Array.isArray(c[key])) c[key] = list(c[key]);
   }
@@ -67,9 +73,9 @@ export function tokens(value: string): Set<string> {
   return out;
 }
 
-const behaviour = (c: SkillContent) => tokens([c.title, ...c.conditions, ...c.steps, ...c.counterexamples, ...c.stopConditions].join('\n'));
+const behaviour = (c: SkillContent) => tokens([c.title, c.description ?? '', ...c.conditions, ...c.steps, ...c.counterexamples, ...c.stopConditions].join('\n'));
 
-/** Jaccard overlap of the checking behaviour: title, conditions, steps, counterexamples and stop conditions. */
+/** Jaccard overlap of the checking behaviour: title, description, conditions, steps, counterexamples and stop conditions. */
 export function similarity(a: SkillContent, b: SkillContent): number {
   const x = behaviour(a), y = behaviour(b);
   if (!x.size || !y.size) return 0;

@@ -6,20 +6,30 @@ import { SKILL_LIMITS } from './contracts.ts';
 import type { ApprovalDecision, BankSnapshot, ComparisonEntry, LearningInput, LearningOperation, Proposal, ProposedChange, Skill, SkillContent, SkillSource } from './contracts.ts';
 import { nearestSkills, normalizeContent, SIMILARITY_POLICY } from './normalize.ts';
 import { checkComparison } from './novelty.ts';
+import { parseReferences, SKILL_FORMAT_LIMITS } from './skill-md.ts';
+/** Run-derived experience becomes active only after support from this many distinct reviewed changes. */
+export const INDEPENDENT_CHANGES_FOR_ACTIVE = 2;
 const empty = (): BankSnapshot => ({ version: 1, parent: null, skills: {}, sources: {}, applied: {} });
 export const digest = (value: unknown) => sha256(JSON.stringify(value));
 const hash = (value: string) => { if (!/^[a-f0-9]{64}$/.test(value)) throw Error('Invalid knowledge object hash'); return value; };
 export function skillId(value: string): string { if (!/^sk_[a-z0-9_-]{1,64}$/.test(value)) throw Error('Invalid skill ID'); return value; }
 export function proposalId(value: string): string { if (!/^pr_[a-f0-9]{24}$/.test(value)) throw Error('Invalid proposal ID'); return value; }
-export function contentOf(s: Skill): SkillContent { return { ...(s.scopeType?{scopeType:s.scopeType}:{}), ...(s.symbols?{symbols:s.symbols}:{}), type:s.type, title:s.title, conditions:s.conditions, steps:s.steps, counterexamples:s.counterexamples, stopConditions:s.stopConditions, paths:s.paths, languages:s.languages, keywords:s.keywords, dependencies:s.dependencies }; }
+export function contentOf(s: Skill): SkillContent { return { ...(s.name?{name:s.name}:{}), ...(s.description?{description:s.description}:{}), ...(s.references?{references:s.references}:{}), ...(s.scopeType?{scopeType:s.scopeType}:{}), ...(s.symbols?{symbols:s.symbols}:{}), type:s.type, title:s.title, conditions:s.conditions, steps:s.steps, counterexamples:s.counterexamples, stopConditions:s.stopConditions, paths:s.paths, languages:s.languages, keywords:s.keywords, dependencies:s.dependencies }; }
 /** Layer 2: normalize first, then validate the canonical form that will be hashed and stored. */
 function content(value: unknown): SkillContent {
   if (!value || typeof value !== 'object') throw Error('Missing skill content');
   const c = normalizeContent(value as SkillContent);
-  const keys = ['scopeType','symbols','type','title','conditions','steps','counterexamples','stopConditions','paths','languages','keywords','dependencies'];
+  const keys = ['name','description','references','scopeType','symbols','type','title','conditions','steps','counterexamples','stopConditions','paths','languages','keywords','dependencies'];
   if (Object.keys(c).some(k => !keys.includes(k)) || !['review_procedure','repo_contract','tool_usage'].includes(c.type)) throw Error('Invalid content fields');
   if (c.scopeType !== undefined && !['repository_fact','review_method'].includes(c.scopeType)) throw Error('Invalid scope type');
   if (c.type === 'repo_contract' && c.scopeType === 'review_method') throw Error('Repository contracts require repository_fact scope');
+  // skill-md-1: a name and trigger description travel together; references are bounded Markdown, never scripts.
+  if ((c.name === undefined) !== (c.description === undefined)) throw Error('Skill name and description are required together');
+  if (c.name !== undefined && (typeof c.name !== 'string' || !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(c.name) || c.name.length > 64)) throw Error('Invalid Skill name; use lowercase kebab-case up to 64 characters');
+  if (c.description !== undefined && (typeof c.description !== 'string' || c.description.length < 20 || c.description.length > 600)) throw Error('Invalid Skill description; state what it checks and when to use it in 20..600 characters');
+  if (c.references !== undefined) parseReferences(c.references);
+  // A review method generalizes across a module: scope it by directory, never by the single file it was learned from.
+  if (c.name !== undefined && c.scopeType === 'review_method' && Array.isArray(c.paths) && c.paths.some(p => typeof p === 'string' && /\.[A-Za-z0-9]+$/.test(p.split('/').at(-1) ?? ''))) throw Error('Review methods scope by module directory, not single files; use a repository_fact for file-specific knowledge');
   if (c.symbols !== undefined && (!Array.isArray(c.symbols) || c.symbols.length > 8 || c.symbols.some(s=>typeof s !== 'string'||!s.trim()||s.length>600))) throw Error('Invalid symbols');
   if (typeof c.title !== 'string' || c.title.length < 5 || c.title.length > 140) throw Error('Invalid title');
   for (const k of ['conditions','steps','counterexamples','stopConditions','paths','languages','keywords'] as const) {
@@ -30,7 +40,7 @@ function content(value: unknown): SkillContent {
   if (!Array.isArray(c.dependencies) || c.dependencies.length > 4) throw Error('Invalid dependencies');
   for (const d of c.dependencies) { safePath(d.path); hash(d.hash); }
   if (c.type === 'repo_contract' && !c.dependencies.length) throw Error('Repository contracts require frozen file dependencies');
-  if (Buffer.byteLength(JSON.stringify(c)) > 4500) throw Error('Skill content exceeds byte limit');
+  if (Buffer.byteLength(JSON.stringify(c)) > (c.references ? 4500 + SKILL_FORMAT_LIMITS.references * SKILL_FORMAT_LIMITS.referenceBytes : 4500)) throw Error('Skill content exceeds byte limit');
   // Exact overlap is deterministic; broader semantic deduplication remains a model responsibility.
   if (c.steps.every(step => BASE_SYSTEM_PROMPT.toLowerCase().includes(step.toLowerCase()))) throw Error('Procedure already covered by fixed rules');
   return structuredClone(c);
@@ -155,7 +165,12 @@ export class SkillBank {
       }
       const sources = [...new Set([...(old?.sources??[]),sourceRef])].sort();
       if (op.op==='attach_source' && old!.sources.includes(sourceRef)) { prepared.names.push('noop'); continue; }
-      const state = op.op==='retire' ? 'retired' : op.conflict ? 'quarantined' : trusted ? 'active' : old?.state ?? 'trial';
+      // Independence is per reviewed change: a run and the feedback on that same run are one event, not two supports.
+      const changes = new Set(await Promise.all((old?.sources ?? []).map(async r => (await this.source(r)).snapshotId)));
+      if (op.op==='attach_source' && changes.has(input.source.snapshotId)) { prepared.names.push('noop'); continue; }
+      changes.add(input.source.snapshotId);
+      const corroborated = op.op==='attach_source' && changes.size >= INDEPENDENT_CHANGES_FOR_ACTIVE;
+      const state = op.op==='retire' ? 'retired' : op.conflict ? 'quarantined' : trusted || corroborated ? 'active' : old?.state ?? 'trial';
       const s: Skill = {...c,id:op.id,revision:(old?.revision??0)+1,contentSha256,owner:'learner',repositoryKey:input.source.repositoryKey,state,sources,createdAt:new Date().toISOString()};
       staged.push(s);
       prepared.changes.push({ op: op.op, id: op.id, expectedRevision: op.expectedRevision, reason: op.reason.trim(), candidate: await this.put(s), ...(previous ? { previous } : {}) });

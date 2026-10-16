@@ -6,6 +6,12 @@ export type ApprovalMode = 'required' | 'auto';
 export const SKILL_LIMITS = Object.freeze({ catalog: 8, bodies: 3, trial: 1, bodyBytes: 6000, inputBytes: 40000, operations: 3, timeoutMs: 60000 });
 export type SkillState = 'trial' | 'active' | 'quarantined' | 'retired';
 export interface SkillContent {
+  /** SKILL.md identity (skill-md-1). Absent on Skills learned before the Markdown format. */
+  name?: string;
+  /** Trigger-oriented summary shown in catalogs: what the check does and when to use it. */
+  description?: string;
+  /** Reference Markdown files opened on demand, e.g. the concrete incident behind a general method. */
+  references?: Record<string, string>;
   scopeType?: 'repository_fact' | 'review_method';
   symbols?: string[];
   type: 'review_procedure' | 'repo_contract' | 'tool_usage';
@@ -67,7 +73,7 @@ export interface LearningInput {
   existingSkills?: LearningContext;
 }
 export interface LearningCatalogEntry {
-  id: string; revision: number; title: string; conditions: string[]; summaryTruncated: boolean;
+  id: string; revision: number; title: string; description?: string; conditions: string[]; summaryTruncated: boolean;
   scopeType?: SkillContent['scopeType']; type: SkillContent['type']; state: SkillState; owner: Skill['owner'];
   bodyProvided: boolean; readOnly: boolean; score: number; selectionReason: string;
   support: { currentSource: boolean; sameSnapshot: boolean; sameIndependenceKey: boolean };

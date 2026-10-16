@@ -13,7 +13,7 @@ export interface ProposalView {
 }
 
 const LIST_FIELDS = ['conditions', 'steps', 'counterexamples', 'stopConditions', 'paths', 'languages', 'keywords', 'symbols'] as const;
-const TEXT_FIELDS = ['title', 'type', 'scopeType'] as const;
+const TEXT_FIELDS = ['name', 'description', 'title', 'type', 'scopeType'] as const;
 
 function fields(before: Skill | undefined, after: Skill): FieldChange[] {
   const out: FieldChange[] = [];
@@ -26,6 +26,9 @@ function fields(before: Skill | undefined, after: Skill): FieldChange[] {
     const removed = a.filter(v => !b.includes(v)), added = b.filter(v => !a.includes(v));
     if (removed.length || added.length) out.push({ field, removed, added });
   }
+  const refs = (s?: Skill) => Object.entries(s?.references ?? {}).map(([k, v]) => `${k} (${Buffer.byteLength(v)} bytes)`);
+  const ra = refs(before), rb = refs(after);
+  if (ra.join() !== rb.join()) out.push({ field: 'references', removed: ra.filter(v => !rb.includes(v)), added: rb.filter(v => !ra.includes(v)) });
   const deps = (s?: Skill) => (s?.dependencies ?? []).map(d => `${d.path}@${d.hash.slice(0, 12)}`);
   const a = deps(before), b = deps(after);
   if (a.join() !== b.join()) out.push({ field: 'dependencies', removed: a.filter(v => !b.includes(v)), added: b.filter(v => !a.includes(v)) });

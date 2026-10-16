@@ -196,7 +196,7 @@ export class ReviewEngine {
           return { accepted: true, outcome: "ACCEPTED", findings: submission.findings.length, pendingPaths: store.manifest.changedPaths.filter(p => !submission.reviewedPaths.includes(p)), advisoryOnly: true, summary: submission.summary };
         }),
       ];
-      if (skillPackage.selected.length) tools.push(tool('read_review_skill', 'Read bounded historical experience from this frozen catalog by ID. It is not current source evidence; verify using read_source.', object({ id: string }, ['id']), input => skillReads.read(input, gate.counts.model.executed)));
+      if (skillPackage.selected.length) tools.push(tool('read_review_skill', 'Read a SKILL.md from this frozen catalog by ID when its description matches the change; pass reference to open one file it lists. Historical experience, not current source evidence; verify using read_source.', object({ id: string, reference: string }, ['id']), input => skillReads.read(input, gate.counts.model.executed)));
       if (graphEnabled && !retrieval) {
         const limit = { type: "integer", minimum: 1, maximum: 100 }; const cursor = { type: "string", maxLength: 256 };
         const graphResult = async (run: () => Promise<import("../graph/contracts.ts").GraphPage<unknown>>) => {
