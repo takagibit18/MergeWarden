@@ -1,5 +1,7 @@
 # 顶层决策索引
 
+新增产品决策：[ADR 0020：已接受取舍与安全事实调查](adr/0020-accepted-tradeoffs-and-safety-facts.md)。人工确认的 accepted trade-off Skill 锚定到具体代码，模型引用后由宿主按确定性条件把 finding 折叠进 Known and accepted 区，不删除；critical/high 永不折叠。安全事实调查为默认关闭的提示词变体，评测通过前不改默认。
+
 新增产品决策：[ADR 0019：SKILL.md 格式的学习经验](adr/0019-skill-md-format.md)。学习器按 SKILL.md（frontmatter + 四个列表段 + 可选 references）输出并由宿主严格解析；审查目录只显示名称与描述，正文和引用按需读取；审查方法按模块目录限定范围；同一变更的审查与反馈只算一次支持。不允许脚本。
 
 新增产品决策：[ADR 0018：Review Skill 治理](adr/0018-skill-governance.md)。学习结果先进入审批队列；提炼前必须与已展示的 Skill 逐条比对；写入时规范化并拦截重复与近似重复；基于使用统计定期给出退役与复核建议。Skill 对审查质量的增益仍未验证。
