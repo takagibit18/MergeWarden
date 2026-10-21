@@ -8,6 +8,15 @@ export const REVIEW_DECISION_POLICY = `Review decision policy (${REVIEW_DECISION
 - Check counterevidence before submitting. Claims that no caller, test or alternative exists require an adequately scoped search; truncated searches cannot establish absence. If an investigation step adds no relevant evidence, refine the question or acknowledge the remaining uncertainty instead of repeating the same reads or speculation.
 - A no-finding result also needs a grounded summary: state the changed behavior and key contracts actually checked, why investigated concerns were excluded, and any remaining limitations. Distinguish unverified assumptions from verified behavior. Do not describe an unread implementation as verified safe. Uncertainty is neither a confirmed defect nor proof of correctness. Summarize decisions, not private step-by-step reasoning. Do not create mandatory hypothesis drafts.`;
 
+/** ADR 0020 Part B prompt variants. Off by default; one becomes default only after a paired real-PR comparison. */
+export const INVESTIGATIONS = {
+  safety_fact: {
+    prompt: "Safety-fact investigation: for each changed behavior, name the fact outside the diff that the change's safety depends on (for example, every caller passes a validated value). Check that fact with structural or text navigation and read_source. Reviewed code is never executed.",
+    summary: " For each changed behavior, state the safety fact outside the diff it depends on and how far it was established: stated, located at file:line, or traced along the failing path.",
+  },
+} as const;
+export type Investigation = keyof typeof INVESTIGATIONS;
+
 export const FINAL_REVIEW_DESCRIPTION = "Submit mature advisory findings after investigation. In summary, state the checked behavior/contracts, the basis for excluding concerns, and remaining limitations, including for zero findings. reviewedPaths lists only changed paths fully covered through read_diff in this run; prompt previews do not count. In each claim explain how the explicitly selected source evidence establishes the defect and its introduction. Prefer {evidenceRefId} returned by read_source; exact full references remain supported. Do not attach unrelated evidence or report hypotheses. Acceptance verifies structure and source integrity only, not semantic correctness.";
 
 /** Shared review baseline. Structural-navigation policy is added only when those tools are active. */

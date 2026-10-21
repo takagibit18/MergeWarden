@@ -12,6 +12,8 @@ export interface InferenceOptions {
 }
 export interface ReviewOptions {
   skills?: 'auto' | 'off' | 'replay'; learn?: 'auto' | 'off';
+  /** Prompt variant (ADR 0020 Part B). Absent keeps the default prompt; rerun inherits the original run's variant. */
+  investigation?: import('./prompt.ts').Investigation;
   /** Learned Skill changes wait for human approval unless an internal evaluation explicitly selects 'auto'. */
   skillApproval?: 'required' | 'auto';
   /** Host-controlled mapping only: never inferred from origin or reviewed configuration. */
@@ -44,6 +46,7 @@ export interface RunManifest {
   configurationFingerprint: string; limits: { timeoutMs: number; maxToolCalls: number };
   /** Run-level policy identity; historical snapshots and reports remain immutable. */
   reviewPolicy?: { version: string; sha256: string };
+  investigation?: import('./prompt.ts').Investigation;
   status: "running" | "delivered" | "delivery_failed"; createdAt: string; finishedAt?: string;
   parentRunId?: string; outcome?: ReviewReport["status"]; error?: string;
   termination?: { reason: 'completed' | 'tool_budget' | 'time_budget' | 'cancelled' | 'runtime_error' | 'incomplete'; finalSubmission: boolean };
