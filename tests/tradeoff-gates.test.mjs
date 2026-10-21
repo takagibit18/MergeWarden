@@ -15,7 +15,7 @@ const decide = (f = finding(), e = entry(), read = new Set(['sk_t'])) => decideA
 
 test('a finding that passes every gate folds with the Skill revision and note', () => {
   assert.deepEqual(decide(), { kind: 'folded', skillId: 'sk_t', revision: 3, note: citation.note });
-  assert.equal(decide(finding({ severity: 'low', evidence: [ev(), ev({ revision: 'base', path: 'pkg/util.py', startLine: 1, endLine: 2 })] })).kind, 'folded');
+  assert.equal(decide(finding({ severity: 'low', evidence: [ev(), ev({ startLine: 4, endLine: 5 }), ev({ revision: 'base', startLine: 1, endLine: 40 })] })).kind, 'folded');
 });
 
 test('each fold gate rejects with its own reason, in ADR order', () => {
@@ -27,9 +27,13 @@ test('each fold gate rejects with its own reason, in ADR order', () => {
     [decide(finding(), entry({}, { freshness: 'recheck', anchor: undefined })), /anchor was not found/],
     [decide(finding({ evidence: [ev(), ev({ path: 'other/app.py' })] })), /outside Skill sk_t paths/],
     [decide(finding({ evidence: [ev({ path: 'pkgx/app.py' })] }), entry({ paths: ['pkg'] })), /outside Skill sk_t paths/],
-    [decide(finding({ evidence: [ev({ startLine: 6, endLine: 9 })] })), /No head evidence overlaps/],
-    [decide(finding({ evidence: [ev({ revision: 'base' })] })), /No head evidence overlaps/],
-    [decide(finding({ evidence: [ev({ snapshotId: 'e'.repeat(64) })] })), /No head evidence overlaps/],
+    [decide(finding({ evidence: [ev(), ev({ path: 'pkg/util.py' })] })), /cites a file other than the accepted lines/],
+    [decide(finding({ evidence: [ev(), ev({ revision: 'base', path: 'pkg/util.py' })] })), /cites a file other than the accepted lines/],
+    [decide(finding({ evidence: [ev({ startLine: 6, endLine: 9 })] })), /Head evidence must lie inside the accepted lines/],
+    [decide(finding({ evidence: [ev({ startLine: 1, endLine: 200 })] })), /Head evidence must lie inside the accepted lines/],
+    [decide(finding({ evidence: [ev(), ev({ startLine: 3, endLine: 4 })] })), /Head evidence must lie inside the accepted lines/],
+    [decide(finding({ evidence: [ev({ revision: 'base' })] })), /Head evidence must lie inside the accepted lines/],
+    [decide(finding({ evidence: [ev({ snapshotId: 'e'.repeat(64) })] })), /Head evidence must lie inside the accepted lines/],
   ];
   for (const [decision, reason] of cases) { assert.equal(decision.kind, 'rejected'); assert.match(decision.reason, reason); }
 });

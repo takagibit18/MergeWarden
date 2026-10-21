@@ -28,7 +28,7 @@ export type TradeoffDecision = { kind: 'folded'; skillId: string; revision: numb
 interface Cited { severity: Severity; evidence: readonly EvidenceRef[] }
 
 const within = (path: string, scope: readonly string[]) => scope.some(p => path === p || path.startsWith(p + '/'));
-const overlaps = (e: EvidenceRef, a: NonNullable<SkillPackageEntry['anchor']>) => e.path === a.path && e.startLine <= a.endLine && a.startLine <= e.endLine;
+const inside = (e: EvidenceRef, a: NonNullable<SkillPackageEntry['anchor']>) => e.path === a.path && e.startLine >= a.startLine && e.endLine <= a.endLine;
 
 /** ADR 0020 item 5: deterministic fold gates in order; the first failing gate names the reason. */
 export function decideAcceptedTradeoff(candidate: Cited, citation: TradeoffCitation, entry: SkillPackageEntry | undefined, readIds: ReadonlySet<string>, snapshotId: string): TradeoffDecision {
@@ -40,7 +40,8 @@ export function decideAcceptedTradeoff(candidate: Cited, citation: TradeoffCitat
     [readIds.has(id), `Skill ${id} was not read in this run`],
     [entry?.freshness === 'current' && !!entry.anchor, `Skill ${id} anchor was not found in this head snapshot`],
     [!!entry && candidate.evidence.every(e => within(e.path, entry.skill.paths)), `Evidence lies outside Skill ${id} paths`],
-    [!!entry?.anchor && candidate.evidence.some(e => e.revision === 'head' && e.snapshotId === snapshotId && overlaps(e, entry.anchor!)), `No head evidence overlaps the accepted lines of Skill ${id}`],
+    [!!entry?.anchor && candidate.evidence.every(e => e.path === entry.anchor!.path), `Evidence cites a file other than the accepted lines of Skill ${id}`],
+    [!!entry?.anchor && candidate.evidence.some(e => e.revision === 'head') && candidate.evidence.every(e => e.revision !== 'head' || e.snapshotId === snapshotId && inside(e, entry.anchor!)), `Head evidence must lie inside the accepted lines of Skill ${id}`],
     [candidate.severity === 'low' || candidate.severity === 'medium', `Severity ${candidate.severity} is never folded`],
   ];
   const failed = gates.find(([ok]) => !ok);

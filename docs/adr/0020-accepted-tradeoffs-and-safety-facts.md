@@ -48,8 +48,9 @@ proves it at the strongest affordable level.
    - the Skill is in this run's frozen package, has type `accepted_tradeoff` and state `active`;
    - its body was read in this run (`skill-reads.json`), so the model saw *Still report when*;
    - its anchor was found in this head snapshot (freshness `current`);
-   - every evidence path lies inside the Skill's `paths`, and at least one head evidence range
-     overlaps the located anchor;
+   - every evidence path lies inside the Skill's `paths` and is the anchor's file;
+   - at least one head evidence ref exists, and every head evidence range lies inside the
+     located anchor lines;
    - severity is `low` or `medium`.
 6. **Nothing is dropped.** A folded finding moves from `findings` to a new report list
    `knownAccepted`, rendered as a collapsed **Known and accepted** section that names the Skill
