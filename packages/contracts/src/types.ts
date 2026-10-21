@@ -132,6 +132,8 @@ export interface FindingDto {
   impact: string;
   severity: Severity;
   evidence: EvidenceRefDto[];
+  acceptedTradeoff?: { skillId: string; revision: number; note: string } | undefined;
+  acceptedTradeoffRejected?: string | undefined;
 }
 
 export interface ReportDto {
@@ -141,6 +143,8 @@ export interface ReportDto {
   status: ReportStatus;
   summary: string;
   findings: FindingDto[];
+  /** Findings folded by an accepted trade-off Skill; absent when none. */
+  knownAccepted?: FindingDto[] | undefined;
   coverage: Record<string, 'pending' | 'done' | 'failed'>;
   publication: 'not_requested';
 }

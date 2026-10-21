@@ -31,7 +31,7 @@ export interface FeedbackOptions {
 export async function feedback(state:string,options:FeedbackOptions, evaluation?:{simulated:true;trustedProjectReviewer:boolean}):Promise<{source:SkillSource;job:LearningJob}> {
   const report=await readReport(state,options.runId),m=await readRun(state,options.runId),store=await SnapshotStore.load(state,m.snapshotId);
   if(typeof options.comment!=='string'||!options.comment.trim()||options.comment.length>6000)throw Error('Feedback must contain 1..6000 characters');
-  if(options.findingId&&!report.findings.some(f=>f.id===options.findingId))throw Error('Unknown finding');
+  if(options.findingId&&![...report.findings,...report.knownAccepted??[]].some(f=>f.id===options.findingId))throw Error('Unknown finding');
   if(options.verdict&&!['correction','missed_defect','contract','uncertain','accepted_tradeoff'].includes(options.verdict))throw Error('Invalid verdict');
   if(options.verdict==='accepted_tradeoff'&&!options.range)throw Error('Accepted trade-off feedback requires --path, --start-line and --end-line');
   if(options.relationToReview&&!['supports','contradicts','adds_missing_issue','adds_context'].includes(options.relationToReview))throw Error('Invalid feedback relation');
@@ -53,7 +53,7 @@ export async function buildInput(state:string,ref:string):Promise<LearningInput>
   if(current.snapshot.sources[source.eventId]!==ref||source.withdrawn)throw Error('Source superseded or withdrawn');
   const report=await readReport(state,source.runId),m=await readRun(state,source.runId);if(m.reportSha256!==source.reportSha256)throw Error('Source report changed');
   const store=await SnapshotStore.load(state,source.snapshotId);
-  const ranges=source.range?[source.range]:source.findingId?report.findings.find(f=>f.id===source.findingId)!.evidence.filter(e=>e.revision==='head'):report.findings.flatMap(f=>f.evidence.filter(e=>e.revision==='head'));
+  const ranges=source.range?[source.range]:source.findingId?[...report.findings,...report.knownAccepted??[]].find(f=>f.id===source.findingId)!.evidence.filter(e=>e.revision==='head'):report.findings.flatMap(f=>f.evidence.filter(e=>e.revision==='head'));
   const targets=ranges.length?ranges:store.manifest.changedPaths.slice(0,3).map(path=>({path,startLine:1,endLine:60}));
   const sourcePages=[];let byteBudget=14000;
   for(const range of targets.slice(0,4)) {const page=await store.source('head',range.path,range.startLine,Math.min(range.endLine,range.startLine+59));const record={...page,fileHash:store.manifest.head[range.path]?.hash};const bytes=Buffer.byteLength(JSON.stringify(record));if(bytes<=byteBudget){sourcePages.push(record);byteBudget-=bytes;}}

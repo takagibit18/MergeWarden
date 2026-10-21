@@ -1,4 +1,5 @@
 import { catalog, freezeSkills, savePackage, skillReader } from '../skills/context.ts';
+import { decideAcceptedTradeoff } from '../skills/tradeoff.ts';
 import { registerRun, learnPending } from '../skills/learning.ts';
 import type { Learner } from '../skills/contracts.ts';
 import { snapshotChanges } from './snapshot-changes.ts';
@@ -18,7 +19,7 @@ import { checkEvidence } from "../application/evidence-check.ts";
 import { EvidenceRegistry } from "../application/evidence-registry.ts";
 import { PersistenceFailure } from "../ports/journal.ts";
 import { assertCandidate, isRecord, requireCondition, requireText } from "../domain/validation.ts";
-import type { ReviewReport } from "../domain/contracts.ts";
+import type { FindingCandidate, ReviewReport } from "../domain/contracts.ts";
 import { isolatedState, sha256, writeJson } from "../infrastructure/files.ts";
 import { SnapshotStore } from "../snapshot/store.ts";
 import { LazyCodeGraph } from "../graph/lazy-graph.ts";
@@ -33,7 +34,18 @@ const CLEANUP_TIMEOUT_MS = 1_000;
 const object = (properties: Record<string, unknown>, required: string[]) => ({ type: "object", properties, required, additionalProperties: false });
 const evidence = object({ snapshotId: string, revision, path: string, startLine: integer, endLine: integer, contentSha256: { type: "string", pattern: "^[a-f0-9]{64}$" } }, ["snapshotId", "revision", "path", "startLine", "endLine", "contentSha256"]);
 const evidenceInput = { anyOf: [object({ evidenceRefId: { type: "string", pattern: "^ev_[a-f0-9]{64}$" } }, ["evidenceRefId"]), evidence] };
+const tradeoffCitation = { ...object({ skillId: string, note: { type: "string", minLength: 1, maxLength: 1000, description: "Why no Still report when condition of the Skill applies to this finding." } }, ["skillId", "note"]), description: "Only for a finding that is exactly the pattern of an active accepted_tradeoff Skill you read, at its anchor. The host decides deterministically whether it moves to Known and accepted; it never hides critical or high findings." };
 const finding = object({ id: string, title: string, claim: { ...string, description: "Explain the violated contract, how this change causes it, and which selected source supports each material assertion. Account for relevant counterevidence." }, trigger: { ...string, description: "Concrete supported input or execution path that exposes the defect now, not a hypothetical future code change." }, impact: { ...string, description: "Observable failure or incorrect behavior supported by the inspected implementation and contract." }, severity: { type: "string", enum: ["critical", "high", "medium", "low"] }, evidence: { type: "array", items: evidenceInput, minItems: 1, maxItems: 20 } }, ["id", "title", "claim", "trigger", "impact", "severity", "evidence"]);
+const withTradeoff = (base: ReturnType<typeof object>) => ({ ...base, properties: { ...base.properties, acceptedTradeoff: tradeoffCitation } });
+/** Replace a model citation with the host's fold decision; only citation shape errors reject the submission. */
+function foldTradeoff(candidate: FindingCandidate, decide: (finding: FindingCandidate, citation: { skillId: string; note: string }) => ReturnType<typeof decideAcceptedTradeoff>): FindingCandidate {
+  const { acceptedTradeoff: cited, acceptedTradeoffRejected: _modelSupplied, ...finding } = candidate as FindingCandidate & { acceptedTradeoff?: unknown };
+  if (cited === undefined) return finding;
+  requireCondition(isRecord(cited) && Object.keys(cited).sort().join() === "note,skillId" && typeof cited.skillId === "string" && cited.skillId.length <= 80 &&
+    typeof cited.note === "string" && cited.note.trim().length > 0 && cited.note.length <= 1000, "acceptedTradeoff requires only skillId and a 1..1000 character note");
+  const decision = decide(finding, { skillId: cited.skillId, note: cited.note });
+  return decision.kind === "folded" ? { ...finding, acceptedTradeoff: { skillId: decision.skillId, revision: decision.revision, note: decision.note } } : { ...finding, acceptedTradeoffRejected: decision.reason };
+}
 function args(value: unknown): Record<string, unknown> { requireCondition(isRecord(value), "Tool arguments must be an object"); return value; }
 function text(value: unknown): string { requireText(value, "tool argument"); return value; }
 function rev(value: unknown): "base" | "head" { requireCondition(value === "base" || value === "head", "Invalid source revision"); return value; }
@@ -169,12 +181,14 @@ export class ReviewEngine {
           return page;
         }),
         tool("search_text", "Literal search of immutable source. Use path for an exact file or a directory ending in /. Follow nextCursor with the same revision, query and path to see omitted matches. Truncated or scoped results do not establish absence elsewhere; read_source is required for evidence.", object({ revision, query: string, path: { type: "string", minLength: 1, description: "Exact repository-relative file, or directory prefix ending in /." }, cursor: { type: "string", maxLength: 8192 }, limit: { type: "integer", minimum: 1, maximum: 100 } }, ["revision", "query"]), async input => store.search(rev(input.revision), text(input.query), number(input.limit, 50), { ...(input.path === undefined ? {} : { path: text(input.path) }), ...(input.cursor === undefined ? {} : { cursor: text(input.cursor) }) })),
-        tool("submit_review", FINAL_REVIEW_DESCRIPTION, object({ summary: { ...string, description: "Summarize checked contracts, reasons for excluding investigated concerns, and unresolved limitations. Required even when findings is empty; do not claim uninspected behavior was verified." }, reviewedPaths: { type: "array", items: string, maxItems: 200, uniqueItems: true }, findings: { type: "array", items: finding, maxItems: 100 } }, ["summary", "reviewedPaths", "findings"]), async input => {
+        tool("submit_review", FINAL_REVIEW_DESCRIPTION, object({ summary: { ...string, description: "Summarize checked contracts, reasons for excluding investigated concerns, and unresolved limitations. Required even when findings is empty; do not claim uninspected behavior was verified." }, reviewedPaths: { type: "array", items: string, maxItems: 200, uniqueItems: true }, findings: { type: "array", items: skillPackage.selected.some(e => e.skill.type === "accepted_tradeoff") ? withTradeoff(finding) : finding, maxItems: 100 } }, ["summary", "reviewedPaths", "findings"]), async input => {
           requireCondition(!dispatch?.hasPending(), "CONTEXT_PENDING: New host context has not entered a model request. Read the next context package before submitting again.");
           requireText(input.summary, "summary"); requireCondition(input.summary.length <= 4000, "Summary exceeds limit");
           requireCondition(Array.isArray(input.findings) && input.findings.length <= 100 && Array.isArray(input.reviewedPaths) && input.reviewedPaths.length <= 200, "Invalid submission");
           const transport = input as unknown as FinalSubmissionInput;
-          const submission: FinalSubmission = { ...transport, findings: evidenceRegistry.normalize(transport.findings) };
+          const readSkills = new Set(skillReads.events.map(e => e.id));
+          const submission: FinalSubmission = { ...transport, findings: evidenceRegistry.normalize(transport.findings).map(candidate => foldTradeoff(candidate, (f, citation) =>
+            decideAcceptedTradeoff(f, citation, skillPackage.selected.find(e => e.skill.id === citation.skillId), readSkills, store.manifest.identity.id))) };
           requireCondition(new Set(submission.reviewedPaths).size === submission.reviewedPaths.length, "Duplicate reviewed path");
           const ids = new Set<string>();
           for (const path of submission.reviewedPaths) {
@@ -193,7 +207,8 @@ export class ReviewEngine {
           abort.signal.throwIfAborted();
           await controller!.dispatch({ type: "final_batch.accepted", candidates: submission.findings, reviewedPaths: submission.reviewedPaths, reason: "Advisory claim: structure and frozen evidence integrity verified; semantic correctness requires human review." });
           submitted = true; budget.submitted(); finalSummary = submission.summary;
-          return { accepted: true, outcome: "ACCEPTED", findings: submission.findings.length, pendingPaths: store.manifest.changedPaths.filter(p => !submission.reviewedPaths.includes(p)), advisoryOnly: true, summary: submission.summary };
+          const cited = submission.findings.filter(f => f.acceptedTradeoff || f.acceptedTradeoffRejected).map(f => ({ id: f.id, ...(f.acceptedTradeoff ? { knownAccepted: true } : { knownAccepted: false, reason: f.acceptedTradeoffRejected }) }));
+          return { accepted: true, outcome: "ACCEPTED", findings: submission.findings.length, ...(cited.length ? { acceptedTradeoffs: cited } : {}), pendingPaths: store.manifest.changedPaths.filter(p => !submission.reviewedPaths.includes(p)), advisoryOnly: true, summary: submission.summary };
         }),
       ];
       if (skillPackage.selected.length) tools.push(tool('read_review_skill', 'Read a SKILL.md from this frozen catalog by ID when its description matches the change; pass reference to open one file it lists. Historical experience, not current source evidence; verify using read_source.', object({ id: string, reference: string }, ['id']), input => skillReads.read(input, gate.counts.model.executed)));

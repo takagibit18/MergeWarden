@@ -78,7 +78,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     const report = await readReport(state, options.require("run"));
     if (command === "show") console.log(JSON.stringify(report, null, 2));
     else {
-      const finding = report.findings.find(f => f.id === options.require("finding")); if (!finding) throw new Error("Finding is not in the saved report");
+      const finding = [...report.findings, ...report.knownAccepted ?? []].find(f => f.id === options.require("finding")); if (!finding) throw new Error("Finding is not in the saved report");
       const snapshot = await SnapshotStore.load(state, report.snapshot.id);
       console.log(JSON.stringify(await Promise.all(finding.evidence.map(e => snapshot.source(e.revision, e.path, e.startLine, e.endLine))), null, 2));
     }

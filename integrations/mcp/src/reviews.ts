@@ -170,7 +170,7 @@ export class ReviewTasks {
   async evidence(runId: string, findingId: string, evidenceIndex = 0) {
     await this.nativeRun(runId);
     const report = await readReport(this.host.stateDir, runId);
-    const finding = report.findings.find(item => item.id === findingId);
+    const finding = [...report.findings, ...report.knownAccepted ?? []].find(item => item.id === findingId);
     if (!finding) throw new ToolError('FINDING_NOT_FOUND', 'Finding is not in the verified report.');
     const ref = finding.evidence[evidenceIndex];
     if (!Number.isInteger(evidenceIndex) || evidenceIndex < 0 || !ref) throw new ToolError('EVIDENCE_NOT_FOUND', 'Evidence index is outside this finding.');

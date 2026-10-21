@@ -29,6 +29,10 @@ export interface FindingCandidate {
   readonly impact: string;
   readonly severity: Severity;
   readonly evidence: readonly EvidenceRef[];
+  /** Host-decided fold into Known and accepted (ADR 0020); never model-supplied. */
+  readonly acceptedTradeoff?: { readonly skillId: string; readonly revision: number; readonly note: string } | undefined;
+  /** Why a cited accepted trade-off did not fold; the finding stays reported. */
+  readonly acceptedTradeoffRejected?: string | undefined;
 }
 export interface CandidateRecord {
   readonly candidate: FindingCandidate;
@@ -53,6 +57,8 @@ export interface ReviewReport {
   status: "completed" | "partial" | "failed" | "cancelled";
   summary: string;
   findings: FindingCandidate[];
+  /** Findings folded by an accepted trade-off Skill. Absent when none, so older reports keep their bytes. */
+  knownAccepted?: FindingCandidate[];
   coverage: Record<string, "pending" | "done" | "failed">;
   /** No publisher is implemented by the scaffold. */
   publication: "not_requested";
