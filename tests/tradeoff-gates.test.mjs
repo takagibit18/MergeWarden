@@ -44,3 +44,10 @@ test('the anchor is found after lines shift and is missing once the accepted lin
   assert.equal(locateAnchor('def ratio(total, count):\n    return total / max(count, 1)\n', anchor), undefined);
   assert.equal(locateAnchor('', anchor), undefined);
 });
+
+test('the anchor is found only as one copy outside the lines this snapshot changed', () => {
+  assert.equal(locateAnchor(accepted + '\n\n' + accepted + '\n', anchor), undefined);
+  assert.equal(locateAnchor('x = 1\n' + accepted + '\n', anchor, { startLine: 1, endLine: 2 }), undefined);
+  assert.equal(locateAnchor('x = 1\n' + accepted + '\n', anchor, { startLine: 3, endLine: 9 }), undefined);
+  assert.deepEqual(locateAnchor('x = 1\n' + accepted + '\ny = 2\n', anchor, { startLine: 4, endLine: 4 }), { path: 'pkg/app.py', startLine: 2, endLine: 3 });
+});

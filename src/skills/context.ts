@@ -47,9 +47,10 @@ export async function freezeSkills(state:string, store:SnapshotStore, mode:'auto
     const selected=(await Promise.all(all.map(async skill=>{
       const {score,reason}=skillEligibility(skill,repositoryKey,paths,diff);
       if(skill.type==='accepted_tradeoff'&&score>0) {
-        // The accepted lines, not file dependencies, decide freshness: found anywhere in the head file is current.
-        const text=skill.anchor&&store.manifest.head[skill.anchor.path]?.status==='text'?await store.text('head',skill.anchor.path):undefined;
-        const anchor=text!==undefined?locateAnchor(text,skill.anchor!):undefined;
+        // The accepted lines, not file dependencies, decide freshness: one untouched copy anywhere in the head file is current.
+        // A source failure makes only this Skill recheck; it never degrades the package.
+        let anchor:SkillPackageEntry['anchor'];
+        try { if(skill.anchor&&store.manifest.head[skill.anchor.path]?.status==='text') anchor=locateAnchor(await store.text('head',skill.anchor.path),skill.anchor,await store.changedHeadLines(skill.anchor.path)); } catch { anchor=undefined; }
         return {skill,score,reason,freshness:anchor?'current' as const:'recheck' as const,...(anchor?{anchor}:{})};
       }
       const freshness=skill.dependencies.some(d=>store.manifest.head[d.path]?.hash!==d.hash)?'recheck' as const:'current' as const;

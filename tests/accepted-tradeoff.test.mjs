@@ -6,7 +6,9 @@ import { repositoryFixture } from './repository-fixture.mjs';
 import { ReviewEngine } from '../src/engine/review.ts';
 import { MemoryJournal } from '../src/adapters/memory-journal.ts';
 import { ReviewController } from '../src/application/review-controller.ts';
-import { readReport } from '../src/engine/reports.ts';
+import { readReport, readRun } from '../src/engine/reports.ts';
+import { SnapshotStore } from '../src/snapshot/store.ts';
+import { freezeSkills } from '../src/skills/context.ts';
 import { SkillBank } from '../src/skills/bank.ts';
 import { feedback, learnPending } from '../src/skills/learning.ts';
 import { learningIdentity } from '../src/skills/identity.ts';
@@ -113,6 +115,11 @@ test('Still report when is required for accepted trade-offs and refused for othe
 });
 
 const catalogOf = text => JSON.parse(text.split('Fallible experience catalog (not source evidence): ')[1]);
+/** A later change that leaves the accepted lines untouched, so their anchor is current. */
+const laterChange = async f => {
+  await f.write('app.py', 'def ratio(total, count):\n    return total / count\n\ndef other():\n    return 1\n');
+  return { ...f.options, input: { kind: 'commits', base: f.head, head: await f.commit() }, learn: 'off' };
+};
 const cite = (skillId, extra = {}) => ({ title: 'ratio divides by an unvalidated count', claim: 'ratio divides by count without a guard.', trigger: 'count=0', impact: 'ZeroDivisionError', severity: 'medium', acceptedTradeoff: { skillId, note: 'No new caller; count is still validated upstream.' }, ...extra });
 
 test('a cited finding on the accepted lines moves to Known and accepted, severe or uncatalogued citations stay reported, and recovery rebuilds the report', async t => {
@@ -130,7 +137,7 @@ test('a cited finding on the accepted lines moves to Known and accepted, severe 
       { id: 'severe', ...cite(skill.id, { severity: 'high' }), evidence },
       { id: 'unknown', ...cite('sk_missing', { severity: 'low' }), evidence },
     ] });
-  })(options), journal })).run({ ...f.options, learn: 'off' });
+  })(options), journal })).run(await laterChange(f));
   assert.deepEqual(receipt.acceptedTradeoffs, [{ id: 'folded', knownAccepted: true }, { id: 'severe', knownAccepted: false, reason: 'Severity high is never folded' }, { id: 'unknown', knownAccepted: false, reason: "Skill sk_missing is not in this run's frozen catalog" }]);
   const report = run.report;
   assert.deepEqual(report.knownAccepted.map(x => [x.id, x.acceptedTradeoff]), [['folded', { skillId: skill.id, revision: skill.revision, note: 'No new caller; count is still validated upstream.' }]]);
@@ -150,7 +157,7 @@ test('an uncited or unread accepted trade-off folds nothing', async t => {
     await tools.read_diff({ path: 'app.py' });
     const page = await tools.read_source({ revision: 'head', path: 'app.py', startLine: 1, endLine: 2 });
     await tools.submit_review({ summary: 'Synthetic test only', reviewedPaths: ['app.py'], findings: [{ id: 'unread', ...cite(skill.id), evidence: [{ evidenceRefId: page._mergewarden.evidenceRefId }] }] });
-  })).run({ ...f.options, learn: 'off' });
+  })).run(await laterChange(f));
   assert.equal(run.report.knownAccepted, undefined);
   assert.match(run.report.findings[0].acceptedTradeoffRejected, /was not read in this run/);
 });
@@ -164,4 +171,28 @@ test('the anchor follows moved lines and becomes recheck once the accepted lines
   await f.write('app.py', 'import os\n\ndef ratio(total, count):\n    return total // count\n'); const edited = await f.commit();
   const stale = await entryFor(moved, edited);
   assert.equal(stale.freshness, 'recheck'); assert.equal(stale.anchor, undefined);
+});
+
+test('a copied or relocated instance of the accepted lines does not take over the anchor', async t => {
+  const f = await fixture(t), skill = await acceptTradeoff(f);
+  const entryFor = async head => { let entry; await new ReviewEngine(runtime(async (tools, _options, text) => { entry = catalogOf(text).find(e => e.id === skill.id); await finish(tools); })).run({ ...f.options, input: { kind: 'commits', base: f.head, head }, learn: 'off' }); return entry; };
+  const accepted = 'def ratio(total, count):\n    return total / count\n';
+  await f.write('app.py', accepted + '\ndef other():\n    return 1\n'); const untouched = await f.commit();
+  const unique = await entryFor(untouched);
+  assert.equal(unique.freshness, 'current'); assert.deepEqual(unique.anchor, { path: 'app.py', startLine: 1, endLine: 2 });
+  await f.write('app.py', accepted + '\n' + accepted); const duplicated = await f.commit();
+  const copy = await entryFor(duplicated);
+  assert.equal(copy.freshness, 'recheck'); assert.equal(copy.anchor, undefined);
+  await f.write('app.py', 'def other():\n    return 1\n\n' + accepted + '# relocated\n'); const relocated = await f.commit();
+  const moved = await entryFor(relocated);
+  assert.equal(moved.freshness, 'recheck'); assert.equal(moved.anchor, undefined);
+});
+
+test('a source failure for one trade-off anchor makes only that Skill recheck', async t => {
+  const f = await fixture(t), skill = await acceptTradeoff(f);
+  const store = await SnapshotStore.load(f.state, f.run.report.snapshot.id);
+  const failing = Object.assign(Object.create(Object.getPrototypeOf(store)), store, { diff: store.diff.bind(store), text: async () => { throw Error('blob unreadable'); } });
+  const pkg = await freezeSkills(f.state, failing, 'auto', (await readRun(f.state, f.run.runId)).skills.repositoryKey);
+  assert.equal(pkg.degraded, undefined);
+  assert.deepEqual(pkg.selected.map(e => [e.skill.id, e.freshness, e.anchor]), [[skill.id, 'recheck', undefined]]);
 });

@@ -2,16 +2,25 @@ import { sha256 } from '../infrastructure/files.ts';
 import type { EvidenceRef, Severity } from '../domain/contracts.ts';
 import type { SkillPackageEntry, TradeoffAnchor } from './contracts.ts';
 
-/** Same line split as SnapshotStore.source, so a feedback range hash equals its page contentSha256. */
-const sourceLines = (text: string) => { const lines = text.split('\n'); if (lines.at(-1) === '') lines.pop(); return lines; };
+type LineRange = { startLine: number; endLine: number };
 
-/** First window of the head file whose exact lines hash to the anchor; survives edits elsewhere and moved code. */
-export function locateAnchor(text: string, anchor: TradeoffAnchor): { path: string; startLine: number; endLine: number } | undefined {
-  const lines = sourceLines(text);
-  for (let start = 0; start + anchor.lineCount <= lines.length; start++) {
-    if (sha256(lines.slice(start, start + anchor.lineCount).join('\n')) === anchor.sha256) return { path: anchor.path, startLine: start + 1, endLine: start + anchor.lineCount };
+/**
+ * The single window of the head file whose exact lines hash to the anchor; it survives edits elsewhere and moved code.
+ * A second copy, or a window inside lines this snapshot added or modified, is not the accepted instance.
+ * Lines split as in SnapshotStore.source, so a feedback range hash equals its page contentSha256.
+ */
+export function locateAnchor(text: string, anchor: TradeoffAnchor, changed?: LineRange): { path: string; startLine: number; endLine: number } | undefined {
+  const starts = [0];
+  for (let i = text.indexOf('\n'); i !== -1; i = text.indexOf('\n', i + 1)) starts.push(i + 1);
+  if (starts.at(-1) === text.length) starts.pop();
+  const end = (line: number) => line + 1 < starts.length ? starts[line + 1]! - 1 : text.endsWith('\n') ? text.length - 1 : text.length;
+  const found: number[] = [];
+  for (let start = 0; start + anchor.lineCount <= starts.length && found.length < 2; start++) {
+    if (sha256(text.slice(starts[start], end(start + anchor.lineCount - 1))) === anchor.sha256) found.push(start + 1);
   }
-  return undefined;
+  if (found.length !== 1) return undefined;
+  const located = { path: anchor.path, startLine: found[0]!, endLine: found[0]! + anchor.lineCount - 1 };
+  return changed && changed.startLine <= located.endLine && located.startLine <= changed.endLine ? undefined : located;
 }
 
 export interface TradeoffCitation { skillId: string; note: string }
