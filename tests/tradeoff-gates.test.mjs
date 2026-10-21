@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { decideAcceptedTradeoff, locateAnchor } from '../src/skills/tradeoff.ts';
+import { skillRules } from '../src/skills/context.ts';
 
 const sha = text => createHash('sha256').update(text).digest('hex');
 const SNAP = 'f'.repeat(64);
@@ -54,4 +55,15 @@ test('the anchor is found only as one copy outside the lines this snapshot chang
   assert.equal(locateAnchor('x = 1\n' + accepted + '\n', anchor, { startLine: 1, endLine: 2 }), undefined);
   assert.equal(locateAnchor('x = 1\n' + accepted + '\n', anchor, { startLine: 3, endLine: 9 }), undefined);
   assert.deepEqual(locateAnchor('x = 1\n' + accepted + '\ny = 2\n', anchor, { startLine: 4, endLine: 4 }), { path: 'pkg/app.py', startLine: 2, endLine: 3 });
+});
+
+test('Skill rules keep the pre-ADR text unless the frozen package selects an accepted trade-off', () => {
+  const pkg = (selectionPolicyVersion, ...types) => ({ selectionPolicyVersion, selected: types.map(type => ({ skill: { type } })) });
+  const PRE_ADR_SHA256 = '72742df4ce971d159e14113468f302617b218bf014e802bd429a98c1012253da';
+  assert.equal(sha(skillRules(pkg('review-skills-2', 'review_procedure'))), PRE_ADR_SHA256);
+  assert.equal(sha(skillRules(pkg('review-skills-3', 'review_procedure'))), PRE_ADR_SHA256);
+  assert.doesNotMatch(skillRules(pkg('review-skills-3', 'review_procedure')), /acceptedTradeoff|Known and accepted/);
+  const withTradeoff = skillRules(pkg('review-skills-3', 'review_procedure', 'accepted_tradeoff'));
+  assert.match(withTradeoff, /add acceptedTradeoff \{skillId, note\}/); assert.doesNotMatch(withTradeoff, /Never suppress/);
+  assert.equal(skillRules(pkg('review-skills-3')), undefined);
 });

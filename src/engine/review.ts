@@ -1,4 +1,4 @@
-import { catalog, freezeSkills, savePackage, skillReader } from '../skills/context.ts';
+import { catalog, freezeSkills, savePackage, selectsTradeoff, skillReader, skillRules } from '../skills/context.ts';
 import { decideAcceptedTradeoff } from '../skills/tradeoff.ts';
 import { registerRun, learnPending } from '../skills/learning.ts';
 import type { Learner } from '../skills/contracts.ts';
@@ -125,7 +125,7 @@ export class ReviewEngine {
       if (!repositoryKey || repositoryKey.length > 200) throw Error('Invalid host Skill repository key');
       const skillMode = options.skills ?? (options.rerunId ? 'replay' : options.evaluation ? 'off' : 'auto');
       const skillPackage = await freezeSkills(stateDir, store, skillMode, repositoryKey, oldRun);
-      manifest.skills = await savePackage(runDir, skillPackage); manifest.learningPolicy = learningPolicy;
+      manifest.skills = await savePackage(runDir, skillPackage); manifest.learningPolicy = learningPolicy; const rules = skillRules(skillPackage);
       const skillReads = skillReader(skillPackage, runDir);
       manifest.reviewPolicy = variant ? { version: `${REVIEW_DECISION_POLICY_VERSION}+${investigation}`, sha256: sha256(JSON.stringify([REVIEW_DECISION_POLICY, variant.prompt, variant.summary])) } : { version: REVIEW_DECISION_POLICY_VERSION, sha256: sha256(REVIEW_DECISION_POLICY) };
       await writeJson(join(runDir, "run.json"), manifest);
@@ -184,7 +184,7 @@ export class ReviewEngine {
           return page;
         }),
         tool("search_text", "Literal search of immutable source. Use path for an exact file or a directory ending in /. Follow nextCursor with the same revision, query and path to see omitted matches. Truncated or scoped results do not establish absence elsewhere; read_source is required for evidence.", object({ revision, query: string, path: { type: "string", minLength: 1, description: "Exact repository-relative file, or directory prefix ending in /." }, cursor: { type: "string", maxLength: 8192 }, limit: { type: "integer", minimum: 1, maximum: 100 } }, ["revision", "query"]), async input => store.search(rev(input.revision), text(input.query), number(input.limit, 50), { ...(input.path === undefined ? {} : { path: text(input.path) }), ...(input.cursor === undefined ? {} : { cursor: text(input.cursor) }) })),
-        tool("submit_review", FINAL_REVIEW_DESCRIPTION + (variant?.summary ?? ""), object({ summary: { ...string, description: "Summarize checked contracts, reasons for excluding investigated concerns, and unresolved limitations. Required even when findings is empty; do not claim uninspected behavior was verified." + (variant?.summary ?? "") }, reviewedPaths: { type: "array", items: string, maxItems: 200, uniqueItems: true }, findings: { type: "array", items: skillPackage.selected.some(e => e.skill.type === "accepted_tradeoff") ? withTradeoff(finding) : finding, maxItems: 100 } }, ["summary", "reviewedPaths", "findings"]), async input => {
+        tool("submit_review", FINAL_REVIEW_DESCRIPTION + (variant?.summary ?? ""), object({ summary: { ...string, description: "Summarize checked contracts, reasons for excluding investigated concerns, and unresolved limitations. Required even when findings is empty; do not claim uninspected behavior was verified." + (variant?.summary ?? "") }, reviewedPaths: { type: "array", items: string, maxItems: 200, uniqueItems: true }, findings: { type: "array", items: selectsTradeoff(skillPackage) ? withTradeoff(finding) : finding, maxItems: 100 } }, ["summary", "reviewedPaths", "findings"]), async input => {
           requireCondition(!dispatch?.hasPending(), "CONTEXT_PENDING: New host context has not entered a model request. Read the next context package before submitting again.");
           requireText(input.summary, "summary"); requireCondition(input.summary.length <= 4000, "Summary exceeds limit");
           requireCondition(Array.isArray(input.findings) && input.findings.length <= 100 && Array.isArray(input.reviewedPaths) && input.reviewedPaths.length <= 200, "Invalid submission");
@@ -259,7 +259,7 @@ export class ReviewEngine {
           }));
       }
       const declarationChanges = dispatchV2 || options.evaluation?.declarationAware ? await snapshotChanges(store) : undefined;
-      runtime = await this.factory({ repositoryPath: repository, runDir, stateDir, model: options.model, skillsEnabled: skillPackage.selected.length > 0, ...(options.evaluation?.contextCwd ? {contextCwd:await isolatedState(options.evaluation.contextCwd,repository)} : {}), budgetState: () => budget.state(), ...(options.inference ? { inference: options.inference } : {}), tools, ...(options.evaluation ? { evaluation: true } : {}), ...(routingEnabled ? { routing: { ...(declarationChanges ? {declarationChanges} : {}), ...(dispatch ? { dispatch } : {}), ...(routingTextOnly ? { textOnly: true } : {}), variant: options.evaluation!.routing as Exclude<import("./routing-contracts.ts").RoutingMode, "none">, snapshotId: store.manifest.identity.id, changedPaths: [...store.manifest.changedPaths], ...(options.evaluation?.routingBudget ? { budget: options.evaluation.routingBudget } : {}), onBlockedCall } } : {}) });
+      runtime = await this.factory({ repositoryPath: repository, runDir, stateDir, model: options.model, ...(rules ? { skillRules: rules } : {}), ...(options.evaluation?.contextCwd ? {contextCwd:await isolatedState(options.evaluation.contextCwd,repository)} : {}), budgetState: () => budget.state(), ...(options.inference ? { inference: options.inference } : {}), tools, ...(options.evaluation ? { evaluation: true } : {}), ...(routingEnabled ? { routing: { ...(declarationChanges ? {declarationChanges} : {}), ...(dispatch ? { dispatch } : {}), ...(routingTextOnly ? { textOnly: true } : {}), variant: options.evaluation!.routing as Exclude<import("./routing-contracts.ts").RoutingMode, "none">, snapshotId: store.manifest.identity.id, changedPaths: [...store.manifest.changedPaths], ...(options.evaluation?.routingBudget ? { budget: options.evaluation.routingBudget } : {}), onBlockedCall } } : {}) });
       if (runtime.configuration) manifest.runtimeConfiguration = runtime.configuration();
       abort.signal.throwIfAborted();
       controller = new ReviewController(runtime.journal, runId, store.manifest.identity);

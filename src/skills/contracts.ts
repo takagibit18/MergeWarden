@@ -124,5 +124,7 @@ export interface SkillPackageEntry {
 export interface SkillBinding {
   mode: 'off' | 'auto' | 'replay'; bankSnapshotId: string; selectionPolicyVersion: string; catalogSha256: string; packageSha256: string;
   repositoryKey: string; available: Array<{ id: string; revision: number; contentSha256: string }>;
+  /** SHA-256 of the Skill rules injected into the system prompt; absent when no Skill is selected and in pre-ADR 0020 runs. */
+  rulesSha256?: string;
   eligible: number; degraded?: string;
 }

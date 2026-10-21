@@ -35,7 +35,7 @@ export interface ReviewRuntime {
     authentication?: { type: "api_key" | "oauth" };
     inference?: { catalogRevision: string; modelSha256: string; requested: InferenceOptions; resolved: InferenceOptions; capabilities: { contextWindow: number; maxOutputTokens: number }; requestCount: number; lastRequestSha256?: string } };
 }
-export type RuntimeFactory = (options: { repositoryPath: string; runDir: string; stateDir: string; model: ModelSelection; inference?: InferenceOptions; tools: RuntimeTool[]; skillsEnabled?: boolean; contextCwd?: string; evaluation?: boolean; budgetState?(): import('./budget.ts').BudgetState; routing?: import("./routing-contracts.ts").RoutingContext }) => Promise<ReviewRuntime>;
+export type RuntimeFactory = (options: { repositoryPath: string; runDir: string; stateDir: string; model: ModelSelection; inference?: InferenceOptions; tools: RuntimeTool[]; skillRules?: string; contextCwd?: string; evaluation?: boolean; budgetState?(): import('./budget.ts').BudgetState; routing?: import("./routing-contracts.ts").RoutingContext }) => Promise<ReviewRuntime>;
 export interface FinalSubmission { summary: string; reviewedPaths: string[]; findings: FindingCandidate[] }
 /** Model transport; normalization produces the unchanged self-contained domain contract. */
 export interface FinalSubmissionInput { summary: string; reviewedPaths: string[]; findings: import("../application/evidence-registry.ts").FindingInput[] }

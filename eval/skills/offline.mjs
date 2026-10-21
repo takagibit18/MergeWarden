@@ -19,7 +19,7 @@ await writeFile(join(repository,'app.py'),'def ratio(total, count):\n    return 
 async function scripted(script){const runtime=await createModelRuntime('fixture','offline-key');let turn=0;runtime.registerProvider('fixture',{api:'openai-completions',baseUrl:'https://offline.invalid',apiKey:'offline-key',models:[{id:'offline',name:'Scripted fixture',reasoning:false,input:['text'],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:100000,maxTokens:4096}],streamSimple(model,context){const content=script(context,++turn),stream=createAssistantMessageEventStream(),message={role:'assistant',api:model.api,provider:model.provider,model:model.id,content,timestamp:Date.now(),stopReason:content.some(c=>c.type==='toolCall')?'toolUse':'stop',usage:{input:1,output:1,cacheRead:0,cacheWrite:0,totalTokens:2,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}}};queueMicrotask(()=>{stream.push({type:'start',partial:message});stream.push({type:'done',reason:message.stopReason,message});});return stream;}});return runtime;}
 const call=(name,args,n)=>[{type:'toolCall',id:'call-'+n,name,arguments:args}];
 const factory=async options=>createPiRuntime(options,await scripted((context,turn)=>{
- const loaded=options.skillsEnabled,offset=loaded?1:0;
+ const loaded=options.skillRules,offset=loaded?1:0;
  if(loaded&&turn===1)return call('read_review_skill',{id:'sk_denominator'},turn);
  if(turn===1+offset)return call('read_diff',{path:'app.py'},turn);
  if(loaded&&turn===3)return call('read_source',{revision:'head',path:'app.py',startLine:1,endLine:2},turn);

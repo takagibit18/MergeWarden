@@ -164,6 +164,14 @@ test('feedback on a Known and accepted finding gives the learner that finding wi
   assert.deepEqual(input.report.findings.map(x => [x.id, x.acceptedTradeoff]), [['folded', { skillId: skill.id, revision: skill.revision, note: 'No new caller; count is still validated upstream.' }]]);
 });
 
+test('the runtime receives the trade-off Skill rules and run.json records their hash', async t => {
+  const f = await fixture(t); await acceptTradeoff(f);
+  let rules;
+  const run = await new ReviewEngine(runtime(async (tools, options) => { rules = options.skillRules; await finish(tools); })).run(await laterChange(f));
+  assert.match(rules, /add acceptedTradeoff \{skillId, note\}/);
+  assert.equal((await readRun(f.state, run.runId)).skills.rulesSha256, sha(rules));
+});
+
 test('an uncited or unread accepted trade-off folds nothing', async t => {
   const f = await fixture(t), skill = await acceptTradeoff(f);
   const run = await new ReviewEngine(runtime(async tools => {
