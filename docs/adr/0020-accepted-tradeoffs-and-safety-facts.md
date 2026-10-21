@@ -30,14 +30,17 @@ proves it at the strongest affordable level.
 2. **Only a human creates one.** The learner may produce `accepted_tradeoff` content only from a
    `local_user` feedback source with the new verdict `accepted_tradeoff`. Run-derived and
    simulated sources cannot create or revise it. Staging and `skills approve` follow ADR 0018.
-   The feedback must carry a `--path/--start-line/--end-line` range. An approved accepted
-   trade-off is `active`; it never passes through `trial`.
+   The feedback must carry a `--path/--start-line/--end-line` range. A trade-off approved through
+   learning is `active` and does not pass through `trial`. `skills rollback` restores a revision
+   as `trial`, which cannot fold, so a rolled-back trade-off needs new human feedback.
 3. **Anchored to the accepted code, not to the file.** When the feedback is saved, the host
    records an anchor from the frozen head source: path, line count and the SHA-256 of the exact
    lines. The learner cannot set or change it. At review time the host searches the head file for
-   the same lines, so the anchor survives edits elsewhere in the file and moved code. When the
-   lines are not found, the Skill's freshness is `recheck` and it cannot fold anything. File-level
-   `dependencies` play no part for this type.
+   the same lines, so the anchor survives edits elsewhere in the file and code shifted by them.
+   The anchor is found only when exactly one window matches and that window lies outside the head
+   lines this snapshot's frozen diff adds or modifies. A copy inserted by the change, or lines moved
+   into changed lines, therefore cannot take over the anchor. Otherwise the Skill's freshness is
+   `recheck` and it cannot fold anything. File-level `dependencies` play no part for this type.
 4. **New SKILL.md section *Still report when*.** It maps to a new field `stillReportWhen` and is
    required (at least one item) for `accepted_tradeoff`. It names the conditions under which the
    same pattern is a real defect: new instances, changed contracts, data loss, security.
@@ -60,10 +63,12 @@ proves it at the strongest affordable level.
    nothing by lowering severity to pass, and a mistaken citation never hides a finding.
 7. **Hard rule for severe findings.** The severity gate in item 5 is the host's version of
    "security and data never auto-skip". `critical` and `high` findings are never folded, whatever the Skill says.
-8. **`SKILL_RULES` changes from "never suppress" to "never remove".** A Skill still cannot
-   establish a bug, safety, coverage or evidence. A cited, gated accepted trade-off may move a
-   finding into *Known and accepted*. The policy versions change (`review-skills-3`,
-   `skill-md-2`), so old runs replay with their frozen rules.
+8. **The Skill rules change from "never suppress" to "never remove" only when needed.** A Skill
+   still cannot establish a bug, safety, coverage or evidence. When the frozen package selects an
+   `accepted_tradeoff` Skill, the injected rules say that a cited, gated accepted trade-off may
+   move a finding into *Known and accepted*. Every other package, including `review-skills-2`
+   replays, gets the pre-ADR rules byte for byte. `run.json` records the SHA-256 of the injected
+   rules as `skills.rulesSha256`. The policy versions change (`review-skills-3`, `skill-md-2`).
 
 Report schema stays version 1. `knownAccepted` is optional and absent in old reports, so
 existing hashes and readers are unaffected.
@@ -109,3 +114,13 @@ existing hashes and readers are unaffected.
 - Parts A and B ship in one pull request; Part B stays off by default.
 - Severity remains model-chosen, so a mis-graded severe defect could still be folded. The
   path scope, the read proof and *Still report when* limit this, and it is the residual risk.
+- The frozen diff is one replacement hunk between the first and last changed line. Edits on both
+  sides of an anchor in the same file put the anchor inside changed lines, so it rechecks. This
+  errs toward reporting.
+- The reducer accepts a well-formed `acceptedTradeoff` on the legacy `candidates.submitted`
+  channel without running the fold gates. Today the only model path is `submit_review`, which
+  strips the citation and decides again. Any future tool that feeds the pending channel must run
+  the same gates or strip the citation.
+- Each accepted trade-off Skill has one anchor. The same pattern at a second location cannot be
+  accepted separately, because the near-duplicate gate refuses a second Skill with the same
+  content. This is a known limitation.
