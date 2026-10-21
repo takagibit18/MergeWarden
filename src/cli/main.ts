@@ -36,9 +36,11 @@ npm run cli -- doctor [--repo PATH] [--state PATH]
 npm run cli -- unlock --repo PATH [--state PATH]
 
 Options: --skills auto|off|replay, --learn auto|off, --comment-file OUTSIDE_PATH,
-         --event ID --version N (edit feedback), --withdrawn true|false, --verdict correction|missed_defect|contract|uncertain,
+         --event ID --version N (edit feedback), --withdrawn true|false, --verdict correction|missed_defect|contract|uncertain|accepted_tradeoff
+         (accepted_tradeoff requires --path/--start-line/--end-line),
          --retry true|false --max-jobs 1..3 (skills learn), --state PATH (outside checkout), --timeout-ms 600000, --max-tools 100,
          --thinking LEVEL (must be supported by the selected model), --max-output-tokens 8192,
+         --investigation safety_fact (review/rerun prompt variant; off by default, rerun inherits the original),
          --auth oauth (use explicit Pi login instead of --api-key-env),
          --include-untracked PATH (repeat; worktree only, ignored files excluded)
 Learned Skill changes are staged for approval; reviews never read a pending proposal.
@@ -48,7 +50,7 @@ Exit codes: 0 completed/read-only/no_changes; 2 input or persistence failure; 3 
 No cost estimate is produced. Model requests occur in review/rerun (including bounded learning), and explicitly authenticated feedback/skills learn.`;
 function parse(argv: string[]) {
   const values = new Map<string, string[]>();
-  const known = new Set(["repo", "state", "scope", "base", "head", "provider", "model", "auth", "api-key-env", "timeout-ms", "max-tools", "thinking", "max-output-tokens", "include-untracked", "run", "finding", "skills", "learn", "id", "revision", "comment", "comment-file", "event", "version", "path", "start-line", "end-line", "verdict", "withdrawn", "retry", "max-jobs", "proposal", "note", "stage"]);
+  const known = new Set(["repo", "state", "scope", "base", "head", "provider", "model", "auth", "api-key-env", "timeout-ms", "max-tools", "thinking", "max-output-tokens", "include-untracked", "run", "finding", "skills", "learn", "id", "revision", "comment", "comment-file", "event", "version", "path", "start-line", "end-line", "verdict", "withdrawn", "retry", "max-jobs", "proposal", "note", "stage", "investigation"]);
   for (let i = 0; i < argv.length; i += 2) {
     const flag = argv[i]!; const value = argv[i + 1]; const key = flag.slice(2);
     if (!flag.startsWith("--") || !known.has(key) || !value || value.startsWith("--")) throw new Error(`Invalid option: ${flag}`);
@@ -77,7 +79,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     const report = await readReport(state, options.require("run"));
     if (command === "show") console.log(JSON.stringify(report, null, 2));
     else {
-      const finding = report.findings.find(f => f.id === options.require("finding")); if (!finding) throw new Error("Finding is not in the saved report");
+      const finding = [...report.findings, ...report.knownAccepted ?? []].find(f => f.id === options.require("finding")); if (!finding) throw new Error("Finding is not in the saved report");
       const snapshot = await SnapshotStore.load(state, report.snapshot.id);
       console.log(JSON.stringify(await Promise.all(finding.evidence.map(e => snapshot.source(e.revision, e.path, e.startLine, e.endLine))), null, 2));
     }
@@ -195,10 +197,12 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   try {
     const learnMode=options.get('learn')??'auto',skillsMode=options.get('skills')??(command==='rerun'?'replay':'auto');
     if(!['auto','off'].includes(learnMode)||!['auto','off','replay'].includes(skillsMode))throw Error('Invalid skills/learn mode');
+    const investigation=options.get('investigation');if(investigation!==undefined&&investigation!=='safety_fact')throw Error('Invalid --investigation; use safety_fact');
     const learner=learnMode==='auto'?await learningAdapter():undefined;
     if(learner)try{await learnPending(admittedState,learner,{model,inference,repositoryKey:sha256(repository),feedbackOnly:true,maxJobs:1});}catch{console.error(JSON.stringify({learning:'pending feedback unavailable; continuing review'}));}
     const result = await new ReviewEngine(factory,undefined,learner).run({ skills:skillsMode as 'auto'|'off'|'replay',learn:learnMode as 'auto'|'off', repositoryPath: repository, stateDir: admittedState, model, signal: abort.signal,
       ...(Object.keys(inference).length ? { inference } : {}),
+      ...(investigation ? { investigation } : {}),
       ...(input ? { input } : { rerunId: options.require("run") }),
       ...(options.get("timeout-ms") ? { timeoutMs: Number(options.get("timeout-ms")) } : {}),
       ...(options.get("max-tools") ? { maxToolCalls: Number(options.get("max-tools")) } : {}),

@@ -44,6 +44,12 @@ describe('history navigation and URL state', () => {
     expect(screen.getByRole('link', { name: '详情' })).toHaveAttribute('href', `/projects/${projectId}/reviews/${runId}`);
   });
 
+  it('shows the Known and accepted count only when a verified report has one', () => {
+    render(<MemoryRouter><HistoryTable projectId={projectId} items={[historyItem({ findingCount: 2, knownAcceptedCount: 3 }), historyItem({ id: 'other', runId: 'other', findingCount: 1 })]} /></MemoryRouter>);
+    expect(screen.getAllByText(/^已接受 /)).toHaveLength(1);
+    expect(screen.getByText('已接受 3')).toBeInTheDocument();
+  });
+
   it('links unfinished native CLI runs to task state even without an MCP receipt', () => {
     const pending = historyItem({ taskId: undefined, status: 'running', reportAvailability: 'not_delivered' });
     render(<MemoryRouter><HistoryTable projectId={projectId} items={[pending]} /></MemoryRouter>);

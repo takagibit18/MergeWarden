@@ -26,6 +26,8 @@ HTTP 服务只监听 loopback，启动凭据交换为进程内 HttpOnly 会话�
 
 学习经验采用 SKILL.md 格式（frontmatter、四个列表段、最多两个引用文件，不允许脚本），宿主严格解析后仍按内容寻址存储；审查目录只显示名称与描述，正文和引用按需读取。审查方法按模块目录限定范围，同一变更的审查与反馈只算一次支持。离线复学显示测试点可见 Skill 由 4/6 升至 6/6，对审查质量的影响尚未用配对审查验证。详见 [ADR 0019](adr/0019-skill-md-format.md)。
 
+已接受的取舍（ADR 0020 Part A）已实现：只有本地用户以 `--verdict accepted_tradeoff` 并给出源码行范围的反馈可以产生 `accepted_tradeoff` Skill，宿主记录这些行的锚点并要求 *Still report when* 段。审查时宿主在 head 文件中重新定位锚点；模型可以在 finding 上引用该 Skill，宿主按确定性门槛（已冻结、active、本次读过正文、锚点已定位、证据在 Skill 路径内且覆盖锚点、严重度为 low/medium）把它移入报告的 *Known and accepted* 折叠段，未通过的引用保留在 findings 并附原因。安全事实调查（Part B）是默认关闭的提示词变体 `--investigation safety_fact`，记录在 run.json 与 reviewPolicy 中。两者对审查质量的影响均未测量；Part B 需配对真实 PR 评测后才能改为默认。详见 [ADR 0020](adr/0020-accepted-tradeoffs-and-safety-facts.md)。
+
 共享多写者 Bank、并发提案合并以及审查质量增益均不属于当前已验证能力。产品学习默认 60 秒；实验的 120 秒软告警／180 秒硬截止不改变产品默认值。请求的输出 token 数不等于已验证的服务端硬上限。
 
 ## 变更感知结构调查与真实 PR 评测

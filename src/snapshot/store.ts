@@ -1,6 +1,6 @@
 import { lstat, open, readFile, realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { frozenDiff } from "./diff.ts";
+import { changedHeadLines, frozenDiff } from "./diff.ts";
 import { git } from "../infrastructure/git.ts";
 import { atomicWrite, inside, isolatedState, safePath, sha256, writeJson } from "../infrastructure/files.ts";
 import { assertSnapshot } from "../domain/validation.ts";
@@ -184,6 +184,13 @@ export class SnapshotStore implements SourceReader {
     for (const line of all.slice(offset, offset + limit)) { if (bytes + Buffer.byteLength(line) > 32_768) break; selected.push(line); bytes += Buffer.byteLength(line); }
     const next = offset + selected.length; const truncated = next < all.length;
     return { snapshotId: this.manifest.identity.id, path, status: "ok", lines: selected, offset, totalLines: all.length, ...(truncated ? { nextCursor: next } : {}), truncated, warnings: ["Frozen unified diff; widely separated edits may share a coalesced hunk"] };
+  }
+  /** Head lines this snapshot's frozen diff adds or modifies in a text file; a base that is not text counts the whole head file as changed. */
+  async changedHeadLines(path: string): Promise<{ startLine: number; endLine: number } | undefined> {
+    if (!this.manifest.changedPaths.includes(path)) return undefined;
+    const after = this.manifest.head[path] ? await this.text("head", path) : null;
+    const before = this.manifest.base[path]?.status === "text" ? await this.text("base", path) : null;
+    return changedHeadLines(before, after);
   }
   async search(revision: "base" | "head", query: string, limit = 50, options: { path?: string; cursor?: string } = {}): Promise<unknown> {
     if (!["base", "head"].includes(revision) || !query || query.length > 256 || !Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("Invalid literal search");

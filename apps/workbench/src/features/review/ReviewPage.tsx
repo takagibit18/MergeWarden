@@ -4,14 +4,14 @@ import Button from 'antd/es/button';
 import Tag from 'antd/es/tag';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { scopedTaskParamsSchema } from '@mergewarden/contracts';
-import type { ReportResponse } from '@mergewarden/contracts';
+import type { FindingDto, ReportResponse } from '@mergewarden/contracts';
 import { getReport } from '../../shared/api/reviews';
 import { describeError } from '../../shared/api/client';
 import { freshReadOptions } from '../../shared/api/query-options';
 import { formatDate, shortId } from '../../shared/presentation';
 import { Icon } from '../../shared/ui/Icon';
 import { EmptyState, ErrorState, LoadingState } from '../../shared/ui/PageState';
-import { StatusTag } from '../../shared/ui/StatusTag';
+import { SeverityTag, StatusTag } from '../../shared/ui/StatusTag';
 import { scopeLabels } from '../history/query-state';
 import { FindingList } from './FindingList';
 import { FindingDetail } from './FindingDetail';
@@ -56,8 +56,26 @@ function VerifiedReview({ projectId, response }: { projectId: string; response: 
       {uncovered > 0 ? <Alert className="coverage-warning" showIcon type="warning" message={`还有 ${uncovered} 个文件未完成覆盖`} description="报告中的问题和证据需结合未覆盖范围一起复核。" /> : null}
       <div className="review-note"><Icon name="shield" size={16} /><span>审查结论供人工复核。证据完整性校验不代表已证明缺陷语义。</span></div>
       {report.findings.length ? <div className="review-workspace"><FindingList findings={report.findings} selectedId={selected?.id} search={params} />{selected ? <FindingDetail projectId={projectId} finding={selected} runId={report.runId} evidenceIndex={evidenceIndex} onEvidenceSelect={index => { const next = new URLSearchParams(params); next.set('finding', selected.id); next.set('evidence', String(index)); setParams(next, { replace: true }); }} /> : <EmptyState title="所选问题不存在" description="地址中的问题 ID 不属于当前报告，请从左侧列表重新选择。" />}</div> : <EmptyState title="本报告没有提交问题" description={report.status === 'completed' ? '本次审查已完成并通过报告交付核验，未提交 finding。' : '本次报告没有 finding；请结合报告状态、摘要与覆盖范围判断审查结果。'} />}
+      {report.knownAccepted?.length ? <KnownAccepted findings={report.knownAccepted} /> : null}
       <section className="surface coverage-surface" aria-label="文件覆盖"><div className="section-heading"><h2>文件覆盖</h2><span className="muted small">冻结审查范围</span></div><div className="coverage-list">{Object.entries(report.coverage).map(([path, status]) => <div key={path} className="coverage-row"><span className="mono">{path}</span><Tag className={`coverage-tag coverage-${status}`}>{status === 'done' ? '已覆盖' : status === 'failed' ? '覆盖失败' : '待覆盖'}</Tag></div>)}</div>{totalPaths === 0 ? <p className="muted">此报告未记录覆盖路径。</p> : null}</section>
     </>
+  );
+}
+
+function KnownAccepted({ findings }: { findings: FindingDto[] }) {
+  return (
+    <details className="surface known-accepted" aria-label="已知并接受">
+      <summary><h2>已知并接受 <span className="section-count">{findings.length}</span></h2><span className="muted small">人工确认的权衡，宿主校验后移出问题列表</span></summary>
+      <ul className="known-accepted-list">
+        {findings.map(finding => (
+          <li key={finding.id}>
+            <div className="known-accepted-heading"><SeverityTag severity={finding.severity} /><h3>{finding.title}</h3></div>
+            {finding.acceptedTradeoff ? <p className="muted small">Skill <span className="mono">{finding.acceptedTradeoff.skillId}</span> 修订 {finding.acceptedTradeoff.revision}</p> : null}
+            {finding.acceptedTradeoff ? <p>{finding.acceptedTradeoff.note}</p> : null}
+          </li>
+        ))}
+      </ul>
+    </details>
   );
 }
 

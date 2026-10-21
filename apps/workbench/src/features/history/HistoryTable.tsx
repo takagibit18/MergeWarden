@@ -21,7 +21,7 @@ export function HistoryTable({ projectId, items, workspaces = [] }: { projectId:
               <span className="history-record-scope">{item.scope ? scopeLabels[item.scope] : <span className="muted">范围未记录</span>}</span>
               <span className="history-record-status"><StatusTag status={item.status} /></span>
               <span className={`history-record-delivery${item.reportAvailability === 'verified' ? ' delivery-ok' : ' muted'}`}>{item.reportAvailability === 'verified' ? <><Icon name="check" size={13} />索引已核验</> : item.reportAvailability === 'not_delivered' ? '未确认交付' : '产物不可用'}</span>
-              <span className="history-record-count"><span className="compact-cell-label">问题 </span><span className="count-value">{item.findingCount ?? '—'}</span></span>
+              <span className="history-record-count"><span className="compact-cell-label">问题 </span><span className="count-value">{item.findingCount ?? '—'}</span>{item.knownAcceptedCount ? <span className="muted small known-accepted-count">已接受 {item.knownAcceptedCount}</span> : null}</span>
               <time className="history-record-date" dateTime={item.createdAt}>{formatDate(item.createdAt)}</time>
             </div>
             <span className="history-record-action"><HistoryAction projectId={projectId} item={item} /></span>

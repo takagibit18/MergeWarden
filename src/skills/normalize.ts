@@ -49,6 +49,7 @@ export function normalizeContent(value: SkillContent): SkillContent {
     if (Array.isArray(c[key])) c[key] = list(c[key]);
   }
   if (Array.isArray(c.symbols)) c.symbols = list(c.symbols);
+  if (Array.isArray(c.stillReportWhen)) c.stillReportWhen = list(c.stillReportWhen);
   if (Array.isArray(c.paths)) c.paths = list(c.paths.map(p => typeof p === 'string' ? path(p) : p));
   if (Array.isArray(c.languages)) c.languages = list(c.languages.map(l => typeof l === 'string' ? LANGUAGE_NAMES[text(l).toLowerCase()] ?? text(l) : l));
   if (Array.isArray(c.dependencies)) {

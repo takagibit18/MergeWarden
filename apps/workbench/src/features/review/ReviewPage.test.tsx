@@ -61,6 +61,23 @@ describe('independent review detail and frozen evidence', () => {
     expect(screen.queryByText('已完成')).not.toBeInTheDocument();
   });
 
+  it('shows Known and accepted findings collapsed with their Skill, and a rejected citation reason on the main finding', async () => {
+    const response = reportResponse();
+    response.report.findings[0]!.acceptedTradeoffRejected = 'Severity high is never folded';
+    response.report.knownAccepted = [finding({ id: 'accepted', title: '已接受的除法', acceptedTradeoff: { skillId: 'sk_ratio_1', revision: 2, note: '调用方仍校验 count。' } })];
+    vi.stubGlobal('fetch', vi.fn((input: string) => Promise.resolve(jsonResponse(
+      input.endsWith('/report') ? response : input.includes('/diff?') ? evidenceDiffResponse() : evidenceResponse(),
+    ))));
+    renderReview();
+    const section = await screen.findByLabelText('已知并接受');
+    expect(section).not.toHaveAttribute('open');
+    expect(section).toHaveTextContent('已接受的除法');
+    expect(section).toHaveTextContent('sk_ratio_1 修订 2');
+    expect(section).toHaveTextContent('调用方仍校验 count。');
+    expect(screen.getByText('Severity high is never folded', { selector: 'dd' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: '审查问题列表' })).not.toHaveTextContent('已接受的除法');
+  });
+
   it('renders a missing selected finding without falling back to another finding', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(reportResponse())));
     renderReview(undefined, '?finding=missing');

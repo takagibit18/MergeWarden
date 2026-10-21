@@ -18,7 +18,7 @@ const isMissing = (error: unknown) => (error as NodeJS.ErrnoException)?.code ===
 
 /** Drop anything derived from an unverified report, including its summary title. */
 export function unverifiable(item: HistoryItem): HistoryItem {
-  const { findingCount: _count, title: _title, ...metadata } = item;
+  const { findingCount: _count, knownAcceptedCount: _accepted, title: _title, ...metadata } = item;
   return { ...metadata, status: null, reportAvailability: 'unavailable',
     error: { code: 'REPORT_INTEGRITY', message: 'The native record could not be verified. No report delivery is confirmed.' } };
 }
@@ -42,6 +42,12 @@ function liveness(receipt: Receipt): 'unknown' | 'owner_present' | 'owner_exited
 
 function evidenceDto(ref: FindingCandidate['evidence'][number]): EvidenceRefDto {
   return { snapshotId: ref.snapshotId, revision: ref.revision, path: ref.path, startLine: ref.startLine, endLine: ref.endLine, contentSha256: ref.contentSha256 };
+}
+
+function findingDto(finding: FindingCandidate): ReportDto['findings'][number] {
+  return { id: finding.id, title: finding.title, claim: finding.claim, trigger: finding.trigger, impact: finding.impact, severity: finding.severity, evidence: finding.evidence.map(evidenceDto),
+    ...(finding.acceptedTradeoff ? { acceptedTradeoff: { skillId: finding.acceptedTradeoff.skillId, revision: finding.acceptedTradeoff.revision, note: finding.acceptedTradeoff.note } } : {}),
+    ...(finding.acceptedTradeoffRejected ? { acceptedTradeoffRejected: finding.acceptedTradeoffRejected } : {}) };
 }
 
 function snapshotDto(snapshot: SnapshotIdentity): ReportDto['snapshot'] {
@@ -135,7 +141,7 @@ export class VerifiedArtifacts {
       }
       const report = this.reportDto(native);
       const item: HistoryItem = { ...this.runMetadata(run), status: report.status, scope: snapshot.manifest.input.kind,
-        findingCount: report.findings.length, reportAvailability: 'verified' };
+        findingCount: report.findings.length, ...(report.knownAccepted ? { knownAcceptedCount: report.knownAccepted.length } : {}), reportAvailability: 'verified' };
       return { run, report, snapshot, item: { ...item, ...summaryTitle(report.summary) } };
     } catch (error) {
       if (error instanceof WorkbenchError && error.code === 'REPOSITORY_MISMATCH') throw error;
@@ -150,7 +156,9 @@ export class VerifiedArtifacts {
     assertSnapshot(report.snapshot);
     if (JSON.stringify(snapshotDto(report.snapshot)) !== JSON.stringify(snapshotDto(snapshot.manifest.identity))) throw new Error('Report snapshot mismatch');
     const ids = new Set<string>();
-    for (const finding of report.findings) {
+    if (report.knownAccepted !== undefined && (!Array.isArray(report.knownAccepted) || !report.knownAccepted.length || report.knownAccepted.length > 100 || report.knownAccepted.some(f => !isRecord(f) || !f.acceptedTradeoff))) throw new Error('Invalid report');
+    if (report.findings.some(f => isRecord(f) && f.acceptedTradeoff)) throw new Error('Invalid report');
+    for (const finding of [...report.findings, ...report.knownAccepted ?? []]) {
       assertCandidate(finding, snapshot.manifest.identity.id);
       if (ids.has(finding.id)) throw new Error('Duplicate finding');
       ids.add(finding.id);
@@ -163,8 +171,8 @@ export class VerifiedArtifacts {
 
   private reportDto(report: ReviewReport): ReportDto {
     return { schemaVersion: 1, runId: report.runId, snapshot: snapshotDto(report.snapshot), status: report.status, summary: report.summary,
-      findings: report.findings.map(finding => ({ id: finding.id, title: finding.title, claim: finding.claim, trigger: finding.trigger,
-        impact: finding.impact, severity: finding.severity, evidence: finding.evidence.map(evidenceDto) })),
+      findings: report.findings.map(findingDto),
+      ...(report.knownAccepted ? { knownAccepted: report.knownAccepted.map(findingDto) } : {}),
       coverage: Object.fromEntries(Object.entries(report.coverage)), publication: 'not_requested' };
   }
 
@@ -248,7 +256,7 @@ export class VerifiedArtifacts {
       throw new WorkbenchError('INVALID_QUERY', 'A finding ID and an evidence index between 0 and 19 are required.', 400);
     }
     const { report, snapshot } = await this.verifiedReport(runId);
-    const finding = report.findings.find(item => item.id === findingId);
+    const finding = [...report.findings, ...report.knownAccepted ?? []].find(item => item.id === findingId);
     if (!finding) throw new WorkbenchError('NOT_FOUND', 'Finding was not found in the verified report.', 404);
     const ref = finding.evidence[evidenceIndex];
     if (!ref) throw new WorkbenchError('NOT_FOUND', 'Evidence was not found in the verified finding.', 404);

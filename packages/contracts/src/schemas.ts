@@ -39,6 +39,7 @@ export const historyItemSchema: z.ZodType<HistoryItem> = z.object({
   model: z.object({ provider: z.string(), modelId: z.string() }).strict().optional(),
   snapshotId: sha256Schema.optional(),
   findingCount: count.optional(),
+  knownAcceptedCount: count.optional(),
   reportAvailability: z.enum(['verified', 'not_delivered', 'unavailable']),
   liveness: z.enum(['unknown', 'owner_present', 'owner_exited']).optional(),
   error: z.object({ code: z.string(), message: z.string() }).strict().optional(),
@@ -109,10 +110,12 @@ export const evidenceRefSchema: z.ZodType<EvidenceRefDto> = z.object({
 export const findingSchema: z.ZodType<FindingDto> = z.object({
   id: z.string(), title: z.string(), claim: z.string(), trigger: z.string(), impact: z.string(), severity: severitySchema,
   evidence: z.array(evidenceRefSchema),
+  acceptedTradeoff: z.object({ skillId: z.string(), revision: z.number().int().positive(), note: z.string() }).strict().optional(),
+  acceptedTradeoffRejected: z.string().optional(),
 }).strict();
 export const reportSchema: z.ZodType<ReportDto> = z.object({
   schemaVersion: z.literal(1), runId: idSchema, snapshot: snapshotIdentitySchema,
-  status: reportStatusSchema, summary: z.string(), findings: z.array(findingSchema),
+  status: reportStatusSchema, summary: z.string(), findings: z.array(findingSchema), knownAccepted: z.array(findingSchema).optional(),
   coverage: z.record(z.string(), z.enum(['pending', 'done', 'failed'])), publication: z.literal('not_requested'),
 }).strict();
 export const reportResponseSchema: z.ZodType<ReportResponse> = z.object({

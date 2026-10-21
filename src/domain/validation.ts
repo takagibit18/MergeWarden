@@ -40,6 +40,14 @@ export function assertCandidate(value: unknown, snapshotId: string): asserts val
     requireCondition(Number.isInteger(evidence.endLine) && Number(evidence.endLine) >= Number(evidence.startLine), "invalid end line");
     requireCondition(typeof evidence.contentSha256 === "string" && /^[a-f0-9]{64}$/i.test(evidence.contentSha256), "invalid content hash");
   }
+  if (value.acceptedTradeoff !== undefined) {
+    const fold = value.acceptedTradeoff;
+    requireCondition(isRecord(fold) && Object.keys(fold).sort().join() === "note,revision,skillId" && typeof fold.skillId === "string" && /^sk_[a-z0-9_-]{1,64}$/.test(fold.skillId) &&
+      Number.isSafeInteger(fold.revision) && Number(fold.revision) >= 1 && typeof fold.note === "string" && fold.note.trim().length > 0 && fold.note.length <= 1000, "invalid accepted trade-off");
+    requireCondition(value.severity === "low" || value.severity === "medium", "critical and high findings are never folded");
+    requireCondition(value.acceptedTradeoffRejected === undefined, "a finding is folded or rejected, not both");
+  }
+  if (value.acceptedTradeoffRejected !== undefined) { requireText(value.acceptedTradeoffRejected, "acceptedTradeoffRejected"); requireCondition(value.acceptedTradeoffRejected.length <= 300, "acceptedTradeoffRejected exceeds limit"); }
 }
 export const isUuid = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value);
 export const isSha256 = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);

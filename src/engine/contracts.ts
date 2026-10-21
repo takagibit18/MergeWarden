@@ -12,6 +12,8 @@ export interface InferenceOptions {
 }
 export interface ReviewOptions {
   skills?: 'auto' | 'off' | 'replay'; learn?: 'auto' | 'off';
+  /** Prompt variant (ADR 0020 Part B). Absent keeps the default prompt; rerun inherits the original run's variant. */
+  investigation?: import('./prompt.ts').Investigation;
   /** Learned Skill changes wait for human approval unless an internal evaluation explicitly selects 'auto'. */
   skillApproval?: 'required' | 'auto';
   /** Host-controlled mapping only: never inferred from origin or reviewed configuration. */
@@ -33,7 +35,7 @@ export interface ReviewRuntime {
     authentication?: { type: "api_key" | "oauth" };
     inference?: { catalogRevision: string; modelSha256: string; requested: InferenceOptions; resolved: InferenceOptions; capabilities: { contextWindow: number; maxOutputTokens: number }; requestCount: number; lastRequestSha256?: string } };
 }
-export type RuntimeFactory = (options: { repositoryPath: string; runDir: string; stateDir: string; model: ModelSelection; inference?: InferenceOptions; tools: RuntimeTool[]; skillsEnabled?: boolean; contextCwd?: string; evaluation?: boolean; budgetState?(): import('./budget.ts').BudgetState; routing?: import("./routing-contracts.ts").RoutingContext }) => Promise<ReviewRuntime>;
+export type RuntimeFactory = (options: { repositoryPath: string; runDir: string; stateDir: string; model: ModelSelection; inference?: InferenceOptions; tools: RuntimeTool[]; skillRules?: string; contextCwd?: string; evaluation?: boolean; budgetState?(): import('./budget.ts').BudgetState; routing?: import("./routing-contracts.ts").RoutingContext }) => Promise<ReviewRuntime>;
 export interface FinalSubmission { summary: string; reviewedPaths: string[]; findings: FindingCandidate[] }
 /** Model transport; normalization produces the unchanged self-contained domain contract. */
 export interface FinalSubmissionInput { summary: string; reviewedPaths: string[]; findings: import("../application/evidence-registry.ts").FindingInput[] }
@@ -44,6 +46,7 @@ export interface RunManifest {
   configurationFingerprint: string; limits: { timeoutMs: number; maxToolCalls: number };
   /** Run-level policy identity; historical snapshots and reports remain immutable. */
   reviewPolicy?: { version: string; sha256: string };
+  investigation?: import('./prompt.ts').Investigation;
   status: "running" | "delivered" | "delivery_failed"; createdAt: string; finishedAt?: string;
   parentRunId?: string; outcome?: ReviewReport["status"]; error?: string;
   termination?: { reason: 'completed' | 'tool_budget' | 'time_budget' | 'cancelled' | 'runtime_error' | 'incomplete'; finalSubmission: boolean };

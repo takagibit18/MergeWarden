@@ -51,9 +51,12 @@ export class ReviewController {
   report(): ReviewReport {
     const state = this.stateValue;
     requireCondition(state && ["completed", "partial", "failed", "cancelled"].includes(state.status), "report requires explicit termination");
+    const accepted = Object.values(state.candidates).filter((item) => item.disposition === "accepted").map((item) => structuredClone(item.candidate));
+    const knownAccepted = accepted.filter((item) => item.acceptedTradeoff);
     return { schemaVersion: 1, runId: state.runId, snapshot: structuredClone(state.snapshot),
       status: state.status as ReviewReport["status"], summary: state.summary ?? "",
-      findings: Object.values(state.candidates).filter((item) => item.disposition === "accepted").map((item) => structuredClone(item.candidate)),
+      findings: accepted.filter((item) => !item.acceptedTradeoff),
+      ...(knownAccepted.length ? { knownAccepted } : {}),
       coverage: structuredClone(state.units), publication: "not_requested" };
   }
 }

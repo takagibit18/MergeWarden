@@ -12,7 +12,7 @@ test('learner output tolerates envelope mistakes only and records each repair', 
 });
 
 test('learning prompt asks for SKILL.md that generalizes beyond the incident', () => {
-  assert.equal(LEARNING_PROMPT_VERSION, 'skill-md-1');
+  assert.equal(LEARNING_PROMPT_VERSION, 'skill-md-2');
   assert.match(LEARNING_PROMPT, /NEXT instance of the same mistake in a different file/);
   assert.match(LEARNING_PROMPT, /never single files/);
   assert.match(LEARNING_PROMPT, /never include scripts/);

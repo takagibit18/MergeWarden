@@ -1,6 +1,6 @@
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
-import type { ReviewReport } from "../domain/contracts.ts";
+import type { FindingCandidate, ReviewReport } from "../domain/contracts.ts";
 import { atomicWrite, sha256, writeJson } from "../infrastructure/files.ts";
 import type { RunManifest } from "./contracts.ts";
 export function runPath(state: string, id: string): string {
@@ -8,11 +8,16 @@ export function runPath(state: string, id: string): string {
   return join(state, "runs", id);
 }
 const clean = (text: string) => text.replace(/&/g, "&amp;").replace(/[<>]/g, c => c === "<" ? "&lt;" : "&gt;").replace(/[\\\x60*_[\]{}()#!|]/g, c => "\\" + c).replace(/[\r\n]+/g, " ");
+const evidenceLines = (f: FindingCandidate) => f.evidence.map(e => `- ${e.revision} ${clean(e.path)}:${e.startLine}-${e.endLine} (SHA-256 ${e.contentSha256})`);
 export function markdown(report: ReviewReport): string {
   return [`# MergeWarden review: ${report.status}`, "", `Run: ${report.runId}`, `Snapshot: ${report.snapshot.id}`, "", clean(report.summary), "",
     "Advisory findings. Source integrity checks do not independently prove semantic correctness.", "",
-    ...report.findings.flatMap(f => [`## ${f.severity}: ${clean(f.title)}`, "", clean(f.claim), "", `Trigger: ${clean(f.trigger)}`, `Impact: ${clean(f.impact)}`, "",
-      ...f.evidence.map(e => `- ${e.revision} ${clean(e.path)}:${e.startLine}-${e.endLine} (SHA-256 ${e.contentSha256})`), ""]),
+    ...report.findings.flatMap(f => [`## ${f.severity}: ${clean(f.title)}`, "", clean(f.claim), "", `Trigger: ${clean(f.trigger)}`, `Impact: ${clean(f.impact)}`,
+      ...(f.acceptedTradeoffRejected ? [`Accepted trade-off not applied: ${clean(f.acceptedTradeoffRejected)}`] : []), "",
+      ...evidenceLines(f), ""]),
+    ...(report.knownAccepted?.length ? [`<details><summary>Known and accepted (${report.knownAccepted.length})</summary>`, "",
+      ...report.knownAccepted.flatMap(f => [`### ${f.severity}: ${clean(f.title)}`, "", `Accepted trade-off: Skill ${f.acceptedTradeoff!.skillId} revision ${f.acceptedTradeoff!.revision}. ${clean(f.acceptedTradeoff!.note)}`, "",
+        clean(f.claim), "", ...evidenceLines(f), ""]), "</details>", ""] : []),
     "## Coverage", "", ...Object.entries(report.coverage).map(([path, status]) => `- ${clean(path)}: ${status}`), ""].join("\n");
 }
 export async function deliver(state: string, manifest: RunManifest, report: ReviewReport): Promise<{ reportPath: string; markdownPath: string }> {
