@@ -1,6 +1,6 @@
 # ADR 0020 — Accepted trade-offs and safety-fact investigation
 
-Status: accepted. Implementation in progress.
+Status: accepted. Implemented; effect on review quality not yet measured.
 Baseline: `main` after PR #103 (ADR 0019).
 
 ## Context
