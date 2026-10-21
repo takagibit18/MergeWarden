@@ -1,5 +1,7 @@
 import type { InferenceOptions, ModelSelection } from '../engine/contracts.ts';
-export const SKILL_POLICY = 'review-skills-2';
+export const SKILL_POLICY = 'review-skills-3';
+/** Learning job identity. Bumping it re-enqueues every historical source, so it moves only when extraction itself must rerun. */
+export const SKILL_EXTRACTION_POLICY = 'review-skills-2';
 /** Write approval, novelty comparison, normalization/near-duplicate gates and usage-based curation. */
 export const SKILL_GOVERNANCE_POLICY = 'skill-governance-1';
 export type ApprovalMode = 'required' | 'auto';
@@ -14,11 +16,16 @@ export interface SkillContent {
   references?: Record<string, string>;
   scopeType?: 'repository_fact' | 'review_method';
   symbols?: string[];
-  type: 'review_procedure' | 'repo_contract' | 'tool_usage';
+  type: 'review_procedure' | 'repo_contract' | 'tool_usage' | 'accepted_tradeoff';
   title: string; conditions: string[]; steps: string[]; counterexamples: string[]; stopConditions: string[];
+  /** accepted_tradeoff only (skill-md-2): when the same pattern is still a real defect. */
+  stillReportWhen?: string[];
+  /** accepted_tradeoff only: host-recorded from the feedback's frozen head lines, never learner-supplied. */
+  anchor?: TradeoffAnchor;
   paths: string[]; languages: string[]; keywords: string[];
   dependencies: Array<{ path: string; hash: string }>;
 }
+export interface TradeoffAnchor { path: string; lineCount: number; sha256: string }
 export interface Skill extends SkillContent {
   id: string; revision: number; contentSha256: string; owner: 'learner' | 'external'; repositoryKey: string;
   state: SkillState; sources: string[]; createdAt: string;
@@ -30,7 +37,9 @@ export interface SkillSource {
   independenceKey: string;
   trust: 'observed' | 'trusted'; simulated: boolean; withdrawn: boolean;
   comment?: string; findingId?: string; range?: { path: string; startLine: number; endLine: number };
-  verdict?: 'correction' | 'missed_defect' | 'contract' | 'uncertain'; createdAt: string;
+  verdict?: 'correction' | 'missed_defect' | 'contract' | 'uncertain' | 'accepted_tradeoff'; createdAt: string;
+  /** accepted_tradeoff feedback: the exact frozen head lines of range. */
+  anchor?: TradeoffAnchor;
   relationToReview?: 'supports' | 'contradicts' | 'adds_missing_issue' | 'adds_context';
   feedbackMetadata?: SimulatedFeedback;
 }
@@ -104,8 +113,13 @@ export interface LearningJob {
 }
 export interface SkillPackage {
   mode: 'off' | 'auto' | 'replay'; bankSnapshotId: string; selectionPolicyVersion: string; repositoryKey: string;
-  limits: typeof SKILL_LIMITS; eligible: number; selected: Array<{ skill: Skill; reason: string; freshness: 'current' | 'recheck' }>;
+  limits: typeof SKILL_LIMITS; eligible: number; selected: SkillPackageEntry[];
   degraded?: string;
+}
+export interface SkillPackageEntry {
+  skill: Skill; reason: string; freshness: 'current' | 'recheck';
+  /** accepted_tradeoff whose anchor lines were found in this head snapshot. */
+  anchor?: { path: string; startLine: number; endLine: number };
 }
 export interface SkillBinding {
   mode: 'off' | 'auto' | 'replay'; bankSnapshotId: string; selectionPolicyVersion: string; catalogSha256: string; packageSha256: string;

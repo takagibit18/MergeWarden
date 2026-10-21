@@ -12,7 +12,7 @@ export interface ProposalView {
   decision?: Proposal['decision']; comparison: ComparisonEntry[]; warnings: string[]; changes: ChangeView[];
 }
 
-const LIST_FIELDS = ['conditions', 'steps', 'counterexamples', 'stopConditions', 'paths', 'languages', 'keywords', 'symbols'] as const;
+const LIST_FIELDS = ['conditions', 'steps', 'counterexamples', 'stopConditions', 'stillReportWhen', 'paths', 'languages', 'keywords', 'symbols'] as const;
 const TEXT_FIELDS = ['name', 'description', 'title', 'type', 'scopeType'] as const;
 
 function fields(before: Skill | undefined, after: Skill): FieldChange[] {
@@ -29,6 +29,8 @@ function fields(before: Skill | undefined, after: Skill): FieldChange[] {
   const refs = (s?: Skill) => Object.entries(s?.references ?? {}).map(([k, v]) => `${k} (${Buffer.byteLength(v)} bytes)`);
   const ra = refs(before), rb = refs(after);
   if (ra.join() !== rb.join()) out.push({ field: 'references', removed: ra.filter(v => !rb.includes(v)), added: rb.filter(v => !ra.includes(v)) });
+  const anchor = (s?: Skill) => s?.anchor ? `${s.anchor.path} (${s.anchor.lineCount} lines, SHA-256 ${s.anchor.sha256.slice(0, 12)})` : '';
+  if (anchor(before) !== anchor(after)) out.push({ field: 'anchor', before: anchor(before), after: anchor(after) });
   const deps = (s?: Skill) => (s?.dependencies ?? []).map(d => `${d.path}@${d.hash.slice(0, 12)}`);
   const a = deps(before), b = deps(after);
   if (a.join() !== b.join()) out.push({ field: 'dependencies', removed: a.filter(v => !b.includes(v)), added: b.filter(v => !a.includes(v)) });

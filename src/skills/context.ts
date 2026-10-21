@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { contentOf, digest, SkillBank } from './bank.ts';
-import { renderSkillMarkdown, SKILL_FORMAT } from './skill-md.ts';
+import { renderSkillMarkdown, skillFormat } from './skill-md.ts';
 import { SKILL_LIMITS, SKILL_POLICY } from './contracts.ts';
 import type { SkillPackage, SkillBinding, Skill } from './contracts.ts';
 import type { SnapshotStore } from '../snapshot/store.ts';
@@ -77,7 +77,7 @@ export function skillReader(pkg:SkillPackage, runDir:string) {
     if(loaded.has(input.id)) return {materialType:'review_skill',evidenceEligible:false,status:'already_loaded',id:entry.skill.id,revision:entry.skill.revision};
     // Legacy Skills (no name/description) keep the body shape they were frozen with, so replays read the same material.
     const s=entry.skill; const body=s.name&&s.description
-      ? {materialType:'review_skill',evidenceEligible:false,id:s.id,revision:s.revision,state:s.state,freshness:entry.freshness,format:SKILL_FORMAT,markdown:renderSkillMarkdown(contentOf(s)),references:Object.keys(s.references??{})}
+      ? {materialType:'review_skill',evidenceEligible:false,id:s.id,revision:s.revision,state:s.state,freshness:entry.freshness,format:skillFormat(s),markdown:renderSkillMarkdown(contentOf(s)),references:Object.keys(s.references??{})}
       : {materialType:'review_skill',evidenceEligible:false,skill:s,freshness:entry.freshness}; const size=Buffer.byteLength(JSON.stringify(body));
     if(events.length>=pkg.limits.bodies||bytes+size>pkg.limits.bodyBytes||(s.state==='trial'&&trial>=pkg.limits.trial)) throw Error('Skill reading budget exhausted');
     const event={id:s.id,revision:s.revision,contentSha256:s.contentSha256,ordinal,at:new Date().toISOString(),bytes:size,estimatedTokens:Math.ceil(size/4),truncated:false as const};

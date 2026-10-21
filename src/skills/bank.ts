@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { sha256, writeJson, safePath } from '../infrastructure/files.ts';
 import { BASE_SYSTEM_PROMPT } from '../engine/prompt.ts';
 import { SKILL_LIMITS } from './contracts.ts';
-import type { ApprovalDecision, BankSnapshot, ComparisonEntry, LearningInput, LearningOperation, Proposal, ProposedChange, Skill, SkillContent, SkillSource } from './contracts.ts';
+import type { ApprovalDecision, BankSnapshot, ComparisonEntry, LearningInput, LearningOperation, Proposal, ProposedChange, Skill, SkillContent, SkillSource, TradeoffAnchor } from './contracts.ts';
 import { nearestSkills, normalizeContent, SIMILARITY_POLICY } from './normalize.ts';
 import { checkComparison } from './novelty.ts';
 import { parseReferences, SKILL_FORMAT_LIMITS } from './skill-md.ts';
@@ -14,15 +14,19 @@ export const digest = (value: unknown) => sha256(JSON.stringify(value));
 const hash = (value: string) => { if (!/^[a-f0-9]{64}$/.test(value)) throw Error('Invalid knowledge object hash'); return value; };
 export function skillId(value: string): string { if (!/^sk_[a-z0-9_-]{1,64}$/.test(value)) throw Error('Invalid skill ID'); return value; }
 export function proposalId(value: string): string { if (!/^pr_[a-f0-9]{24}$/.test(value)) throw Error('Invalid proposal ID'); return value; }
-export function contentOf(s: Skill): SkillContent { return { ...(s.name?{name:s.name}:{}), ...(s.description?{description:s.description}:{}), ...(s.references?{references:s.references}:{}), ...(s.scopeType?{scopeType:s.scopeType}:{}), ...(s.symbols?{symbols:s.symbols}:{}), type:s.type, title:s.title, conditions:s.conditions, steps:s.steps, counterexamples:s.counterexamples, stopConditions:s.stopConditions, paths:s.paths, languages:s.languages, keywords:s.keywords, dependencies:s.dependencies }; }
+export function contentOf(s: Skill): SkillContent { return { ...(s.name?{name:s.name}:{}), ...(s.description?{description:s.description}:{}), ...(s.references?{references:s.references}:{}), ...(s.scopeType?{scopeType:s.scopeType}:{}), ...(s.symbols?{symbols:s.symbols}:{}), type:s.type, title:s.title, conditions:s.conditions, steps:s.steps, counterexamples:s.counterexamples, stopConditions:s.stopConditions, ...(s.stillReportWhen?{stillReportWhen:s.stillReportWhen}:{}), paths:s.paths, languages:s.languages, keywords:s.keywords, dependencies:s.dependencies, ...(s.anchor?{anchor:s.anchor}:{}) }; }
+/** ADR 0020: only an explicit, non-simulated human decision on exact frozen lines can create or change an accepted trade-off. */
+export const acceptsTradeoff = (s: SkillSource): s is SkillSource & { anchor: TradeoffAnchor } => s.kind === 'feedback' && s.identity === 'local_user' && !s.simulated && s.verdict === 'accepted_tradeoff' && !!s.anchor;
 /** Layer 2: normalize first, then validate the canonical form that will be hashed and stored. */
 function content(value: unknown): SkillContent {
   if (!value || typeof value !== 'object') throw Error('Missing skill content');
   const c = normalizeContent(value as SkillContent);
-  const keys = ['name','description','references','scopeType','symbols','type','title','conditions','steps','counterexamples','stopConditions','paths','languages','keywords','dependencies'];
-  if (Object.keys(c).some(k => !keys.includes(k)) || !['review_procedure','repo_contract','tool_usage'].includes(c.type)) throw Error('Invalid content fields');
+  const keys = ['name','description','references','scopeType','symbols','type','title','conditions','steps','counterexamples','stopConditions','stillReportWhen','paths','languages','keywords','dependencies','anchor'];
+  if (Object.keys(c).some(k => !keys.includes(k)) || !['review_procedure','repo_contract','tool_usage','accepted_tradeoff'].includes(c.type)) throw Error('Invalid content fields');
   if (c.scopeType !== undefined && !['repository_fact','review_method'].includes(c.scopeType)) throw Error('Invalid scope type');
   if (c.type === 'repo_contract' && c.scopeType === 'review_method') throw Error('Repository contracts require repository_fact scope');
+  if (c.type === 'accepted_tradeoff' && c.scopeType === 'review_method') throw Error('Accepted trade-offs require repository_fact scope');
+  if ((c.type === 'accepted_tradeoff') !== (c.stillReportWhen !== undefined)) throw Error('Still report when is required for accepted trade-offs and allowed only there');
   // skill-md-1: a name and trigger description travel together; references are bounded Markdown, never scripts.
   if ((c.name === undefined) !== (c.description === undefined)) throw Error('Skill name and description are required together');
   if (c.name !== undefined && (typeof c.name !== 'string' || !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(c.name) || c.name.length > 64)) throw Error('Invalid Skill name; use lowercase kebab-case up to 64 characters');
@@ -32,14 +36,21 @@ function content(value: unknown): SkillContent {
   if (c.name !== undefined && c.scopeType === 'review_method' && Array.isArray(c.paths) && c.paths.some(p => typeof p === 'string' && /\.[A-Za-z0-9]+$/.test(p.split('/').at(-1) ?? ''))) throw Error('Review methods scope by module directory, not single files; use a repository_fact for file-specific knowledge');
   if (c.symbols !== undefined && (!Array.isArray(c.symbols) || c.symbols.length > 8 || c.symbols.some(s=>typeof s !== 'string'||!s.trim()||s.length>600))) throw Error('Invalid symbols');
   if (typeof c.title !== 'string' || c.title.length < 5 || c.title.length > 140) throw Error('Invalid title');
-  for (const k of ['conditions','steps','counterexamples','stopConditions','paths','languages','keywords'] as const) {
+  for (const k of ['conditions','steps','counterexamples','stopConditions','paths','languages','keywords',...(c.stillReportWhen !== undefined ? ['stillReportWhen'] as const : [])] as const) {
     if (!Array.isArray(c[k]) || c[k].length > 8 || c[k].some(v => typeof v !== 'string' || !v.trim() || v.length > 600)) throw Error(`Invalid ${k}`);
   }
   if (!c.conditions.length || c.steps.length < 2 || !c.counterexamples.length || !c.stopConditions.length || !c.paths.length) throw Error('Conditional procedure, scope, counterexample and stop conditions required');
+  if (c.stillReportWhen !== undefined && !c.stillReportWhen.length) throw Error('Accepted trade-offs require at least one Still report when condition');
   c.paths.forEach(safePath);
   if (!Array.isArray(c.dependencies) || c.dependencies.length > 4) throw Error('Invalid dependencies');
   for (const d of c.dependencies) { safePath(d.path); hash(d.hash); }
   if (c.type === 'repo_contract' && !c.dependencies.length) throw Error('Repository contracts require frozen file dependencies');
+  if (c.anchor !== undefined) {
+    const a = c.anchor;
+    if (c.type !== 'accepted_tradeoff' || !a || typeof a !== 'object' || Object.keys(a).sort().join() !== 'lineCount,path,sha256' || !Number.isInteger(a.lineCount) || a.lineCount < 1 || a.lineCount > 200) throw Error('Invalid accepted trade-off anchor');
+    safePath(a.path); hash(a.sha256);
+    if (!c.paths.some(p => a.path === p || a.path.startsWith(p + '/'))) throw Error('Accepted trade-off paths must cover its anchor');
+  }
   if (Buffer.byteLength(JSON.stringify(c)) > (c.references ? 4500 + SKILL_FORMAT_LIMITS.references * SKILL_FORMAT_LIMITS.referenceBytes : 4500)) throw Error('Skill content exceeds byte limit');
   // Exact overlap is deterministic; broader semantic deduplication remains a model responsibility.
   if (c.steps.every(step => BASE_SYSTEM_PROMPT.toLowerCase().includes(step.toLowerCase()))) throw Error('Procedure already covered by fixed rules');
@@ -145,7 +156,13 @@ export class SkillBank {
       const trusted = input.source.kind==='feedback' && input.source.trust==='trusted' && input.source.verdict!=='uncertain' && !!(input.source.range || input.source.findingId);
       if (op.op==='retire' && !trusted) throw Error('Retirement requires contextual trusted correction');
       if ((op.op==='add'||op.op==='revise') !== !!op.content) throw Error('Unexpected content replacement');
-      const c = op.content ? content(op.content) : contentOf(old!);
+      // The learner never supplies an anchor; an accepted trade-off takes it from the human source alone.
+      if (op.content && 'anchor' in op.content) throw Error('Accepted trade-off anchor is host-recorded; remove anchor');
+      const tradeoff = op.content?.type === 'accepted_tradeoff' || old?.type === 'accepted_tradeoff';
+      if (tradeoff && op.op !== 'retire' && !acceptsTradeoff(input.source)) throw Error('Accepted trade-offs come only from local user accepted_tradeoff feedback on a source range');
+      if (tradeoff && op.op === 'retire' && (input.source.identity !== 'local_user' || input.source.simulated)) throw Error('Retirement requires contextual trusted correction');
+      const c = op.content ? content(op.content.type === 'accepted_tradeoff' ? { ...op.content, anchor: input.source.anchor } : op.content) : contentOf(old!);
+      if (c.type === 'accepted_tradeoff' && !c.anchor) throw Error('Accepted trade-offs require a host-recorded anchor');
       for (const dep of c.dependencies) {
         const pages = input.sourcePages as Array<{path:string; fileHash?:string}>;
         if (!pages.some(p=>p.path===dep.path && p.fileHash===dep.hash)) throw Error('Dependency is absent from frozen learning source');

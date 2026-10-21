@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { selectLearningContext, learningJsonBytes, LEARNING_CONTEXT_LIMITS, LEARNING_CONTEXT_VERSION } from '../src/skills/learning-context.ts';
 import { learningIdentity } from '../src/skills/identity.ts';
 import { digest } from '../src/skills/bank.ts';
-import { SKILL_POLICY } from '../src/skills/contracts.ts';
+import { SKILL_EXTRACTION_POLICY as SKILL_POLICY } from '../src/skills/contracts.ts';
 const source={id:'run:current',eventId:'run:current',version:1,repositoryKey:'repo:a',runId:'current',snapshotId:'a'.repeat(64),reportSha256:'b'.repeat(64),kind:'run',independenceKey:'c'.repeat(64),identity:'review_runtime',trust:'observed',simulated:false,withdrawn:false,createdAt:'2026-09-30T00:00:00Z'};
 const base=()=>({policy:SKILL_POLICY,source,report:{status:'completed',summary:'score_family handles empty families and fallback ranking',findings:[]},sourcePages:[{path:'font.py',text:'def score_family(families): return 1 / len(families)',fileHash:'d'.repeat(64)}],toolEvents:[],fixedRules:'Keep current evidence and completion rules.',bankSnapshotId:'e'.repeat(64)});
 const skill=(id,extra={})=>({id,revision:1,owner:'learner',repositoryKey:'repo:a',state:'trial',sources:[],createdAt:source.createdAt,contentSha256:'f'.repeat(64),scopeType:'review_method',type:'review_procedure',title:'Trace scoring inputs',conditions:['When ranking changes'],steps:['Inspect the input boundary.','Trace scoring and consumer calls.'],counterexamples:['Empty values may be rejected.'],stopConditions:['Stop if the boundary excludes empty lists.'],paths:['font.py'],languages:['Python'],keywords:['score_family'],symbols:[],dependencies:[],...extra});

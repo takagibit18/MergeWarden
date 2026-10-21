@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readdir, readFile, open, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { digest, SkillBank } from './bank.ts';
-import { SKILL_LIMITS, SKILL_POLICY } from './contracts.ts';
+import { SKILL_EXTRACTION_POLICY, SKILL_LIMITS } from './contracts.ts';
 import type { ApprovalMode, Learner, LearningInput, LearningJob, SkillSource } from './contracts.ts';
 import type { InferenceOptions, ModelSelection } from '../engine/contracts.ts';
 import { readReport, readRun, runPath } from '../engine/reports.ts';
@@ -10,7 +10,7 @@ import { SnapshotStore } from '../snapshot/store.ts';
 import { writeJson } from '../infrastructure/files.ts';
 import { BASE_SYSTEM_PROMPT } from '../engine/prompt.ts';
 import { selectLearningContext } from './learning-context.ts';
-const jobId=(sourceId:string)=>digest([sourceId,SKILL_POLICY]);
+const jobId=(sourceId:string)=>digest([sourceId,SKILL_EXTRACTION_POLICY]);
 export async function enqueue(state:string,sourceId:string):Promise<LearningJob> {
   const id=jobId(sourceId),path=join(state,'skills','jobs',id+'.json');
   return new SkillBank(state).locked(async()=>{
@@ -32,14 +32,16 @@ export async function feedback(state:string,options:FeedbackOptions, evaluation?
   const report=await readReport(state,options.runId),m=await readRun(state,options.runId),store=await SnapshotStore.load(state,m.snapshotId);
   if(typeof options.comment!=='string'||!options.comment.trim()||options.comment.length>6000)throw Error('Feedback must contain 1..6000 characters');
   if(options.findingId&&!report.findings.some(f=>f.id===options.findingId))throw Error('Unknown finding');
-  if(options.verdict&&!['correction','missed_defect','contract','uncertain'].includes(options.verdict))throw Error('Invalid verdict');
+  if(options.verdict&&!['correction','missed_defect','contract','uncertain','accepted_tradeoff'].includes(options.verdict))throw Error('Invalid verdict');
+  if(options.verdict==='accepted_tradeoff'&&!options.range)throw Error('Accepted trade-off feedback requires --path, --start-line and --end-line');
   if(options.relationToReview&&!['supports','contradicts','adds_missing_issue','adds_context'].includes(options.relationToReview))throw Error('Invalid feedback relation');
   if(options.feedbackMetadata){const f=options.feedbackMetadata;if(!evaluation||f.simulation!==true||f.humanReviewed!==false||f.sourceRunId!==options.runId||f.sourceReportHash!==m.reportSha256||f.comment!==options.comment||f.relationToReview!==options.relationToReview||f.targetFindingId!==options.findingId||JSON.stringify(f.missedIssueAnchor)!==JSON.stringify(options.range)||!/^([a-f0-9]{64})$/.test(f.promptHash)||!f.generator||!f.referenceProvenance.length||!Number.isFinite(Date.parse(f.createdAt)))throw Error('Invalid simulated feedback provenance');}
   if(options.relationToReview==='adds_missing_issue'?!options.range:options.relationToReview&&!options.findingId&&!options.range)throw Error('Missing feedback anchor');
-  if(options.range) {const r=options.range;if(!Number.isInteger(r.startLine)||!Number.isInteger(r.endLine)||r.startLine<1||r.endLine<r.startLine||r.endLine-r.startLine>=200)throw Error('Invalid feedback range');const p=await store.source('head',r.path,r.startLine,r.endLine);if(p.status!=='ok'||p.endLine!==r.endLine)throw Error('Feedback range outside frozen source');}
+  let anchor:SkillSource['anchor'];
+  if(options.range) {const r=options.range;if(!Number.isInteger(r.startLine)||!Number.isInteger(r.endLine)||r.startLine<1||r.endLine<r.startLine||r.endLine-r.startLine>=200)throw Error('Invalid feedback range');const p=await store.source('head',r.path,r.startLine,r.endLine);if(p.status!=='ok'||p.endLine!==r.endLine)throw Error('Feedback range outside frozen source');if(options.verdict==='accepted_tradeoff')anchor={path:r.path,lineCount:r.endLine-r.startLine+1,sha256:p.contentSha256};}
   const eventId=options.eventId??'fb-'+randomUUID();if(!/^fb-[a-zA-Z0-9-]{1,80}$/.test(eventId))throw Error('Invalid feedback identity');
   const version=options.version??1;const bank=new SkillBank(state),current=await bank.current();const previous=current.snapshot.sources[eventId];
-  const source:SkillSource={id:eventId+':'+version,eventId,version,repositoryKey:m.skills?.repositoryKey??store.manifest.identity.repositoryId,runId:options.runId,snapshotId:m.snapshotId,reportSha256:m.reportSha256!,kind:'feedback',independenceKey:digest([store.manifest.identity.inputFingerprint,options.comment.trim(),options.findingId??null,options.range??null]),identity:evaluation?'simulation':'local_user',trust:!evaluation||evaluation.trustedProjectReviewer?'trusted':'observed',simulated:!!evaluation,withdrawn:options.withdrawn??false,comment:options.comment,...(options.findingId?{findingId:options.findingId}:{}),...(options.range?{range:options.range}:{}),...(options.verdict?{verdict:options.verdict}:{}),...(options.relationToReview?{relationToReview:options.relationToReview}:{}),...(options.feedbackMetadata?{feedbackMetadata:options.feedbackMetadata}:{}),createdAt:previous&&(await bank.source(previous)).version===version?(await bank.source(previous)).createdAt:new Date().toISOString()};
+  const source:SkillSource={id:eventId+':'+version,eventId,version,repositoryKey:m.skills?.repositoryKey??store.manifest.identity.repositoryId,runId:options.runId,snapshotId:m.snapshotId,reportSha256:m.reportSha256!,kind:'feedback',independenceKey:digest([store.manifest.identity.inputFingerprint,options.comment.trim(),options.findingId??null,options.range??null]),identity:evaluation?'simulation':'local_user',trust:!evaluation||evaluation.trustedProjectReviewer?'trusted':'observed',simulated:!!evaluation,withdrawn:options.withdrawn??false,comment:options.comment,...(options.findingId?{findingId:options.findingId}:{}),...(options.range?{range:options.range}:{}),...(options.verdict?{verdict:options.verdict}:{}),...(anchor?{anchor}:{}),...(options.relationToReview?{relationToReview:options.relationToReview}:{}),...(options.feedbackMetadata?{feedbackMetadata:options.feedbackMetadata}:{}),createdAt:previous&&(await bank.source(previous)).version===version?(await bank.source(previous)).createdAt:new Date().toISOString()};
   return {source,job:await enqueue(state,await bank.saveSource(source))};
 }
 export async function recoverDelivered(state:string,limit=100):Promise<number> {
@@ -61,7 +63,7 @@ export async function buildInput(state:string,ref:string):Promise<LearningInput>
   const boundedReport={status:report.status,summary:report.summary.slice(0,2000),findings:report.findings.filter(f=>!source.findingId||f.id===source.findingId).slice(0,3)};
   const skills=await bank.skills(current.snapshot),supportSources:Record<string,SkillSource>={};
   for(const ref of new Set(skills.filter(s=>s.repositoryKey===source.repositoryKey).flatMap(s=>s.sources)))supportSources[ref]=await bank.source(ref);
-  return selectLearningContext({policy:SKILL_POLICY,source,report:boundedReport,sourcePages,toolEvents,fixedRules:BASE_SYSTEM_PROMPT,bankSnapshotId:current.id},skills,supportSources);
+  return selectLearningContext({policy:SKILL_EXTRACTION_POLICY,source,report:boundedReport,sourcePages,toolEvents,fixedRules:BASE_SYSTEM_PROMPT,bankSnapshotId:current.id},skills,supportSources);
 }
 /** Extract pending sources. With approval 'required' (the default) results are staged as proposals, never published directly. */
 export async function learnPending(state:string,learner:Learner,options:{model:ModelSelection;inference?:InferenceOptions;maxJobs?:number;retryFailed?:boolean;feedbackOnly?:boolean;repositoryKey?:string;timeoutMs?:number;approval?:ApprovalMode}):Promise<LearningJob[]> {
@@ -103,7 +105,7 @@ export async function learnPending(state:string,learner:Learner,options:{model:M
         abort.signal.throwIfAborted();job.usage=result.usage;job.requests=result.requests;await writeJson(join(directory,'output.json'),result);
         const receipt=approval==='auto'?await bank.apply(job.id,input,result.result):await bank.propose(job.id,input,result.result);
         job.status=receipt.outcome;job.snapshotId=receipt.snapshotId;if(receipt.proposalId)job.proposalId=receipt.proposalId;await writeJson(join(directory,'receipt.json'),receipt);
-      } catch(e) {job.status='failed';job.error=e instanceof Error&&/^(Source |Knowledge |Invalid |Skill |Learning |Expected |Unknown |Duplicate |Weak |Target |Retirement |Procedure |Conditional |Unexpected |Dependency |Operation |Missing |Repository |Novelty |Same experience |Near-duplicate |Review methods |SKILL.md |At most |Learned Skills |Return either |Unsupported |Learning output )/.test(e.message)?e.message:'Learning failed; inspect preserved attempt';job.usage??=null;job.requests??=null;try{const metrics=JSON.parse(await readFile(join(directory,'metrics.json'),'utf8'));job.usage=metrics.usage;job.requests=metrics.requests;}catch{/* Unknown provider usage remains null. */}}
+      } catch(e) {job.status='failed';job.error=e instanceof Error&&/^(Source |Knowledge |Invalid |Skill |Learning |Expected |Unknown |Duplicate |Weak |Target |Retirement |Procedure |Conditional |Unexpected |Dependency |Operation |Missing |Repository |Novelty |Same experience |Near-duplicate |Review methods |SKILL.md |At most |Learned Skills |Return either |Unsupported |Learning output |Accepted |Still )/.test(e.message)?e.message:'Learning failed; inspect preserved attempt';job.usage??=null;job.requests??=null;try{const metrics=JSON.parse(await readFile(join(directory,'metrics.json'),'utf8'));job.usage=metrics.usage;job.requests=metrics.requests;}catch{/* Unknown provider usage remains null. */}}
       finally {clearTimeout(timer);job.latencyMs=performance.now()-started;delete job.pid;await writeJson(jobPath,job);await writeJson(join(directory,'job.json'),job);}
       results.push(job);
     }

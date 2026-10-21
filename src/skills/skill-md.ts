@@ -1,12 +1,14 @@
 import type { Skill, SkillContent } from './contracts.ts';
 
 /**
- * SKILL.md interchange format (skill-md-1), modelled on agent Skill packages: YAML frontmatter with a
+ * SKILL.md interchange format (skill-md-2), modelled on agent Skill packages: YAML frontmatter with a
  * name and a trigger-oriented description, a concise Markdown body, and optional reference files that
  * the reviewer opens only when needed. Storage stays content-addressed JSON; this module converts both ways.
  * Learned Skills never carry scripts: reviews are read-only and must not execute learned code.
  */
-export const SKILL_FORMAT = 'skill-md-1';
+export const SKILL_FORMAT = 'skill-md-2';
+/** skill-md-2 only adds *Still report when*; Skills without it keep reading as skill-md-1 so replays see the same body. */
+export const skillFormat = (skill: SkillContent) => skill.stillReportWhen ? SKILL_FORMAT : 'skill-md-1';
 export const SKILL_FORMAT_LIMITS = Object.freeze({ markdownBytes: 6000, references: 2, referenceBytes: 2500 });
 
 /** Body sections, in order. Each maps to one structured field so validation and similarity keep working. */
@@ -15,8 +17,9 @@ const SECTIONS = [
   ['procedure', 'steps'],
   ['not a defect when', 'counterexamples'],
   ['stop when', 'stopConditions'],
+  ['still report when', 'stillReportWhen'],
 ] as const;
-const HEADINGS: Record<(typeof SECTIONS)[number][1], string> = { conditions: 'When to use', steps: 'Procedure', counterexamples: 'Not a defect when', stopConditions: 'Stop when' };
+const HEADINGS: Record<(typeof SECTIONS)[number][1], string> = { conditions: 'When to use', steps: 'Procedure', counterexamples: 'Not a defect when', stopConditions: 'Stop when', stillReportWhen: 'Still report when' };
 const LIST_KEYS = ['paths', 'languages', 'keywords', 'symbols', 'dependencyRefs'] as const;
 const SCALAR_KEYS = ['name', 'description', 'type', 'scope'] as const;
 
@@ -99,6 +102,7 @@ export function parseSkillMarkdown(markdown: string): ParsedSkill {
       const known = SECTIONS.find(([h]) => h === heading);
       if (!known) throw Error(`Unknown SKILL.md section "${h2[1]!.trim()}"; use ${Object.values(HEADINGS).join(', ')}`);
       section = known[1];
+      fields[section] ??= [];
       continue;
     }
     const bullet = /^\s*(?:[-*]|\d+[.)])\s+(.*)$/.exec(line);
@@ -117,6 +121,7 @@ export function parseSkillMarkdown(markdown: string): ParsedSkill {
       name: meta.name as string, description: meta.description as string,
       type: meta.type as SkillContent['type'], ...(scope !== undefined ? { scopeType: scope as NonNullable<SkillContent['scopeType']> } : {}),
       title, conditions: fields.conditions!, steps: fields.steps!, counterexamples: fields.counterexamples!, stopConditions: fields.stopConditions!,
+      ...(fields.stillReportWhen ? { stillReportWhen: fields.stillReportWhen } : {}),
       paths: list('paths'), languages: list('languages'), keywords: list('keywords'), symbols: list('symbols'),
     },
     dependencyRefs: list('dependencyRefs'),
@@ -154,8 +159,10 @@ export function renderSkillMarkdown(skill: SkillContent | Skill): string {
   if ('state' in skill) lines.push(`state: ${skill.state}`, `revision: ${skill.revision}`);
   lines.push('---', '', `# ${skill.title}`);
   for (const [, field] of SECTIONS) {
+    const items = skill[field];
+    if (!items) continue;
     lines.push('', `## ${HEADINGS[field]}`);
-    skill[field].forEach((v, i) => lines.push(field === 'steps' ? `${i + 1}. ${v}` : `- ${v}`));
+    items.forEach((v, i) => lines.push(field === 'steps' ? `${i + 1}. ${v}` : `- ${v}`));
   }
   const references = Object.keys(skill.references ?? {});
   if (references.length) lines.push('', '## References', ...references.map(r => `- references/${r}`));

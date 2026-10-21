@@ -36,7 +36,8 @@ npm run cli -- doctor [--repo PATH] [--state PATH]
 npm run cli -- unlock --repo PATH [--state PATH]
 
 Options: --skills auto|off|replay, --learn auto|off, --comment-file OUTSIDE_PATH,
-         --event ID --version N (edit feedback), --withdrawn true|false, --verdict correction|missed_defect|contract|uncertain,
+         --event ID --version N (edit feedback), --withdrawn true|false, --verdict correction|missed_defect|contract|uncertain|accepted_tradeoff
+         (accepted_tradeoff requires --path/--start-line/--end-line),
          --retry true|false --max-jobs 1..3 (skills learn), --state PATH (outside checkout), --timeout-ms 600000, --max-tools 100,
          --thinking LEVEL (must be supported by the selected model), --max-output-tokens 8192,
          --auth oauth (use explicit Pi login instead of --api-key-env),
