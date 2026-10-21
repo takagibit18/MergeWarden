@@ -60,7 +60,7 @@ export async function buildInput(state:string,ref:string):Promise<LearningInput>
   // Only bounded visible tool outcomes; no assistant thinking or arbitrary session replay.
   const toolEvents:unknown[]=[];
   try {const session=await open(join(runPath(state,source.runId),'session.jsonl'),'r');try {const b=Buffer.alloc(64000);const {bytesRead}=await session.read(b,0,b.length,0);const lines=b.subarray(0,bytesRead).toString('utf8').split('\n');lines.pop();for(const line of lines){try{const row=JSON.parse(line),msg=row.message;if(msg?.role==='toolResult'&&toolEvents.length<6)toolEvents.push({tool:msg.toolName,isError:msg.isError===true,observation:JSON.stringify(msg.content).slice(0,500)});}catch{/* partial row */}}}finally{await session.close();}}catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e;}
-  const boundedReport={status:report.status,summary:report.summary.slice(0,2000),findings:report.findings.filter(f=>!source.findingId||f.id===source.findingId).slice(0,3)};
+  const boundedReport={status:report.status,summary:report.summary.slice(0,2000),findings:[...report.findings,...report.knownAccepted??[]].filter(f=>!source.findingId||f.id===source.findingId).slice(0,3)};
   const skills=await bank.skills(current.snapshot),supportSources:Record<string,SkillSource>={};
   for(const ref of new Set(skills.filter(s=>s.repositoryKey===source.repositoryKey).flatMap(s=>s.sources)))supportSources[ref]=await bank.source(ref);
   return selectLearningContext({policy:SKILL_EXTRACTION_POLICY,source,report:boundedReport,sourcePages,toolEvents,fixedRules:BASE_SYSTEM_PROMPT,bankSnapshotId:current.id},skills,supportSources);

@@ -10,7 +10,7 @@ import { readReport, readRun } from '../src/engine/reports.ts';
 import { SnapshotStore } from '../src/snapshot/store.ts';
 import { freezeSkills } from '../src/skills/context.ts';
 import { SkillBank } from '../src/skills/bank.ts';
-import { feedback, learnPending } from '../src/skills/learning.ts';
+import { buildInput, feedback, learnPending } from '../src/skills/learning.ts';
 import { learningIdentity } from '../src/skills/identity.ts';
 import { parseSkillMarkdown, renderSkillMarkdown } from '../src/skills/skill-md.ts';
 
@@ -149,6 +149,19 @@ test('a cited finding on the accepted lines moves to Known and accepted, severe 
   const recovered = new ReviewController(journal, run.runId, report.snapshot); await recovered.restore();
   assert.deepEqual(recovered.report(), report);
   assert.deepEqual(await readReport(f.state, run.runId), report);
+});
+
+test('feedback on a Known and accepted finding gives the learner that finding with its citation', async t => {
+  const f = await fixture(t), skill = await acceptTradeoff(f);
+  const run = await new ReviewEngine(runtime(async tools => {
+    await tools.read_review_skill({ id: skill.id }); await tools.read_diff({ path: 'app.py' });
+    const page = await tools.read_source({ revision: 'head', path: 'app.py', startLine: 1, endLine: 2 });
+    await tools.submit_review({ summary: 'Synthetic test only', reviewedPaths: ['app.py'], findings: [{ id: 'folded', ...cite(skill.id), evidence: [{ evidenceRefId: page._mergewarden.evidenceRefId }] }] });
+  })).run(await laterChange(f));
+  assert.equal(run.report.knownAccepted.length, 1);
+  const { job } = await feedback(f.state, { runId: run.runId, findingId: 'folded', comment: 'Still accepted after this change.' });
+  const input = await buildInput(f.state, job.sourceId);
+  assert.deepEqual(input.report.findings.map(x => [x.id, x.acceptedTradeoff]), [['folded', { skillId: skill.id, revision: skill.revision, note: 'No new caller; count is still validated upstream.' }]]);
 });
 
 test('an uncited or unread accepted trade-off folds nothing', async t => {
