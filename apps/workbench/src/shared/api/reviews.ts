@@ -50,7 +50,7 @@ export async function getReport(projectId: string, runId: string, signal?: Abort
   const { report, review } = response;
   if (review.projectId !== projectId || report.runId !== runId || review.runId !== runId || review.snapshotId !== report.snapshot.id
     || review.reportAvailability !== 'verified' || review.status !== report.status
-    || report.findings.some(finding => finding.evidence.some(ref => ref.snapshotId !== report.snapshot.id))) throw identityError();
+    || [...report.findings, ...report.knownAccepted ?? []].some(finding => finding.evidence.some(ref => ref.snapshotId !== report.snapshot.id))) throw identityError();
   return response;
 }
 

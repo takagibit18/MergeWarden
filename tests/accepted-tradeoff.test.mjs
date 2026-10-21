@@ -8,6 +8,7 @@ import { MemoryJournal } from '../src/adapters/memory-journal.ts';
 import { ReviewController } from '../src/application/review-controller.ts';
 import { readReport, readRun } from '../src/engine/reports.ts';
 import { SnapshotStore } from '../src/snapshot/store.ts';
+import { VerifiedArtifacts } from '../src/application/workbench/verified-artifacts.ts';
 import { freezeSkills } from '../src/skills/context.ts';
 import { SkillBank } from '../src/skills/bank.ts';
 import { buildInput, feedback, learnPending } from '../src/skills/learning.ts';
@@ -149,6 +150,11 @@ test('a cited finding on the accepted lines moves to Known and accepted, severe 
   const recovered = new ReviewController(journal, run.runId, report.snapshot); await recovered.restore();
   assert.deepEqual(recovered.report(), report);
   assert.deepEqual(await readReport(f.state, run.runId), report);
+  const repositoryPath = (await readRun(f.state, run.runId)).repositoryPath, at = new Date().toISOString();
+  const artifacts = new VerifiedArtifacts({ id: 'project', name: 'fixture', repositoryPath, createdAt: at, workspaces: [{ id: 'w'.repeat(64), name: 'fixture', path: repositoryPath, kind: 'primary', registeredAt: at }] }, f.state);
+  const item = await artifacts.runItem(run.runId);
+  assert.equal(item.findingCount, 2); assert.equal(item.knownAcceptedCount, 1);
+  assert.equal((await artifacts.runItem(f.run.runId)).knownAcceptedCount, undefined);
 });
 
 test('feedback on a Known and accepted finding gives the learner that finding with its citation', async t => {

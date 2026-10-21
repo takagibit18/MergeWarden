@@ -66,7 +66,8 @@ export class HistoryProjection implements HistoryProjectionPort {
       reportAvailability: item.reportAvailability, ...(item.taskId ? { taskId: item.taskId } : {}), ...(item.runId ? { runId: item.runId } : {}),
       ...(item.finishedAt ? { finishedAt: item.finishedAt } : {}), ...(item.snapshotId ? { snapshotId: item.snapshotId } : {}),
       ...(item.model ? { model: { provider: item.model.provider, modelId: item.model.modelId } } : {}),
-      ...(item.findingCount === undefined ? {} : { findingCount: item.findingCount }), ...(item.liveness ? { liveness: item.liveness } : {}),
+      ...(item.findingCount === undefined ? {} : { findingCount: item.findingCount }),
+      ...(item.knownAcceptedCount === undefined ? {} : { knownAcceptedCount: item.knownAcceptedCount }), ...(item.liveness ? { liveness: item.liveness } : {}),
       ...(item.error ? { error: { code: item.error.code, message: item.error.message } } : {}) };
   }
 

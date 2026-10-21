@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { encodeFindingId } from '@mergewarden/contracts';
 import { ApiError, describeError } from './client';
 import { getEvidence, getEvidenceDiff, getHistory, getReport, getTask } from './reviews';
-import { evidenceDiffResponse, evidenceResponse, finding, historyResponse, jsonResponse, projectId, reportResponse, runId, taskId } from '../../test/fixtures';
+import { evidenceDiffResponse, evidenceRef, evidenceResponse, finding, historyResponse, jsonResponse, projectId, reportResponse, runId, taskId } from '../../test/fixtures';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -28,6 +28,13 @@ describe('read-only API boundary', () => {
   it('rejects a report from another run or a finding from another snapshot', async () => {
     const response = reportResponse();
     response.report.findings[0]!.evidence[0]!.snapshotId = 'e'.repeat(64);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(response)));
+    await expect(getReport(projectId, runId)).rejects.toMatchObject({ code: 'IDENTITY_MISMATCH' });
+  });
+
+  it('rejects a Known and accepted finding from another snapshot', async () => {
+    const response = reportResponse();
+    response.report.knownAccepted = [finding({ id: 'accepted', acceptedTradeoff: { skillId: 'sk_ratio_1', revision: 1, note: 'Accepted.' }, evidence: [evidenceRef({ snapshotId: 'e'.repeat(64) })] })];
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(response)));
     await expect(getReport(projectId, runId)).rejects.toMatchObject({ code: 'IDENTITY_MISMATCH' });
   });

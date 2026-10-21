@@ -18,7 +18,7 @@ const isMissing = (error: unknown) => (error as NodeJS.ErrnoException)?.code ===
 
 /** Drop anything derived from an unverified report, including its summary title. */
 export function unverifiable(item: HistoryItem): HistoryItem {
-  const { findingCount: _count, title: _title, ...metadata } = item;
+  const { findingCount: _count, knownAcceptedCount: _accepted, title: _title, ...metadata } = item;
   return { ...metadata, status: null, reportAvailability: 'unavailable',
     error: { code: 'REPORT_INTEGRITY', message: 'The native record could not be verified. No report delivery is confirmed.' } };
 }
@@ -141,7 +141,7 @@ export class VerifiedArtifacts {
       }
       const report = this.reportDto(native);
       const item: HistoryItem = { ...this.runMetadata(run), status: report.status, scope: snapshot.manifest.input.kind,
-        findingCount: report.findings.length, reportAvailability: 'verified' };
+        findingCount: report.findings.length, ...(report.knownAccepted ? { knownAcceptedCount: report.knownAccepted.length } : {}), reportAvailability: 'verified' };
       return { run, report, snapshot, item: { ...item, ...summaryTitle(report.summary) } };
     } catch (error) {
       if (error instanceof WorkbenchError && error.code === 'REPOSITORY_MISMATCH') throw error;

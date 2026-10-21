@@ -29,6 +29,8 @@ export interface HistoryItem {
   model?: { provider: string; modelId: string } | undefined;
   snapshotId?: string | undefined;
   findingCount?: number | undefined;
+  /** Findings folded into Known and accepted; present only when the verified report has any. */
+  knownAcceptedCount?: number | undefined;
   reportAvailability: 'verified' | 'not_delivered' | 'unavailable';
   liveness?: 'unknown' | 'owner_present' | 'owner_exited' | undefined;
   error?: { code: string; message: string } | undefined;

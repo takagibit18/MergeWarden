@@ -216,6 +216,15 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--text-secondary)
 .evidence-verification .delivery-ok { font-size: 11px; }
 .evidence-section > .ant-alert { margin-top: 16px; }
 .compact-list { padding-left: 16px; margin: 0; font-size: 12px; }
+.known-accepted { border-top: 1px solid var(--border); }
+.known-accepted > summary { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 16px 0; cursor: pointer; }
+.known-accepted > summary h2 { display: inline; }
+.known-accepted-list { margin: 0; padding: 0; list-style: none; }
+.known-accepted-list > li { padding: 12px 0; border-top: 1px solid var(--border-subtle); font-size: 13px; overflow-wrap: anywhere; }
+.known-accepted-list p { margin: 6px 0 0; }
+.known-accepted-heading { display: flex; gap: 8px; align-items: baseline; }
+.known-accepted-heading h3 { margin: 0; font-size: 13px; }
+.known-accepted-count { display: block; }
 .coverage-surface { border-top: 1px solid var(--border); }
 .coverage-surface .section-heading { padding: 16px 0; }
 .coverage-list { max-height: 360px; overflow: auto; }

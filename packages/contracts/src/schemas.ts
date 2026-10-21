@@ -39,6 +39,7 @@ export const historyItemSchema: z.ZodType<HistoryItem> = z.object({
   model: z.object({ provider: z.string(), modelId: z.string() }).strict().optional(),
   snapshotId: sha256Schema.optional(),
   findingCount: count.optional(),
+  knownAcceptedCount: count.optional(),
   reportAvailability: z.enum(['verified', 'not_delivered', 'unavailable']),
   liveness: z.enum(['unknown', 'owner_present', 'owner_exited']).optional(),
   error: z.object({ code: z.string(), message: z.string() }).strict().optional(),
