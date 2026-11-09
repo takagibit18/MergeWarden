@@ -26,6 +26,9 @@ import { LazyCodeGraph } from "../graph/lazy-graph.ts";
 import { LazyLocAgent } from "../experiments/locagent/lazy.ts";
 import type { Relation } from "../graph/contracts.ts";
 import { deliver, readRun, runPath } from "./reports.ts";
+import { NavigationRecorder } from "./navigation-recorder.ts";
+import { DEFAULT_LANGUAGE_IDS, displayNames, effectiveLanguages, enabledLanguages, LEGACY_LANGUAGE_IDS } from "../graph/languages/index.ts";
+import type { NavigationRecord } from "./navigation-contracts.ts";
 import type { FinalSubmission, FinalSubmissionInput, ReviewOptions, ReviewProgress, ReviewResult, ReviewRuntime, RunManifest, RuntimeFactory, RuntimeTool } from "./contracts.ts";
 const string = { type: "string", minLength: 1, maxLength: 4000 };
 const revision = { type: "string", enum: ["base", "head"] };
@@ -124,17 +127,22 @@ export class ReviewEngine {
       const repositoryKey = options.skillRepositoryKey ?? oldRun?.skills?.repositoryKey ?? store.manifest.identity.repositoryId;
       if (!repositoryKey || repositoryKey.length > 200) throw Error('Invalid host Skill repository key');
       const skillMode = options.skills ?? (options.rerunId ? 'replay' : options.evaluation ? 'off' : 'auto');
-      const skillPackage = await freezeSkills(stateDir, store, skillMode, repositoryKey, oldRun);
+      // Reruns keep their run's languages; historical runs were Python-only. Evaluations pin Python unless they choose.
+      const graphLanguages = enabledLanguages(options.languages ?? oldRun?.graphLanguages ?? (oldRun || options.evaluation ? LEGACY_LANGUAGE_IDS : DEFAULT_LANGUAGE_IDS)).map(item => item.id);
+      manifest.graphLanguages = graphLanguages;
+      const skillPackage = await freezeSkills(stateDir, store, skillMode, repositoryKey, oldRun, graphLanguages);
       manifest.skills = await savePackage(runDir, skillPackage); manifest.learningPolicy = learningPolicy; const rules = skillRules(skillPackage);
       const skillReads = skillReader(skillPackage, runDir);
       manifest.reviewPolicy = variant ? { version: `${REVIEW_DECISION_POLICY_VERSION}+${investigation}`, sha256: sha256(JSON.stringify([REVIEW_DECISION_POLICY, variant.prompt, variant.summary])) } : { version: REVIEW_DECISION_POLICY_VERSION, sha256: sha256(REVIEW_DECISION_POLICY) };
+      const languageNames = displayNames(effectiveLanguages(graphLanguages, Object.keys(store.manifest.head)));
       await writeJson(join(runDir, "run.json"), manifest);
       const preparedOnly = options.evaluation?.graphMode === "prepared_only";
-      graph = new LazyCodeGraph(stateDir, store.manifest.identity.id, { preparedOnly });
+      graph = new LazyCodeGraph(stateDir, store.manifest.identity.id, { preparedOnly, languages: graphLanguages });
       retrieval = options.evaluation?.tools === "text+locagent" ? new LazyLocAgent(stateDir, store.manifest.identity.id, options.evaluation.retrieval, { preparedOnly }) : undefined;
       const graphEnabled = options.evaluation?.tools !== "text-only";
       manifest.toolExposure = retrieval ? "text+locagent" : graphEnabled ? "text+graph" : "text-only";
       let navigationDegraded = false; let navigationErrors = 0;
+      const navigation = manifest.toolExposure === "text-only" ? undefined : new NavigationRecorder({ runId, snapshotId: store.manifest.identity.id, toolExposure: manifest.toolExposure });
       const sourceReads = new Set<string>();
       const evidenceRegistry = new EvidenceRegistry(store.manifest.identity.id);
       const sourceKey = (e: { revision: string; path: string; startLine: number; endLine: number; contentSha256: string }) => JSON.stringify([e.revision, e.path, e.startLine, e.endLine, e.contentSha256]);
@@ -217,13 +225,13 @@ export class ReviewEngine {
       if (skillPackage.selected.length) tools.push(tool('read_review_skill', 'Read a SKILL.md from this frozen catalog by ID when its description matches the change; pass reference to open one file it lists. Historical experience, not current source evidence; verify using read_source.', object({ id: string, reference: string }, ['id']), input => skillReads.read(input, gate.counts.model.executed)));
       if (graphEnabled && !retrieval) {
         const limit = { type: "integer", minimum: 1, maximum: 100 }; const cursor = { type: "string", maxLength: 256 };
-        const graphResult = async (run: () => Promise<import("../graph/contracts.ts").GraphPage<unknown>>) => {
-          try { const page = await run(); if (["error", "not_indexed", "building"].includes(page.status)) { navigationDegraded = true; navigationErrors++; } return page; }
-          catch (error) { navigationDegraded = true; navigationErrors++; throw error; }
+        const graphResult = async (op: "graph_lookup" | "graph_neighbors", input: Record<string, unknown>, run: () => Promise<import("../graph/contracts.ts").GraphPage<unknown>>) => {
+          try { const page = await run(); if (["error", "not_indexed", "building"].includes(page.status)) { navigationDegraded = true; navigationErrors++; } navigation?.graphPage(op, input, page); return page; }
+          catch (error) { navigationDegraded = true; navigationErrors++; navigation?.graphError(op, input, error); throw error; }
         };
         tools.splice(3, 0,
-          tool("graph_lookup", "Resolve a changed or relevant Python directory, file, class, or function to its graph entity before relationship traversal. Use this when review reasoning needs callers, imports, inheritance, containment, or dependencies outside the relevant code already inspected. Lookup is exact by entity ID, name, path, or qualified name; use graph_neighbors after resolution and verify relevant code with read_source.", object({ query: string, limit, cursor }, ["query", "limit"]), async input => graphResult(() => graph!.lookup({ snapshotId: store.manifest.identity.id, query: text(input.query), limit: number(input.limit, 20), ...(input.cursor === undefined ? {} : { cursor: text(input.cursor) }) }, abort.signal))),
-          tool("graph_neighbors", "Discover one-hop definite structural relationships around a resolved entity. Incoming CALLS can reveal untouched callers; INHERITS identifies base/derived classes; IMPORTS and CONTAINS expose module and repository structure. Ordinary identifier references are not indexed, so use search_text for those. Use focused relation and direction queries to discover previously unseen relevant code. Results may be incomplete; verify relevant locations with read_source.", object({ symbolId: string, relation: { type: "string", enum: ["CALLS", "INHERITS", "CONTAINS", "IMPORTS"] }, direction: { type: "string", enum: ["incoming", "outgoing"] }, limit, cursor }, ["symbolId", "relation", "direction", "limit"]), async input => graphResult(() => graph!.neighbors({ snapshotId: store.manifest.identity.id, symbolId: text(input.symbolId), relation: text(input.relation) as Relation, direction: text(input.direction) as "incoming" | "outgoing", limit: number(input.limit, 20), ...(input.cursor === undefined ? {} : { cursor: text(input.cursor) }) }, abort.signal))),
+          tool("graph_lookup", `Resolve a changed or relevant ${languageNames} directory, file, class, or function to its graph entity before relationship traversal. Use this when review reasoning needs callers, imports, inheritance, containment, or dependencies outside the relevant code already inspected. Lookup is exact by entity ID, name, path, or qualified name; use graph_neighbors after resolution and verify relevant code with read_source.`, object({ query: string, limit, cursor }, ["query", "limit"]), async input => graphResult("graph_lookup", input, () => graph!.lookup({ snapshotId: store.manifest.identity.id, query: text(input.query), limit: number(input.limit, 20), ...(input.cursor === undefined ? {} : { cursor: text(input.cursor) }) }, abort.signal))),
+          tool("graph_neighbors", "Discover one-hop definite structural relationships around a resolved entity. Incoming CALLS can reveal untouched callers; INHERITS identifies base/derived classes; IMPORTS and CONTAINS expose module and repository structure. Ordinary identifier references are not indexed, so use search_text for those. Use focused relation and direction queries to discover previously unseen relevant code. Results may be incomplete; verify relevant locations with read_source.", object({ symbolId: string, relation: { type: "string", enum: ["CALLS", "INHERITS", "CONTAINS", "IMPORTS"] }, direction: { type: "string", enum: ["incoming", "outgoing"] }, limit, cursor }, ["symbolId", "relation", "direction", "limit"]), async input => graphResult("graph_neighbors", input, () => graph!.neighbors({ snapshotId: store.manifest.identity.id, symbolId: text(input.symbolId), relation: text(input.relation) as Relation, direction: text(input.direction) as "incoming" | "outgoing", limit: number(input.limit, 20), ...(input.cursor === undefined ? {} : { cursor: text(input.cursor) }) }, abort.signal))),
         );
       }
       if (retrieval) tools.splice(3, 0, ...retrieval.definitions().map(t => tool(t.name, t.description, t.schema, async (input, origin) => {
@@ -251,6 +259,7 @@ export class ReviewEngine {
         };
         dispatch = dispatchV2 ? new ProgressiveInvestigation({ ...dispatchOptions,
           source: async (path, startLine, endLine) => ({ ...await store.source('head', path, startLine, endLine) }),
+          ...(navigation ? { navigation } : {}),
         }) : new StructuralDispatch(dispatchOptions);
         if (dispatchV2) tools.push(tool('expand_structural_candidate', 'Read one delivered structural candidate as immutable source evidence. Supply only its candidateRefId. Stop when the review question has enough evidence.',
           object({ candidateRefId: { type: 'string', minLength: 1, maxLength: 80 } }, ['candidateRefId']), async input => {
@@ -258,7 +267,7 @@ export class ReviewEngine {
             return (dispatch as ProgressiveInvestigation).expand(text(input.candidateRefId));
           }));
       }
-      const declarationChanges = dispatchV2 || options.evaluation?.declarationAware ? await snapshotChanges(store) : undefined;
+      const declarationChanges = dispatchV2 || options.evaluation?.declarationAware ? await snapshotChanges(store, graphLanguages) : undefined;
       runtime = await this.factory({ repositoryPath: repository, runDir, stateDir, model: options.model, ...(rules ? { skillRules: rules } : {}), ...(options.evaluation?.contextCwd ? {contextCwd:await isolatedState(options.evaluation.contextCwd,repository)} : {}), budgetState: () => budget.state(), ...(options.inference ? { inference: options.inference } : {}), tools, ...(options.evaluation ? { evaluation: true } : {}), ...(routingEnabled ? { routing: { ...(declarationChanges ? {declarationChanges} : {}), ...(dispatch ? { dispatch } : {}), ...(routingTextOnly ? { textOnly: true } : {}), variant: options.evaluation!.routing as Exclude<import("./routing-contracts.ts").RoutingMode, "none">, snapshotId: store.manifest.identity.id, changedPaths: [...store.manifest.changedPaths], ...(options.evaluation?.routingBudget ? { budget: options.evaluation.routingBudget } : {}), onBlockedCall } } : {}) });
       if (runtime.configuration) manifest.runtimeConfiguration = runtime.configuration();
       abort.signal.throwIfAborted();
@@ -299,7 +308,8 @@ export class ReviewEngine {
       if (dispatch) manifest.metrics.dispatch = { ...dispatch.metrics, operations: gate.counts.host_dispatch, graphBackendRequests: hostGraphCalls, sourceReadOperations: hostSourceReadOperations };
       if (runtime.routingMetrics) manifest.metrics.routing = runtime.routingMetrics();
       notify({ phase: "delivering", runId });
-      const paths = await this.delivery(stateDir, manifest, report);
+      const navigationRecord = navigation ? await finishNavigation(navigation, graph!, store.manifest.identity.id, abort.signal) : undefined;
+      const paths = await this.delivery(stateDir, manifest, report, navigationRecord ? { navigation: navigationRecord } : undefined);
       clearTimeout(timer);
       let learning: {status:string; jobs?:import('../skills/contracts.ts').LearningJob[]} | undefined;
       if (learningPolicy === 'auto') {
@@ -322,4 +332,19 @@ export class ReviewEngine {
       try { runtime?.dispose(); } finally { if (locked) await rm(locked, { force: true }); }
     }
   }
+}
+
+/**
+ * Complete the self-contained navigation record. Missing endpoint facts are described from the
+ * already-published graph within a short bound; failure only marks the record incomplete.
+ */
+async function finishNavigation(recorder: NavigationRecorder, graph: LazyCodeGraph, snapshotId: string, signal: AbortSignal): Promise<NavigationRecord | { unavailable: string }> {
+  const missing = recorder.missingEntityIds();
+  if (missing.length && !signal.aborted) {
+    try {
+      const facts = await graph.describe({ snapshotId, entityIds: missing.slice(0, 5000) }, AbortSignal.timeout(5000));
+      if (facts) recorder.describe(facts);
+    } catch { /* Entity metadata is optional; the record states entityFactsComplete=false. */ }
+  }
+  return recorder.finish() ?? { unavailable: recorder.failure ?? "Navigation recording failed" };
 }

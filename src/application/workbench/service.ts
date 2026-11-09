@@ -1,5 +1,5 @@
 import { basename, isAbsolute } from 'node:path';
-import type { DiffQuery, EvidenceDiffResponse, EvidenceResponse, HistoryQuery, HistoryResponse, ProjectDto, ProjectsResponse, RegisterProjectInput, RegisterWorkspaceInput, ReportResponse, TaskResponse } from '../../../packages/contracts/src/types.ts';
+import type { DiffQuery, EvidenceDiffResponse, EvidenceResponse, HistoryQuery, HistoryResponse, NavigationResponse, NavigationSourceResponse, ProjectDto, ProjectsResponse, RegisterProjectInput, RegisterWorkspaceInput, ReportResponse, TaskResponse } from '../../../packages/contracts/src/types.ts';
 import { REVIEW_SCOPES, REVIEW_STATUSES } from '../../../packages/contracts/src/constants.ts';
 import { isSha256 } from '../../domain/validation.ts';
 import { inside } from '../../infrastructure/files.ts';
@@ -152,6 +152,14 @@ export class WorkbenchService {
 
   async evidence(projectId: string, runId: string, findingId: string, evidenceIndex = 0): Promise<EvidenceResponse> {
     return this.artifacts(projectId).evidence(runId, findingId, evidenceIndex);
+  }
+
+  async navigation(projectId: string, runId: string): Promise<NavigationResponse> {
+    return this.artifacts(projectId).navigation(runId);
+  }
+
+  async navigationSource(projectId: string, runId: string, entityId: string): Promise<NavigationSourceResponse> {
+    return this.artifacts(projectId).navigationSource(runId, entityId);
   }
 
   async evidenceDiff(projectId: string, runId: string, findingId: string, evidenceIndex = 0, query: DiffQuery = {}): Promise<EvidenceDiffResponse> {

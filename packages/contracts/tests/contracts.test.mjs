@@ -34,3 +34,21 @@ test('M1 contract does not permit review execution or cancellation', () => {
   assert.equal(reportResponseSchema.safeParse({ ...response, deliveryVerified: false }).success, false);
   assert.equal(reportResponseSchema.safeParse({ ...response, review: { ...item, runtimeConfiguration: { provider: 'private' } } }).success, false);
 });
+
+test('navigation responses carry a view only when recorded, and edges must connect listed nodes', async () => {
+  const { navigationResponseSchema } = await import('../dist/index.js');
+  const node = id => ({ id, kind: 'function', path: 'app.py', qualifiedName: `app.${id}`, name: id, startLine: 1, endLine: 2, roles: ['visited'], findingIds: [], firstSeq: 1 });
+  const view = { toolExposure: 'text+graph', generationIds: ['g'], truncated: false, entityFactsComplete: true, limitations: [], steps: [],
+    nodes: [node('a'), node('b')], edges: [{ id: 'e', fromId: 'a', toId: 'b', relation: 'CALLS', resolution: 'resolved_scoped', origin: 'graph_neighbors', firstSeq: 1 }] };
+  const base = { runId: '00000000-0000-4000-8000-000000000001', snapshotId: 'a'.repeat(64) };
+  assert.equal(navigationResponseSchema.safeParse({ ...base, state: 'recorded', view }).success, true);
+  assert.equal(navigationResponseSchema.safeParse({ ...base, state: 'not_recorded' }).success, true);
+  assert.equal(navigationResponseSchema.safeParse({ ...base, state: 'unavailable', view }).success, false);
+  assert.equal(navigationResponseSchema.safeParse({ ...base, state: 'recorded' }).success, false);
+  assert.equal(navigationResponseSchema.safeParse({ ...base, state: 'recorded', view: { ...view, edges: [{ ...view.edges[0], toId: 'ghost' }] } }).success, false);
+  assert.equal(navigationResponseSchema.safeParse({ ...base, state: 'recorded', view: { ...view, nodes: [{ ...node('a'), roles: ['guessed'] }, node('b')] } }).success, false);
+  const directory = { ...node('d'), kind: 'directory', path: '/', qualifiedName: '/', name: '/', startLine: 0, endLine: 0 };
+  assert.equal(navigationResponseSchema.safeParse({ ...base, state: 'recorded', view: { ...view, nodes: [...view.nodes, directory] } }).success, true, 'directories have lines 0..0');
+  for (const bad of [{ ...directory, endLine: 3 }, { ...node('z'), startLine: 0, endLine: 0 }, { ...node('z'), startLine: 3, endLine: 2 }])
+    assert.equal(navigationResponseSchema.safeParse({ ...base, state: 'recorded', view: { ...view, nodes: [...view.nodes, bad] } }).success, false);
+});

@@ -31,3 +31,20 @@ export function pythonCatalog(head: Record<string, FrozenFile>, changedPaths: st
   const priority = { changed: 0, production: 1, supplemental: 2 } as const;
   return entries.sort((a, b) => priority[a.layer] - priority[b.layer] || a.path.localeCompare(b.path));
 }
+
+export interface LanguageCatalogEntry extends PythonCatalogEntry { language: string }
+/**
+ * Multi-language catalog (ADR 0022): a path belongs to the first enabled language that owns it and is
+ * classified by that language. With only Python enabled it equals pythonCatalog plus the language id.
+ */
+export function languageCatalog(head: Record<string, FrozenFile>, changedPaths: string[], scope: GraphScope, languages: readonly import("./languages/contracts.ts").LanguageDescriptor[]): LanguageCatalogEntry[] {
+  const changed = new Set(changedPaths); const entries: LanguageCatalogEntry[] = [];
+  for (const path of Object.keys(head)) {
+    const language = languages.find(item => item.owns(path)); if (!language) continue;
+    const classification = language.classify(path); const isChanged = changed.has(path);
+    const layer = isChanged ? "changed" : classification === "production" ? "production" : "supplemental";
+    entries.push({ path, language: language.id, classification, changed: isChanged, included: scope === "all" || layer !== "supplemental", layer, status: head[path]!.status });
+  }
+  const priority = { changed: 0, production: 1, supplemental: 2 } as const;
+  return entries.sort((a, b) => priority[a.layer] - priority[b.layer] || a.path.localeCompare(b.path));
+}

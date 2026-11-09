@@ -242,3 +242,67 @@ export interface ErrorResponse {
     traceId: string;
   };
 }
+
+export type NavigationStateDto = 'recorded' | 'unavailable' | 'not_recorded';
+export type NavigationNodeRole = 'in_changed_file' | 'change_root' | 'visited' | 'candidate' | 'expanded' | 'evidence_overlap';
+export interface NavigationNodeDto {
+  id: string;
+  kind: 'directory' | 'file' | 'class' | 'function';
+  functionKind?: 'function' | 'method' | undefined;
+  path: string;
+  qualifiedName: string;
+  name: string;
+  startLine: number;
+  endLine: number;
+  roles: NavigationNodeRole[];
+  /** Findings whose head evidence overlaps this entity's location. Location overlap is not attribution. */
+  findingIds: string[];
+  /** First step that showed this entity, or null when only described afterwards. */
+  firstSeq: number | null;
+}
+export interface NavigationEdgeDto {
+  id: string;
+  fromId: string;
+  toId: string;
+  relation: 'CONTAINS' | 'IMPORTS' | 'CALLS' | 'INHERITS';
+  resolution: 'resolved_scoped' | 'resolved_import_alias' | 'candidate' | 'unresolved' | 'definite';
+  origin: 'graph_neighbors' | 'host_investigation';
+  firstSeq: number | null;
+}
+export interface NavigationStepDto {
+  seq: number;
+  origin: 'model_tool' | 'host_dispatch';
+  op: 'graph_lookup' | 'graph_neighbors' | 'investigation_delivered' | 'candidate_expanded';
+  input: Record<string, string | number | boolean>;
+  status: string;
+  coverageLimited: boolean;
+  pageTruncated: boolean;
+  entityIds: string[];
+  relationIds: string[];
+  error?: string | undefined;
+  requestId?: string | undefined;
+  candidateRefId?: string | undefined;
+  terminal?: string | undefined;
+}
+export interface NavigationViewDto {
+  toolExposure: 'text-only' | 'text+graph' | 'text+locagent';
+  generationIds: string[];
+  truncated: boolean;
+  entityFactsComplete: boolean;
+  limitations: string[];
+  nodes: NavigationNodeDto[];
+  edges: NavigationEdgeDto[];
+  steps: NavigationStepDto[];
+}
+export interface NavigationResponse {
+  runId: string;
+  snapshotId: string;
+  state: NavigationStateDto;
+  reason?: string | undefined;
+  view?: NavigationViewDto | undefined;
+}
+export interface NavigationSourceResponse {
+  runId: string;
+  entity: NavigationNodeDto;
+  source: SourcePageDto;
+}

@@ -27,7 +27,9 @@ Before a real review release, perform recovery and security fault-injection test
 
 ## Scope
 Prefer one vertical slice. Do not introduce multi-agent orchestration, a hosted platform, a graph UI,
-in-review self-modifying rules, or a mandatory router as foundational cleanup.
+in-review self-modifying rules, or a mandatory router as foundational cleanup. The one exception is the
+read-only navigation view of a delivered run (ADR 0021); a repository-wide graph browser remains out of scope.
+New graph languages are added as language packs (ADR 0022), never by special-casing the build.
 Host-controlled experience data may evolve between reviews; each review freezes a read-only knowledge package.
 Remote repository creation or pushing requires explicit user authorization.
 Original architecture DOCX/Markdown are historical records; implementation status and validation are current.

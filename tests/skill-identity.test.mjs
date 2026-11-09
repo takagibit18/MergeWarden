@@ -13,3 +13,10 @@ test('opaque cross-input refs cannot be replayed',()=>{const a=learningIdentity(
 test('opaque stale revision ref fails binding verification',()=>{const i=input(),x=learningIdentity(i);i.relevantSkills[0].revision++;assert.throws(()=>x.resolve(valid(x),i),/stale revision/);});
 test('opaque host hash mismatch and raw hash bypass fail closed',()=>{const i=input(),x=learningIdentity(i);i.sourcePages[0].fileHash='c'.repeat(64);assert.throws(()=>x.resolve(valid(x),i),/host hash mismatch/);const y=learningIdentity(input()),o=valid(y);o.operations[0].content.dependencies=[{path:'font.py',hash:'a'.repeat(64)}];assert.throws(()=>y.resolve(o),/raw dependency/);const p=valid(y);p.operations[0].expectedRevision=2;assert.throws(()=>y.resolve(p),/raw identity/);});
 test('review methods match other paths only inside repository and language; facts retain strict path',()=>{const s={...content,state:'trial',repositoryKey:'repo:a'};assert.equal(skillEligibility(s,'repo:a',['widget.py'],'empty candidate score').eligible,true);assert.equal(skillEligibility(s,'repo:b',['widget.py'],'empty').eligible,false);assert.equal(skillEligibility(s,'repo:a',['widget.js'],'empty').eligible,false);assert.equal(skillEligibility({...s,scopeType:'repository_fact'},'repo:a',['widget.py'],'empty').eligible,false);assert.equal(skillEligibility({...s,scopeType:undefined},'repo:a',['widget.py'],'empty').eligible,false);assert.equal(skillEligibility(s,'repo:a',['widget.py'],'unrelated').softCues.strength,'weak');assert.equal(skillEligibility({...s,state:'retired'},'repo:a',['font.py'],'empty').eligible,false);});
+
+test('Skill language matching only counts languages the run enabled',()=>{
+  const s={...content,state:'trial',repositoryKey:'repo:a',languages:['TypeScript']};
+  assert.equal(skillEligibility(s,'repo:a',['web/app.ts'],'empty').eligible,false,'Python-pinned runs keep their former selection');
+  assert.equal(skillEligibility(s,'repo:a',['web/app.ts'],'empty',['python','typescript']).eligible,true);
+  assert.equal(skillEligibility({...s,languages:['Python']},'repo:a',['app.py','web/app.ts'],'empty',['python']).eligible,true);
+});

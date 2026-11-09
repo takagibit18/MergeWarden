@@ -15,11 +15,13 @@
     "verify": "npm run typecheck && npm run lint && npm test && npm run build"
   },
   "dependencies": {
+    "@mergewarden/contracts": "file:../../packages/contracts",
     "@shikijs/langs": "4.5.0",
     "@shikijs/themes": "4.5.0",
-    "@mergewarden/contracts": "file:../../packages/contracts",
     "@tanstack/react-query": "5.104.1",
+    "@xyflow/react": "12.12.1",
     "antd": "6.6.5",
+    "elkjs": "0.12.1",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "react-router-dom": "7.18.4",

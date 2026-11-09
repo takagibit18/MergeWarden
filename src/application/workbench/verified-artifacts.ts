@@ -1,11 +1,13 @@
 import { lstat, readFile, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { DiffQuery, EvidenceDiffResponse, EvidenceRefDto, EvidenceResponse, HistoryItem, ProjectDto, ReportDto, TaskResponse, WorkspaceDto } from '../../../packages/contracts/src/types.ts';
+import type { DiffQuery, EvidenceDiffResponse, EvidenceRefDto, EvidenceResponse, HistoryItem, NavigationResponse, NavigationSourceResponse, ProjectDto, ReportDto, TaskResponse, WorkspaceDto } from '../../../packages/contracts/src/types.ts';
 import { REPORT_STATUSES, REVIEW_SCOPES } from '../../../packages/contracts/src/constants.ts';
 import type { FindingCandidate, ReviewReport, SnapshotIdentity } from '../../domain/contracts.ts';
 import { assertCandidate, assertSnapshot, isNativeTimestamp as isTime, isRecord, isSha256 as isHash, isUuid } from '../../domain/validation.ts';
 import type { RunManifest } from '../../engine/contracts.ts';
-import { readReport, readRun, runPath } from '../../engine/reports.ts';
+import { readNavigation, readReport, readRun, runPath } from '../../engine/reports.ts';
+import { NAVIGATION_FILE, NAVIGATION_LIMITS } from '../../engine/navigation-contracts.ts';
+import { projectNavigation, validateNavigation } from './navigation-view.ts';
 import { inside, sha256 } from '../../infrastructure/files.ts';
 import { WorkbenchError } from '../../ports/workbench.ts';
 import { SnapshotStore } from '../../snapshot/store.ts';
@@ -275,6 +277,46 @@ export class VerifiedArtifacts {
           startLine: page.startLine, endLine: page.endLine, totalLines: page.totalLines, contentSha256: page.contentSha256,
           truncated: page.truncated, ...(page.hasMoreLines === undefined ? {} : { hasMoreLines: page.hasMoreLines }), warnings: [...page.warnings] } };
     } catch { throw new WorkbenchError('EVIDENCE_INTEGRITY', 'Frozen evidence failed its source integrity check.', 409); }
+  }
+
+  /**
+   * Navigation view of a delivered run (ADR 0021). The report gates come first; the navigation
+   * file must then match the hash committed in run.json, before and after it is read.
+   */
+  async navigation(runId: string): Promise<NavigationResponse> {
+    const { run, report, snapshot } = await this.verifiedReport(runId);
+    const base = { runId, snapshotId: run.snapshotId };
+    const state = run.navigation;
+    if (state === undefined) return { ...base, state: 'not_recorded' };
+    if (!isRecord(state) || !['recorded', 'unavailable'].includes(String(state.state))) throw new WorkbenchError('REPORT_INTEGRITY', 'The native navigation state could not be verified.', 409);
+    if (state.state === 'unavailable') return { ...base, state: 'unavailable', reason: typeof state.reason === 'string' ? state.reason.slice(0, 512) : 'Navigation was not recorded' };
+    try {
+      if (!isHash(state.sha256)) throw new Error('Invalid navigation hash');
+      await this.boundedFile(join(runPath(this.stateDir, runId), NAVIGATION_FILE), NAVIGATION_LIMITS.maxBytes);
+      const { text, record } = await readNavigation(this.stateDir, runId);
+      if (sha256(text) !== state.sha256) throw new Error('Navigation hash mismatch');
+      const valid = validateNavigation(record, { runId, snapshotId: run.snapshotId, headPaths: Object.keys(snapshot.manifest.head) });
+      const after = await this.manifest(runId);
+      if (after.status !== 'delivered' || after.navigation?.state !== 'recorded' || after.navigation.sha256 !== state.sha256 || after.reportSha256 !== run.reportSha256) throw new Error('Delivery changed while reading');
+      return { ...base, state: 'recorded', view: projectNavigation(valid, report, snapshot.manifest.changedPaths) };
+    } catch { throw new WorkbenchError('REPORT_INTEGRITY', 'The native navigation record could not be verified.', 409); }
+  }
+
+  /** Head source of one entity that the verified navigation record shows. No other range is readable here. */
+  async navigationSource(runId: string, entityId: string): Promise<NavigationSourceResponse> {
+    if (typeof entityId !== 'string' || !entityId || entityId.length > 160) throw new WorkbenchError('INVALID_QUERY', 'A valid entity ID is required.', 400);
+    const response = await this.navigation(runId);
+    const entity = response.view?.nodes.find(node => node.id === entityId);
+    if (!entity) throw new WorkbenchError('NOT_FOUND', 'Entity was not found in the verified navigation record.', 404);
+    if (entity.kind === 'directory') throw new WorkbenchError('INVALID_QUERY', 'Directories have no source.', 400);
+    const { snapshot } = await this.verifiedReport(runId);
+    try {
+      const endLine = Math.min(entity.endLine, entity.startLine + 199);
+      const page = await snapshot.source('head', entity.path, entity.startLine, endLine);
+      return { runId, entity, source: { snapshotId: page.snapshotId, revision: page.revision, path: page.path, status: page.status, text: page.text,
+        startLine: page.startLine, endLine: page.endLine, totalLines: page.totalLines, contentSha256: page.contentSha256,
+        truncated: page.truncated || endLine < entity.endLine, ...(page.hasMoreLines === undefined ? {} : { hasMoreLines: page.hasMoreLines }), warnings: [...page.warnings] } };
+    } catch { throw new WorkbenchError('EVIDENCE_INTEGRITY', 'Frozen source for this entity could not be read.', 409); }
   }
 
   async evidenceDiff(runId: string, findingId: string, evidenceIndex: number, query: DiffQuery = {}): Promise<EvidenceDiffResponse> {

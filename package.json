@@ -16,7 +16,7 @@
     ".codex-plugin/plugin.json", ".mcp.json", ".agents/plugins/marketplace.json", "assets", "skills", "src", "schemas",
     "scripts/setup.mjs", "scripts/codex-plugin.mjs",
     "integrations/pi/package.json", "integrations/pi/package-lock.json", "integrations/pi/src",
-    "integrations/tree-sitter/package.json", "integrations/tree-sitter/package-lock.json", "integrations/tree-sitter/src", "integrations/tree-sitter/grammars/python.lock.json",
+    "integrations/tree-sitter/package.json", "integrations/tree-sitter/package-lock.json", "integrations/tree-sitter/src", "integrations/tree-sitter/grammars/python.lock.json", "integrations/tree-sitter/grammars/typescript.lock.json", "integrations/tree-sitter/grammars/tsx.lock.json",
     "integrations/mcp/package.json", "integrations/mcp/package-lock.json", "integrations/mcp/src", "integrations/mcp/README.md",
     "packages/contracts/src/constants.ts", "package-lock.json"
   ],

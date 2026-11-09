@@ -1,8 +1,11 @@
-import { readFile, readdir } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { open as openFile, readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { FindingCandidate, ReviewReport } from "../domain/contracts.ts";
 import { atomicWrite, sha256, writeJson } from "../infrastructure/files.ts";
 import type { RunManifest } from "./contracts.ts";
+import { NAVIGATION_FILE, NAVIGATION_LIMITS } from "./navigation-contracts.ts";
+import type { NavigationRecord, NavigationState } from "./navigation-contracts.ts";
 export function runPath(state: string, id: string): string {
   if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(id)) throw new Error("Invalid run id");
   return join(state, "runs", id);
@@ -20,12 +23,41 @@ export function markdown(report: ReviewReport): string {
         clean(f.claim), "", ...evidenceLines(f), ""]), "</details>", ""] : []),
     "## Coverage", "", ...Object.entries(report.coverage).map(([path, status]) => `- ${clean(path)}: ${status}`), ""].join("\n");
 }
-export async function deliver(state: string, manifest: RunManifest, report: ReviewReport): Promise<{ reportPath: string; markdownPath: string }> {
+export interface DeliveryExtras { navigation?: NavigationRecord | { unavailable: string } }
+/**
+ * Report artifacts first, then the optional navigation projection, then run.json last.
+ * Navigation is never required for delivery (ADR 0021): a failure is recorded as unavailable.
+ */
+export async function deliver(state: string, manifest: RunManifest, report: ReviewReport, extras: DeliveryExtras = {}): Promise<{ reportPath: string; markdownPath: string }> {
   const directory = runPath(state, manifest.runId); const json = JSON.stringify(report, null, 2) + "\n"; const md = markdown(report);
   const reportPath = join(directory, "report.json"); const markdownPath = join(directory, "report.md");
   await atomicWrite(reportPath, json); await atomicWrite(markdownPath, md);
-  await writeJson(join(directory, "run.json"), { ...manifest, status: "delivered", outcome: report.status, finishedAt: new Date().toISOString(), reportSha256: sha256(json), markdownSha256: sha256(md) });
+  const navigation = extras.navigation === undefined ? undefined : await writeNavigation(directory, extras.navigation);
+  await writeJson(join(directory, "run.json"), { ...manifest, status: "delivered", outcome: report.status, finishedAt: new Date().toISOString(), reportSha256: sha256(json), markdownSha256: sha256(md), ...(navigation ? { navigation } : {}) });
   return { reportPath, markdownPath };
+}
+async function writeNavigation(directory: string, record: NavigationRecord | { unavailable: string }): Promise<NavigationState> {
+  if ("unavailable" in record) return { state: "unavailable", reason: record.unavailable.slice(0, 512) };
+  try {
+    const text = JSON.stringify(record) + "\n";
+    if (Buffer.byteLength(text) > NAVIGATION_LIMITS.maxBytes) return { state: "unavailable", reason: "Navigation record exceeds its size limit" };
+    await atomicWrite(join(directory, NAVIGATION_FILE), text);
+    return { state: "recorded", sha256: sha256(text), steps: record.steps.length, entities: record.entities.length, relations: record.relations.length, truncated: record.truncated };
+  } catch { return { state: "unavailable", reason: "Navigation record could not be written" }; }
+}
+/**
+ * Reads navigation.json without following a symlink and never beyond maxBytes: the file checked is the
+ * file read (no check-then-open race), and an oversized or replaced file fails before it is parsed.
+ */
+export async function readNavigation(state: string, id: string): Promise<{ text: string; record: NavigationRecord }> {
+  const handle = await openFile(join(runPath(state, id), NAVIGATION_FILE), fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+  try {
+    const info = await handle.stat(); if (!info.isFile() || info.size > NAVIGATION_LIMITS.maxBytes) throw new Error("Navigation record is not a bounded regular file");
+    const buffer = Buffer.alloc(info.size + 1); const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    if (bytesRead > info.size) throw new Error("Navigation record changed while reading");
+    const text = buffer.subarray(0, bytesRead).toString("utf8");
+    return { text, record: JSON.parse(text) as NavigationRecord };
+  } finally { await handle.close(); }
 }
 export async function readRun(state: string, id: string): Promise<RunManifest> {
   const manifest = JSON.parse(await readFile(join(runPath(state, id), "run.json"), "utf8")) as RunManifest;
