@@ -14,6 +14,8 @@ export interface ReviewOptions {
   skills?: 'auto' | 'off' | 'replay'; learn?: 'auto' | 'off';
   /** Prompt variant (ADR 0020 Part B). Absent keeps the default prompt; rerun inherits the original run's variant. */
   investigation?: import('./prompt.ts').Investigation;
+  /** Graph languages (ADR 0022). Defaults to every registered language; evaluations default to Python only. */
+  languages?: readonly string[];
   /** Learned Skill changes wait for human approval unless an internal evaluation explicitly selects 'auto'. */
   skillApproval?: 'required' | 'auto';
   /** Host-controlled mapping only: never inferred from origin or reviewed configuration. */
@@ -47,6 +49,8 @@ export interface RunManifest {
   /** Run-level policy identity; historical snapshots and reports remain immutable. */
   reviewPolicy?: { version: string; sha256: string };
   investigation?: import('./prompt.ts').Investigation;
+  /** Graph languages (ADR 0022). Defaults to every registered language; evaluations default to Python only. */
+  languages?: readonly string[];
   status: "running" | "delivered" | "delivery_failed"; createdAt: string; finishedAt?: string;
   parentRunId?: string; outcome?: ReviewReport["status"]; error?: string;
   termination?: { reason: 'completed' | 'tool_budget' | 'time_budget' | 'cancelled' | 'runtime_error' | 'incomplete'; finalSubmission: boolean };
@@ -61,6 +65,10 @@ export interface RunManifest {
     routing?: import("./routing-contracts.ts").RoutingMetrics;
   };
   toolExposure?: "text-only" | "text+graph" | "text+locagent";
+  /** Languages enabled for this run's graph (ADR 0022). Absent on historical runs, which were Python-only. */
+  graphLanguages?: string[];
+  /** Read-only navigation projection (ADR 0021); absent for text-only and historical runs. */
+  navigation?: import("./navigation-contracts.ts").NavigationState;
   runtimeConfiguration?: ReturnType<NonNullable<ReviewRuntime["configuration"]>>;
 }
 export type ReviewResult = { kind: "no_changes"; snapshotId: string } | { kind: "report"; runId: string; report: ReviewReport; reportPath: string; markdownPath: string; learning?: {status:string; jobs?:import('../skills/contracts.ts').LearningJob[]} };

@@ -1,19 +1,22 @@
 import { sha256 } from "../infrastructure/files.ts";
 import type { BindingFact, ImportFact, InheritanceFact, ReferenceFact, RelationFact, Resolution, SourceFact, SymbolFact, SyntaxFacts } from "./contracts.ts";
+import type { LanguageResolver } from "./languages/contracts.ts";
+import { attachDirectories, containsRelations } from "./structure-indexer.ts";
 
 export const RESOLVER_VERSION = "python-entities-streaming-5";
 export interface ResolvedGraph { facts: SyntaxFacts[]; entities: SymbolFact[]; relations: RelationFact[] }
 type Target = { ids: string[]; resolution: Resolution; ruleSource: string };
-const directoryId = (snapshotId: string, path: string) => sha256(JSON.stringify([snapshotId, "directory", path]));
-const parentDirectory = (path: string) => { const index = path.lastIndexOf("/"); return index < 0 ? "/" : path.slice(0, index) || "/"; };
 const unknown = (ruleSource = "unresolved_static_binding"): Target => ({ ids: [], resolution: "unresolved", ruleSource });
 
 /**
  * Two-pass resolver state. index() retains only declarations and binding data;
  * resolveFile() can then consume and release one file's call/import/inheritance sites.
+ * Standalone use (the default) also builds directories and CONTAINS; a multi-language
+ * build passes `structure: false` and lets the StructureIndexer own them (ADR 0022).
  */
-export class PythonResolver {
+export class PythonResolver implements LanguageResolver {
   private readonly snapshotId: string | undefined;
+  private readonly structure: boolean;
   private readonly symbols = new Map<string, SymbolFact>();
   private readonly scopes = new Map<string, SyntaxFacts["scopes"][number]>();
   private readonly imports = new Map<string, ImportFact>();
@@ -24,7 +27,7 @@ export class PythonResolver {
   private readonly unavailableModules = new Set<string>();
   private finished = false;
 
-  constructor(snapshotId?: string) { this.snapshotId = snapshotId; }
+  constructor(snapshotId?: string, options: { structure?: boolean } = {}) { this.snapshotId = snapshotId; this.structure = options.structure !== false; }
   markModuleUnavailable(qualifiedName: string): void { if (this.finished) throw new Error("Python resolver index is already finalized"); this.unavailableModules.add(qualifiedName); }
 
   index(fact: SyntaxFacts): void {
@@ -42,22 +45,13 @@ export class PythonResolver {
   finalize(): void {
     if (this.finished) return;
     const id = this.snapshotId ?? this.symbols.values().next().value?.snapshotId as string | undefined;
-    if (id) {
-      const directories = new Set<string>(["/"]);
-      for (const file of this.symbols.values()) if (file.kind === "file") {
-        let current = parentDirectory(file.path); while (true) { directories.add(current); if (current === "/") break; current = parentDirectory(current); }
-        file.parentSymbolId = directoryId(id, parentDirectory(file.path));
-      }
-      for (const path of [...directories].sort()) {
-        const entity: SymbolFact = { id: directoryId(id, path), snapshotId: id, path, qualifiedName: path, name: path === "/" ? "/" : path.split("/").at(-1)!, kind: "directory", startLine: 0, endLine: 0, startColumn: 0, endColumn: 0, ...(path === "/" ? {} : { parentSymbolId: directoryId(id, parentDirectory(path)) }) };
-        this.symbols.set(entity.id, entity);
-      }
-    }
+    if (id && this.structure) for (const entity of attachDirectories(id, this.symbols.values())) this.symbols.set(entity.id, entity);
     for (const symbol of this.symbols.values()) if (symbol.kind === "file") this.modules.set(symbol.qualifiedName, [...this.modules.get(symbol.qualifiedName) ?? [], symbol]);
     this.finished = true;
   }
 
   get entities(): SymbolFact[] { this.finalize(); return [...this.symbols.values()]; }
+  get languageEntities(): SymbolFact[] { return this.entities.filter(entity => entity.kind !== "directory"); }
   private moduleFor(name: string): SymbolFact[] { return this.unavailableModules.has(name) ? [] : (this.modules.get(name) ?? []).filter(module => !this.incomplete.has(module.id)); }
   private absolute(item: ImportFact, name: string): string | undefined {
     if (!item.relativeLevel) return name;
@@ -109,9 +103,7 @@ export class PythonResolver {
       siteId: at.id, resolverVersion: RESOLVER_VERSION, ...(declarationOrder === undefined ? {} : { declarationOrder }) };
   }
 
-  structuralRelations(): RelationFact[] {
-    return this.entities.filter(entity => entity.parentSymbolId).map(entity => this.relation(entity.parentSymbolId!, entity.id, "CONTAINS", entity, "resolved_scoped"));
-  }
+  structuralRelations(): RelationFact[] { return containsRelations(this.entities, RESOLVER_VERSION); }
 
   resolveFile(fact: SyntaxFacts): RelationFact[] {
     this.finalize(); const relations: RelationFact[] = [];

@@ -1,10 +1,11 @@
 import { z } from 'zod/v4';
-import { REPORT_STATUSES, REVIEW_SCOPES, REVIEW_STATUSES, SEVERITIES } from './constants.js';
+import { NAVIGATION_ENTITY_KINDS, NAVIGATION_NODE_ROLES, NAVIGATION_OPERATIONS, NAVIGATION_RELATIONS, NAVIGATION_RESOLUTIONS, NAVIGATION_STATES, REPORT_STATUSES, REVIEW_SCOPES, REVIEW_STATUSES, SEVERITIES } from './constants.js';
 import type {
   ConfigResponse, ErrorResponse, EvidenceRefDto, EvidenceResponse, FindingDto,
   HistoryItem, HistoryResponse, ReportDto, ReportResponse, SnapshotIdentityDto,
   SourcePageDto, TaskResponse, WorkspaceDto, ProjectDto, ProjectsResponse,
   RegisterProjectInput, RegisterWorkspaceInput, DiffSideDto, DiffRowDto, FrozenDiffDto, EvidenceDiffResponse,
+  NavigationEdgeDto, NavigationNodeDto, NavigationResponse, NavigationSourceResponse, NavigationStepDto, NavigationViewDto,
 } from './types.js';
 
 export const idSchema = z.string().regex(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/);
@@ -181,3 +182,37 @@ export const evidenceParamsSchema = z.object({
   id: idSchema, findingId: z.string().min(1).max(4000), index: z.coerce.number().int().min(0).max(19),
 }).strict();
 export const scopedEvidenceParamsSchema = evidenceParamsSchema.extend({ projectId: idSchema }).strict();
+
+const lineNumber = z.number().int().positive();
+const graphId = z.string().min(1).max(160);
+export const navigationNodeSchema: z.ZodType<NavigationNodeDto> = z.object({
+  id: graphId, kind: z.enum(NAVIGATION_ENTITY_KINDS), functionKind: z.enum(['function', 'method']).optional(),
+  path: z.string().min(1).max(4096), qualifiedName: z.string().max(4096), name: z.string().max(1024),
+  startLine: lineNumber, endLine: lineNumber, roles: z.array(z.enum(NAVIGATION_NODE_ROLES)).max(NAVIGATION_NODE_ROLES.length),
+  findingIds: z.array(z.string().max(4000)).max(100), firstSeq: z.number().int().positive().nullable(),
+}).strict().refine(node => node.endLine >= node.startLine, { message: 'End line must not precede start line' });
+export const navigationEdgeSchema: z.ZodType<NavigationEdgeDto> = z.object({
+  id: graphId, fromId: graphId, toId: graphId, relation: z.enum(NAVIGATION_RELATIONS), resolution: z.enum(NAVIGATION_RESOLUTIONS),
+  origin: z.enum(['graph_neighbors', 'host_investigation']), firstSeq: z.number().int().positive().nullable(),
+}).strict();
+export const navigationStepSchema: z.ZodType<NavigationStepDto> = z.object({
+  seq: z.number().int().positive(), origin: z.enum(['model_tool', 'host_dispatch']), op: z.enum(NAVIGATION_OPERATIONS),
+  input: z.record(z.string(), z.union([z.string().max(256), z.number(), z.boolean()])), status: z.string().max(64),
+  coverageLimited: z.boolean(), pageTruncated: z.boolean(), entityIds: z.array(graphId).max(5000), relationIds: z.array(graphId).max(5000),
+  error: z.string().max(512).optional(), requestId: z.string().max(160).optional(), candidateRefId: z.string().max(80).optional(), terminal: z.string().max(64).optional(),
+}).strict();
+export const navigationViewSchema: z.ZodType<NavigationViewDto> = z.object({
+  toolExposure: z.enum(['text-only', 'text+graph', 'text+locagent']), generationIds: z.array(z.string().max(160)).max(16),
+  truncated: z.boolean(), entityFactsComplete: z.boolean(), limitations: z.array(z.string().max(512)).max(16),
+  nodes: z.array(navigationNodeSchema).max(2000), edges: z.array(navigationEdgeSchema).max(5000), steps: z.array(navigationStepSchema).max(200),
+}).strict().refine(view => {
+  const nodes = new Set(view.nodes.map(node => node.id));
+  return nodes.size === view.nodes.length && view.edges.every(edge => nodes.has(edge.fromId) && nodes.has(edge.toId));
+}, { message: 'Navigation edges must connect listed nodes' });
+export const navigationResponseSchema: z.ZodType<NavigationResponse> = z.object({
+  runId: idSchema, snapshotId: sha256Schema, state: z.enum(NAVIGATION_STATES), reason: z.string().max(512).optional(), view: navigationViewSchema.optional(),
+}).strict().refine(value => (value.state === 'recorded') === (value.view !== undefined), { message: 'Only a recorded navigation carries a view' });
+export const navigationSourceResponseSchema: z.ZodType<NavigationSourceResponse> = z.object({
+  runId: idSchema, entity: navigationNodeSchema, source: sourcePageSchema,
+}).strict().refine(value => value.entity.path === value.source.path && value.source.revision === 'head', { message: 'Source must be the entity head source' });
+export const navigationEntityParamsSchema = z.object({ projectId: idSchema, id: idSchema, entityId: graphId }).strict();

@@ -1,0 +1,10 @@
+{
+  "package": "tree-sitter-typescript",
+  "version": "0.23.2",
+  "repository": "https://github.com/tree-sitter/tree-sitter-typescript",
+  "tag": "v0.23.2",
+  "file": "tree-sitter-tsx.wasm",
+  "sha256": "79e5da75ea62855a0cd67177685f0164eac87d5f630b3cbe1e0a099751ad30f8",
+  "abi": 14,
+  "license": "MIT"
+}

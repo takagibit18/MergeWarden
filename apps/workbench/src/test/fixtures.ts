@@ -1,4 +1,4 @@
-import type { EvidenceDiffResponse, EvidenceRefDto, EvidenceResponse, FindingDto, HistoryItem, HistoryResponse, ProjectDto, ReportResponse } from '@mergewarden/contracts';
+import type { EvidenceDiffResponse, EvidenceRefDto, EvidenceResponse, FindingDto, HistoryItem, HistoryResponse, NavigationNodeDto, NavigationResponse, NavigationSourceResponse, ProjectDto, ReportResponse } from '@mergewarden/contracts';
 
 export const projectId = 'd7fa74b4-532f-4c73-86ca-1ff3c3db84a5';
 export const workspaceId = 'c'.repeat(64);
@@ -61,4 +61,23 @@ export function evidenceDiffResponse(selected = finding(), index = 0, offset = 0
     head: { exists: true, contentSha256: 'e'.repeat(64), totalLines: 20, endsWithNewline: true, mode: '100644' },
     rows: pageRows, offset, totalRows: rows.length, nextOffset, truncated: nextOffset !== null, warnings: nextOffset === null ? [] : ['Frozen diff display is paginated; additional rows remain.'],
   } };
+}
+
+/** A recorded navigation: lookup of `load`, then its incoming caller `handle` in another file. */
+export function navigationResponse(overrides: Partial<NavigationResponse> = {}): NavigationResponse {
+  const node = (id: string, path: string, name: string, roles: NavigationNodeDto['roles'], firstSeq: number, findingIds: string[] = []) =>
+    ({ id, kind: 'function' as const, functionKind: 'function' as const, path, qualifiedName: `${path}:${name}`, name, startLine: 4, endLine: 5, roles, findingIds, firstSeq });
+  return { runId, snapshotId, state: 'recorded', view: {
+    toolExposure: 'text+graph', generationIds: ['generation-1'], truncated: false, entityFactsComplete: true, limitations: [],
+    nodes: [node('load', 'src/service.py', 'load', ['in_changed_file', 'evidence_overlap', 'visited'], 1, ['finding-1']), node('handle', 'src/api.py', 'handle', ['visited'], 2)],
+    edges: [{ id: 'edge-1', fromId: 'handle', toId: 'load', relation: 'CALLS', resolution: 'resolved_scoped', origin: 'graph_neighbors', firstSeq: 2 }],
+    steps: [
+      { seq: 1, origin: 'model_tool', op: 'graph_lookup', input: { query: 'load', limit: 10 }, status: 'ok', coverageLimited: false, pageTruncated: false, entityIds: ['load'], relationIds: [] },
+      { seq: 2, origin: 'model_tool', op: 'graph_neighbors', input: { symbolId: 'load', relation: 'CALLS', direction: 'incoming', limit: 10 }, status: 'ok', coverageLimited: false, pageTruncated: false, entityIds: [], relationIds: ['edge-1'] },
+    ] }, ...overrides };
+}
+
+export function navigationSourceResponse(): NavigationSourceResponse {
+  const entity = navigationResponse().view!.nodes[1]!;
+  return { runId, entity, source: { snapshotId, revision: 'head', path: entity.path, status: 'ok', text: 'def handle(request):\n    return load(request)', startLine: 4, endLine: 5, totalLines: 5, contentSha256, truncated: false, warnings: [] } };
 }

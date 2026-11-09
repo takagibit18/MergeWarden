@@ -5,19 +5,19 @@ import type { CodeGraph, GraphPage, RelationFact, SymbolFact } from "./contracts
 import { releaseGraphBuildLock } from "./sqlite-store.ts";
 import type { GraphMetrics } from "./sqlite-store.ts";
 
-type WorkerResult<T> = { id: number; page?: GraphPage<T>; metrics?: GraphMetrics; error?: string };
+type WorkerResult<T> = { id: number; page?: GraphPage<T>; metrics?: GraphMetrics; error?: string; entities?: SymbolFact[] };
 /** One terminable graph service per review. Parser, verified SQLite and indexes are reused. */
 export class LazyCodeGraph implements CodeGraph {
-  private stateDir: string; private snapshotId: string; private preparedOnly: boolean; private worker: Worker | undefined; private sequence = 0;
+  private stateDir: string; private snapshotId: string; private preparedOnly: boolean; private languages: readonly string[] | undefined; private worker: Worker | undefined; private sequence = 0;
   private ownerToken = randomUUID(); private closed = false;
   private pending = new Map<number, { resolve(value: WorkerResult<unknown>): void; reject(error: unknown): void }>();
   metrics = { buildMs: 0, queryMs: 0, warmRequestMs: [] as number[], coldRequestMs: [] as number[], calls: 0, workerStarts: 0, coverage: emptyCoverage(), resumedFiles: 0, extractedFiles: 0, resumedResolutionFiles: 0, resolvedFiles: 0, storage: { generationBytes: 0, checkpointBytes: 0 }, generationId: undefined as GraphMetrics["generationId"], generationState: undefined as GraphMetrics["generationState"], scope: undefined as GraphMetrics["scope"] };
-  constructor(stateDir: string, snapshotId: string, options: { preparedOnly?: boolean } = {}) { this.stateDir = stateDir; this.snapshotId = snapshotId; this.preparedOnly = options.preparedOnly === true; }
+  constructor(stateDir: string, snapshotId: string, options: { preparedOnly?: boolean; languages?: readonly string[] } = {}) { this.stateDir = stateDir; this.snapshotId = snapshotId; this.preparedOnly = options.preparedOnly === true; this.languages = options.languages ? [...options.languages] : undefined; }
   private start(): Worker {
     if (this.closed) throw new Error("Graph service is closed");
     if (this.worker) return this.worker;
     this.metrics.workerStarts++;
-    const worker = new Worker(new URL("./worker.ts", import.meta.url), { workerData: { stateDir: this.stateDir, snapshotId: this.snapshotId, ownerToken: this.ownerToken, preparedOnly: this.preparedOnly }, execArgv: ["--experimental-strip-types"], resourceLimits: { maxOldGenerationSizeMb: 512 } });
+    const worker = new Worker(new URL("./worker.ts", import.meta.url), { workerData: { stateDir: this.stateDir, snapshotId: this.snapshotId, ownerToken: this.ownerToken, preparedOnly: this.preparedOnly, languages: this.languages }, execArgv: ["--experimental-strip-types"], resourceLimits: { maxOldGenerationSizeMb: 512 } });
     worker.on("message", (value: WorkerResult<unknown>) => { const request = this.pending.get(value.id); if (!request) return; this.pending.delete(value.id); request.resolve(value); if (!this.pending.size) worker.unref(); });
     const failed = (error: unknown) => { for (const request of this.pending.values()) request.reject(error); this.pending.clear(); if (this.worker === worker) this.worker = undefined; };
     worker.once("error", () => failed(new Error("Graph worker failed; empty results cannot establish absence.")));
@@ -54,6 +54,24 @@ export class LazyCodeGraph implements CodeGraph {
       (result.metrics.cacheHit ? this.metrics.warmRequestMs : this.metrics.coldRequestMs).push(performance.now() - started);
     }
     return result.page ?? { status: "error", snapshotId: this.snapshotId, revision: "head", items: [], truncated: false, coverage: result.metrics?.coverage ?? emptyCoverage(), warnings: [result.error ?? "Graph failed"] };
+  }
+  /**
+   * Host-only entity metadata for the navigation record (ADR 0021). It is not a model tool call:
+   * it leaves metrics untouched and never builds. With no running worker in a non-prepared run it
+   * returns undefined so that recording cannot trigger a graph build.
+   */
+  async describe(input: { snapshotId: string; entityIds: string[] }, signal?: AbortSignal): Promise<SymbolFact[] | undefined> {
+    if (this.closed || (!this.worker && !this.preparedOnly && this.metrics.calls === 0)) return undefined;
+    signal?.throwIfAborted(); if (input.snapshotId !== this.snapshotId) throw new Error("Graph snapshot mismatch");
+    const id = ++this.sequence; const worker = this.start();
+    const result = await new Promise<WorkerResult<unknown>>((resolve, reject) => {
+      const cancel = () => { this.pending.delete(id); reject(signal?.reason ?? new Error("Graph describe cancelled")); };
+      this.pending.set(id, { resolve: value => { signal?.removeEventListener("abort", cancel); resolve(value); }, reject: error => { signal?.removeEventListener("abort", cancel); reject(error); } });
+      worker.ref(); signal?.addEventListener("abort", cancel, { once: true });
+      if (signal?.aborted) cancel(); else worker.postMessage({ id, method: "describe", input });
+    });
+    if (result.error || !result.entities) throw new Error(result.error ?? "Graph describe failed");
+    return result.entities;
   }
   lookup(input: Parameters<CodeGraph["lookup"]>[0], signal?: AbortSignal) { return this.query<SymbolFact>("lookup", input, signal); }
   neighbors(input: Parameters<CodeGraph["neighbors"]>[0], signal?: AbortSignal) { return this.query<RelationFact>("neighbors", input, signal); }

@@ -8,16 +8,17 @@ import {candidateSource,declarationPreview,packInvestigation,packageBytes} from 
 import {OperationGate} from '../src/engine/operations.ts';
 import {EvidenceRegistry} from '../src/application/evidence-registry.ts';
 import {emptyCoverage} from '../src/graph/contracts.ts';
+import {NavigationRecorder} from '../src/engine/navigation-recorder.ts';
 const hash=x=>createHash('sha256').update(x).digest('hex');
 const symbol=(id,path='app.py',startLine=1,endLine=40)=>({id,snapshotId:'s',path,name:id,qualifiedName:path+':'+id,kind:'function',startLine,endLine,startColumn:0,endColumn:0});
 const relation=(fromId,toId,i)=>({id:'edge'+i,snapshotId:'s',fromId,toId,relation:'CALLS',resolution:'resolved_scoped',sourcePath:fromId+'.py',sourceLine:2,sourceEndLine:2,sourceColumn:0,sourceEndColumn:4,siteId:'site'+i,resolverVersion:'v4'});
-function fixture({symbols=[symbol('work'),symbol('caller','caller.py'),symbol('second','second.py')],relations=[relation('caller','work',0),relation('second','work',1)],runId='r',snapshotId='s',text,budget}={}){
+function fixture({symbols=[symbol('work'),symbol('caller','caller.py'),symbol('second','second.py')],relations=[relation('caller','work',0),relation('second','work',1)],runId='r',snapshotId='s',text,budget,navigation}={}){
  const sources=Object.fromEntries(symbols.map(s=>[s.path,`def ${s.name}():\n`+Array.from({length:s.endLine-1},()=>text??'    return 1').join('\n')]));
  const graph=new LocAgentRetrieval({snapshotId:'s',generationId:'g',generationState:'ready',graphScope:'core',symbols,relations,sources,coverage:{...emptyCoverage(),eligibleFiles:symbols.length,indexedFiles:symbols.length},warnings:[]});
  const abort=new AbortController(),registry=new EvidenceRegistry(snapshotId),events=[],reads=[];
  const gate=new OperationGate({limit:100,signal:abort.signal,available:()=>true,exhausted(){throw Error('budget')}});
  const source=async(path,startLine,endLine)=>{reads.push([path,startLine,endLine]);const text=sources[path].split('\n').slice(startLine-1,endLine).join('\n');return {status:'ok',snapshotId:'s',revision:'head',path,startLine,endLine,text,contentSha256:hash(text)};};
- const service=new ProgressiveInvestigation({runId,snapshotId,changedPaths:['app.py','test.py'],signal:abort.signal,budget,source,promote:s=>registry.register(s),operation:(name,input)=>gate.run('host_dispatch',async()=>name==='resolve_change_units'?graph.resolveChangeUnits(input):name==='host_structural_investigation'?graph.investigate(input):source(input.path,input.startLine,input.endLine))});
+ const service=new ProgressiveInvestigation({runId,snapshotId,changedPaths:['app.py','test.py'],signal:abort.signal,budget,source,...(navigation?{navigation}:{}),promote:s=>registry.register(s),operation:(name,input)=>gate.run('host_dispatch',async()=>name==='resolve_change_units'?graph.resolveChangeUnits(input):name==='host_structural_investigation'?graph.investigate(input):source(input.path,input.startLine,input.endLine))});
  service.setRecorder(e=>events.push(e));
  const observe=(path='app.py',start=1,end=40)=>service.observe({toolName:'read_diff',toolCallId:'diff',input:{path},result:{snapshotId:'s',status:'ok',path,offset:0,totalLines:end-start+2,lines:[`@@ -${start},${end-start+1} +${start},${end-start+1} @@`,...Array.from({length:end-start+1},()=>'+changed')]}});
  const trigger={routeId:'route',routeType:'STRUCTURAL_ESCALATION',targetHint:'work',reason:'search',path:'app.py',toolCallId:'diff',toolName:'read_diff'};
@@ -96,4 +97,18 @@ test('delivery and expansion persistence failures poison the investigation; canc
 test('100 replays preserve task, roots, candidates and complete package bytes',async()=>{
  let expected;
  for(let i=0;i<100;i++){const f=fixture();f.observe();const value=JSON.stringify(await f.service.dispatch(f.trigger));expected??=value;assert.equal(value,expected);}
+});
+
+test('navigation observer receives copies of delivered packages and expansions, and cannot alter them',async()=>{
+ const recorder=new NavigationRecorder({runId:'r',snapshotId:'s',toolExposure:'text+locagent'});
+ const run=async navigation=>{const f=fixture({navigation});f.observe();const pack=await f.service.dispatch(f.trigger);f.service.queued(pack);f.service.providerPayload({content:JSON.stringify(pack)});
+  const card=pack.investigations[0].candidateCatalog[1];const page=await f.gate.run('model',()=>f.service.expand(card.candidateRefId));return {pack,page,events:f.events};};
+ const observed=await run(recorder);
+ const throwing=await run({investigationDelivered(){throw Error('observer fault')},candidateExpanded(){throw Error('observer fault')}});
+ const plain=await run(undefined);
+ for(const other of [throwing,plain]){assert.deepEqual(other.page,observed.page);assert.deepEqual(other.events.map(e=>e.type),observed.events.map(e=>e.type));}
+ const record=recorder.finish();
+ assert.deepEqual(record.steps.map(s=>s.op),['investigation_delivered','candidate_expanded']);
+ assert.ok(record.relations.length>=1 && record.relations.every(e=>e.toId==='work' && e.relation==='CALLS' && e.resolution==='definite'));
+ assert.ok(record.entities.some(e=>e.id==='work') && record.candidates.length===2);
 });

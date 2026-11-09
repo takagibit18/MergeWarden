@@ -6,13 +6,19 @@ import { isolatedState, sha256, writeJson } from "../infrastructure/files.ts";
 import { SnapshotStore } from "../snapshot/store.ts";
 import { emptyCoverage } from "./contracts.ts";
 import type { CodeGraph, GraphCoverage, GraphGenerationState, GraphPage, ImportFact, InheritanceFact, CallSiteFact, RelationFact, Resolution, SymbolFact, SyntaxFacts } from "./contracts.ts";
-import { PythonResolver, RESOLVER_VERSION } from "./python-resolver.ts";
-import { FILE_SCOPE_POLICY_VERSION, pythonCatalog, pythonModuleName } from "./scope-policy.ts";
-import type { GraphScope, PythonCatalogEntry } from "./scope-policy.ts";
+import { languageCatalog } from "./scope-policy.ts";
+import type { GraphScope, LanguageCatalogEntry } from "./scope-policy.ts";
+import { displayNames, effectiveLanguages, languageIdentity, LEGACY_LANGUAGE_IDS, loadExtractor } from "./languages/index.ts";
+import type { LanguageIdentity } from "./languages/index.ts";
+import type { LanguageDescriptor, LanguageResolver, LoadedExtractor } from "./languages/contracts.ts";
+import { python, PYTHON_PARSER_VERSION, PYTHON_POLICY_VERSION } from "./languages/python.ts";
+import { StructureIndexer } from "./structure-indexer.ts";
 
 export const GRAPH_SCHEMA_VERSION = 4;
-export const PARSER_VERSION = "web-tree-sitter-0.27.0/python-0.25.0-abi15";
-export const GRAPH_POLICY_VERSION = `python-entity-core-2/${FILE_SCOPE_POLICY_VERSION}`;
+/** Python-only (Graph v4) identity fields, kept as exports for evaluations that pin Python. */
+export const PARSER_VERSION = PYTHON_PARSER_VERSION;
+export const GRAPH_POLICY_VERSION = PYTHON_POLICY_VERSION;
+export const PYTHON_IDENTITY: LanguageIdentity = languageIdentity([python]);
 export interface GraphBuildBudget { maxFacts: number; maxRelations: number; maxFileFacts: number; maxFileMs: number }
 export const DEFAULT_GRAPH_BUDGET: GraphBuildBudget = { maxFacts: 250_000, maxRelations: 400_000, maxFileFacts: 25_000, maxFileMs: 15_000 };
 export interface GraphStorageMetrics { generationBytes: number; checkpointBytes: number }
@@ -43,14 +49,20 @@ interface ResolutionCheckpointRow {
   path: string; content_sha256: string; resolver_version: string; site_count: number; relation_count: number;
   sites: string; relations: string; call_counts: string;
 }
-const warning = "HEAD-only static Python entity graph. Ordinary references are not indexed; dynamic/external calls may be unresolved. Empty results never prove absence. Verify findings using read_source.";
+const warningFor = (names: string) => `HEAD-only static ${names} entity graph. Ordinary references are not indexed; dynamic/external calls may be unresolved. Empty results never prove absence. Verify findings using read_source.`;
 const boundedWarning = (value: string) => value.slice(0, 512);
-const graphIdentity = (snapshotId: string, budget: GraphBuildBudget, scope: GraphScope) => sha256(JSON.stringify({ snapshotId, schema: GRAPH_SCHEMA_VERSION, resolver: RESOLVER_VERSION, parser: PARSER_VERSION, policy: GRAPH_POLICY_VERSION, scope, budget }));
-export const graphCacheDir = (state: string, snapshotId: string, budget: GraphBuildBudget = DEFAULT_GRAPH_BUDGET, scope: GraphScope = "core") => join(state, "graphs", graphIdentity(snapshotId, budget, scope));
-export const graphPublishPath = (state: string, snapshotId: string, budget: GraphBuildBudget = DEFAULT_GRAPH_BUDGET, scope: GraphScope = "core") => join(graphCacheDir(state, snapshotId, budget, scope), "published.json");
-export const graphCheckpointPath = (state: string, snapshotId: string, budget: GraphBuildBudget = DEFAULT_GRAPH_BUDGET, scope: GraphScope = "core") => join(graphCacheDir(state, snapshotId, budget, scope), "checkpoint.sqlite");
-export const graphBuildLockPath = (state: string, snapshotId: string, budget: GraphBuildBudget = DEFAULT_GRAPH_BUDGET, scope: GraphScope = "core") => join(graphCacheDir(state, snapshotId, budget, scope), "build.lock");
-const graphFailurePath = (state: string, snapshotId: string, budget: GraphBuildBudget, scope: GraphScope) => join(graphCacheDir(state, snapshotId, budget, scope), "failure.json");
+/** One language keeps the Graph v4 identity shape; several add their ids (ADR 0022 D12). */
+const graphIdentity = (snapshotId: string, budget: GraphBuildBudget, scope: GraphScope, key: LanguageIdentity = PYTHON_IDENTITY) => sha256(JSON.stringify(key.ids.length === 1
+  ? { snapshotId, schema: GRAPH_SCHEMA_VERSION, resolver: key.resolver, parser: key.parser, policy: key.policy, scope, budget }
+  : { snapshotId, schema: GRAPH_SCHEMA_VERSION, languages: key.ids, resolver: key.resolver, parser: key.parser, policy: key.policy, scope, budget }));
+/** Identity of the languages a build of this snapshot would use. */
+export const graphLanguageKey = (store: SnapshotStore, languages: readonly string[] = LEGACY_LANGUAGE_IDS): LanguageIdentity =>
+  languageIdentity(effectiveLanguages(languages, Object.keys(store.manifest.head)));
+export const graphCacheDir = (state: string, snapshotId: string, budget: GraphBuildBudget = DEFAULT_GRAPH_BUDGET, scope: GraphScope = "core", key: LanguageIdentity = PYTHON_IDENTITY) => join(state, "graphs", graphIdentity(snapshotId, budget, scope, key));
+export const graphPublishPath = (state: string, snapshotId: string, budget: GraphBuildBudget = DEFAULT_GRAPH_BUDGET, scope: GraphScope = "core", key: LanguageIdentity = PYTHON_IDENTITY) => join(graphCacheDir(state, snapshotId, budget, scope, key), "published.json");
+export const graphCheckpointPath = (state: string, snapshotId: string, budget: GraphBuildBudget = DEFAULT_GRAPH_BUDGET, scope: GraphScope = "core", key: LanguageIdentity = PYTHON_IDENTITY) => join(graphCacheDir(state, snapshotId, budget, scope, key), "checkpoint.sqlite");
+export const graphBuildLockPath = (state: string, snapshotId: string, budget: GraphBuildBudget = DEFAULT_GRAPH_BUDGET, scope: GraphScope = "core", key: LanguageIdentity = PYTHON_IDENTITY) => join(graphCacheDir(state, snapshotId, budget, scope, key), "build.lock");
+const graphFailurePath = (state: string, snapshotId: string, budget: GraphBuildBudget, scope: GraphScope, key: LanguageIdentity) => join(graphCacheDir(state, snapshotId, budget, scope, key), "failure.json");
 
 export class GraphOpenError extends Error {
   readonly status: "building" | "error"; readonly coverage: GraphCoverage; readonly warnings: string[];
@@ -69,25 +81,25 @@ function generationPath(cacheDir: string, manifest: PublishedManifest): string {
   if (!/^generations\/[a-f0-9-]+\.sqlite$/.test(manifest.databaseFile.replaceAll("\\", "/")) || basename(manifest.databaseFile) !== `${manifest.generationId}.sqlite`) throw new Error("Invalid graph generation manifest path");
   return join(cacheDir, "generations", `${manifest.generationId}.sqlite`);
 }
-async function readPublished(state: string, snapshotId: string, budget: GraphBuildBudget, scope: GraphScope): Promise<PublishedManifest | undefined> {
-  const value = await readJson<PublishedManifest>(graphPublishPath(state, snapshotId, budget, scope));
+async function readPublished(state: string, snapshotId: string, budget: GraphBuildBudget, scope: GraphScope, key: LanguageIdentity): Promise<PublishedManifest | undefined> {
+  const value = await readJson<PublishedManifest>(graphPublishPath(state, snapshotId, budget, scope, key));
   if (!value) return;
-  const identity = graphIdentity(snapshotId, budget, scope);
-  if (value.manifestVersion !== 1 || value.snapshotId !== snapshotId || value.cacheIdentity !== identity || value.schemaVersion !== GRAPH_SCHEMA_VERSION || value.resolverVersion !== RESOLVER_VERSION || value.parserVersion !== PARSER_VERSION || value.policyVersion !== GRAPH_POLICY_VERSION || value.scope !== scope || JSON.stringify(value.budget) !== JSON.stringify(budget)) throw new Error("Graph publish manifest identity mismatch");
-  generationPath(graphCacheDir(state, snapshotId, budget, scope), value);
+  const identity = graphIdentity(snapshotId, budget, scope, key);
+  if (value.manifestVersion !== 1 || value.snapshotId !== snapshotId || value.cacheIdentity !== identity || value.schemaVersion !== GRAPH_SCHEMA_VERSION || value.resolverVersion !== key.resolver || value.parserVersion !== key.parser || value.policyVersion !== key.policy || value.scope !== scope || JSON.stringify(value.budget) !== JSON.stringify(budget)) throw new Error("Graph publish manifest identity mismatch");
+  generationPath(graphCacheDir(state, snapshotId, budget, scope, key), value);
   return value;
 }
-export async function publishedGraphPath(state: string, snapshotId: string, budget: GraphBuildBudget = DEFAULT_GRAPH_BUDGET, scope: GraphScope = "core"): Promise<string> {
-  const manifest = await readPublished(state, snapshotId, budget, scope); if (!manifest) throw Object.assign(new Error("No published graph generation"), { code: "ENOENT" });
-  return generationPath(graphCacheDir(state, snapshotId, budget, scope), manifest);
+export async function publishedGraphPath(state: string, snapshotId: string, budget: GraphBuildBudget = DEFAULT_GRAPH_BUDGET, scope: GraphScope = "core", key: LanguageIdentity = PYTHON_IDENTITY): Promise<string> {
+  const manifest = await readPublished(state, snapshotId, budget, scope, key); if (!manifest) throw Object.assign(new Error("No published graph generation"), { code: "ENOENT" });
+  return generationPath(graphCacheDir(state, snapshotId, budget, scope, key), manifest);
 }
 async function syncFile(path: string): Promise<void> { const handle = await openFile(path, "r+"); try { await handle.sync(); } finally { await handle.close(); } }
 
-async function quarantinePublished(state: string, snapshotId: string, budget: GraphBuildBudget, scope: GraphScope, manifest?: PublishedManifest): Promise<void> {
-  const cache = graphCacheDir(state, snapshotId, budget, scope); const quarantine = join(cache, "quarantine"); await mkdir(quarantine, { recursive: true, mode: 0o700 });
+async function quarantinePublished(state: string, snapshotId: string, budget: GraphBuildBudget, scope: GraphScope, key: LanguageIdentity, manifest?: PublishedManifest): Promise<void> {
+  const cache = graphCacheDir(state, snapshotId, budget, scope, key); const quarantine = join(cache, "quarantine"); await mkdir(quarantine, { recursive: true, mode: 0o700 });
   const suffix = `${Date.now()}-${randomUUID()}`;
   if (manifest) await rename(generationPath(cache, manifest), join(quarantine, `${manifest.generationId}-${suffix}.sqlite`)).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
-  await rename(graphPublishPath(state, snapshotId, budget, scope), join(quarantine, `published-${suffix}.json`)).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
+  await rename(graphPublishPath(state, snapshotId, budget, scope, key), join(quarantine, `published-${suffix}.json`)).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
 }
 
 async function acquireBuildLock(path: string, ownerToken: string): Promise<void> {
@@ -100,8 +112,8 @@ async function acquireBuildLock(path: string, ownerToken: string): Promise<void>
     throw new GraphOpenError("building", "Graph build is already in progress; no unpublished checkpoint is queryable.");
   }
 }
-export async function releaseGraphBuildLock(state: string, snapshotId: string, ownerToken: string, budget: GraphBuildBudget = DEFAULT_GRAPH_BUDGET, scope: GraphScope = "core"): Promise<void> {
-  const path = graphBuildLockPath(state, snapshotId, budget, scope);
+export async function releaseGraphBuildLock(state: string, snapshotId: string, ownerToken: string, budget: GraphBuildBudget = DEFAULT_GRAPH_BUDGET, scope: GraphScope = "core", key: LanguageIdentity = PYTHON_IDENTITY): Promise<void> {
+  const path = graphBuildLockPath(state, snapshotId, budget, scope, key);
   try { const value = JSON.parse(await readFile(path, "utf8")) as { ownerToken?: string }; if (value.ownerToken === ownerToken) await rm(path, { force: true }); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
 }
@@ -138,7 +150,7 @@ function commitResolutionCheckpoint(db: DatabaseSync, identity: string, row: Res
     db.exec("COMMIT");
   } catch (error) { try { db.exec("ROLLBACK"); } catch { /* preserve original */ } throw error; }
 }
-function excludedCount(catalog: PythonCatalogEntry[], classification: PythonCatalogEntry["classification"]): number { return catalog.filter(entry => !entry.included && entry.classification === classification).length; }
+function excludedCount(catalog: LanguageCatalogEntry[], classification: LanguageCatalogEntry["classification"]): number { return catalog.filter(entry => !entry.included && entry.classification === classification).length; }
 function storedSites(fact: SyntaxFacts, relations: RelationFact[]): StoredDependencySite[] {
   const bySite = new Map<string, RelationFact[]>(); for (const edge of relations) bySite.set(edge.siteId, [...bySite.get(edge.siteId) ?? [], edge]);
   const source = (site: CallSiteFact | InheritanceFact, kind: "call" | "inherit"): StoredDependencySite => ({
@@ -156,7 +168,8 @@ function storedSites(fact: SyntaxFacts, relations: RelationFact[]): StoredDepend
   };
   return [...fact.calls.map(site => source(site, "call")), ...fact.inheritances.map(site => source(site, "inherit")), ...fact.imports.map(imported)];
 }
-function relationAggregateId(snapshotId: string, edge: RelationFact): string { return sha256(JSON.stringify([snapshotId, edge.fromId, edge.toId, edge.relation, edge.resolution, RESOLVER_VERSION])); }
+/** The producing resolver version is part of the aggregate identity; Python-only builds keep Graph v4 ids. */
+function relationAggregateId(snapshotId: string, edge: RelationFact): string { return sha256(JSON.stringify([snapshotId, edge.fromId, edge.toId, edge.relation, edge.resolution, edge.resolverVersion])); }
 
 type EntityRow = Record<string, unknown>;
 function entityFromRow(row: EntityRow): SymbolFact {
@@ -193,60 +206,62 @@ function metricsForPublished(_state: string, _snapshotId: string, _budget: Graph
 /** Immutable, already-published graph generation. */
 export class SqliteCodeGraph implements CodeGraph {
   private db: DatabaseSync; private snapshotId: string; private coverage: GraphCoverage; private warnings: string[];
-  private generationId: string; private generationState: GraphGenerationState;
-  private constructor(db: DatabaseSync, manifest: PublishedManifest) { this.db = db; this.snapshotId = manifest.snapshotId; this.coverage = manifest.coverage; this.warnings = manifest.warnings; this.generationId = manifest.generationId; this.generationState = manifest.generationState; }
+  private generationId: string; private generationState: GraphGenerationState; private resolverVersion: string;
+  private constructor(db: DatabaseSync, manifest: PublishedManifest) { this.resolverVersion = manifest.resolverVersion; this.db = db; this.snapshotId = manifest.snapshotId; this.coverage = manifest.coverage; this.warnings = manifest.warnings; this.generationId = manifest.generationId; this.generationState = manifest.generationState; }
 
-  private static async openPublished(state: string, snapshotId: string, budget: GraphBuildBudget, scope: GraphScope, manifest: PublishedManifest): Promise<SqliteCodeGraph> {
-    const path = generationPath(graphCacheDir(state, snapshotId, budget, scope), manifest); const info = await stat(path);
+  private static async openPublished(state: string, snapshotId: string, budget: GraphBuildBudget, scope: GraphScope, key: LanguageIdentity, manifest: PublishedManifest): Promise<SqliteCodeGraph> {
+    const path = generationPath(graphCacheDir(state, snapshotId, budget, scope, key), manifest); const info = await stat(path);
     if (info.size !== manifest.databaseBytes) throw new Error("Published graph size changed");
     const db = new DatabaseSync(path, { readOnly: true });
     try {
       db.exec("PRAGMA query_only=ON; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=1000;");
       const meta = db.prepare("SELECT schema_version,resolver_version,parser_version,policy_version,graph_scope,revision,state,cache_identity,generation_id,coverage,warnings FROM graph_snapshots WHERE snapshot_id=?").get(snapshotId) as Record<string, unknown> | undefined;
-      const validMeta = meta && meta.schema_version === GRAPH_SCHEMA_VERSION && meta.resolver_version === RESOLVER_VERSION && meta.parser_version === PARSER_VERSION && meta.policy_version === GRAPH_POLICY_VERSION && meta.graph_scope === scope && meta.revision === "head" && meta.cache_identity === manifest.cacheIdentity && meta.generation_id === manifest.generationId && meta.state === manifest.generationState && meta.coverage === JSON.stringify(manifest.coverage) && meta.warnings === JSON.stringify(manifest.warnings);
+      const validMeta = meta && meta.schema_version === GRAPH_SCHEMA_VERSION && meta.resolver_version === key.resolver && meta.parser_version === key.parser && meta.policy_version === key.policy && meta.graph_scope === scope && meta.revision === "head" && meta.cache_identity === manifest.cacheIdentity && meta.generation_id === manifest.generationId && meta.state === manifest.generationState && meta.coverage === JSON.stringify(manifest.coverage) && meta.warnings === JSON.stringify(manifest.warnings);
       if (!validMeta || JSON.stringify(db.prepare("PRAGMA quick_check").all()) !== '[{"quick_check":"ok"}]' || db.prepare("PRAGMA foreign_key_check").all().length || dbCount(db, "files") !== manifest.counts.files || dbCount(db, "entities") !== manifest.counts.entities || dbCount(db, "dependency_sites") !== manifest.counts.sites || dbCount(db, "relations") !== manifest.counts.relations || dbCount(db, "relation_sites") !== manifest.counts.relationSites) throw new Error("Published graph validation failed");
       return new SqliteCodeGraph(db, manifest);
     } catch (error) { db.close(); throw error; }
   }
 
-  static async open(store: SnapshotStore, options: { budget?: GraphBuildBudget; ownerToken?: string; scope?: GraphScope; testFault?: "publish_enospc" } = {}): Promise<{ graph: SqliteCodeGraph; metrics: GraphMetrics }> {
+  static async open(store: SnapshotStore, options: { budget?: GraphBuildBudget; ownerToken?: string; scope?: GraphScope; languages?: readonly string[]; testFault?: "publish_enospc" } = {}): Promise<{ graph: SqliteCodeGraph; metrics: GraphMetrics }> {
     const started = performance.now(); const id = store.manifest.identity.id; const budget = options.budget ?? DEFAULT_GRAPH_BUDGET; const scope = options.scope ?? "core"; assertBudget(budget);
+    const languages = effectiveLanguages(options.languages ?? LEGACY_LANGUAGE_IDS, Object.keys(store.manifest.head)); const key = languageIdentity(languages);
     await isolatedState(store.stateDir, store.manifest.repositoryPath);
-    const cache = graphCacheDir(store.stateDir, id, budget, scope); await mkdir(join(cache, "generations"), { recursive: true, mode: 0o700 });
+    const cache = graphCacheDir(store.stateDir, id, budget, scope, key); await mkdir(join(cache, "generations"), { recursive: true, mode: 0o700 });
     let published: PublishedManifest | undefined;
     try {
-      published = await readPublished(store.stateDir, id, budget, scope);
+      published = await readPublished(store.stateDir, id, budget, scope, key);
       if (published) {
-        const graph = await this.openPublished(store.stateDir, id, budget, scope, published);
-        return { graph, metrics: metricsForPublished(store.stateDir, id, budget, scope, published, await checkpointBytes(graphCheckpointPath(store.stateDir, id, budget, scope))) };
+        const graph = await this.openPublished(store.stateDir, id, budget, scope, key, published);
+        return { graph, metrics: metricsForPublished(store.stateDir, id, budget, scope, published, await checkpointBytes(graphCheckpointPath(store.stateDir, id, budget, scope, key))) };
       }
     } catch {
-      await quarantinePublished(store.stateDir, id, budget, scope, published);
+      await quarantinePublished(store.stateDir, id, budget, scope, key, published);
     }
-    const knownFailure = await readJson<{ cacheIdentity: string; reason: string; coverage: GraphCoverage; warnings: string[] }>(graphFailurePath(store.stateDir, id, budget, scope));
-    if (knownFailure?.cacheIdentity === graphIdentity(id, budget, scope)) throw new GraphOpenError("error", knownFailure.reason, knownFailure.coverage, knownFailure.warnings);
+    const knownFailure = await readJson<{ cacheIdentity: string; reason: string; coverage: GraphCoverage; warnings: string[] }>(graphFailurePath(store.stateDir, id, budget, scope, key));
+    if (knownFailure?.cacheIdentity === graphIdentity(id, budget, scope, key)) throw new GraphOpenError("error", knownFailure.reason, knownFailure.coverage, knownFailure.warnings);
 
-    const ownerToken = options.ownerToken ?? randomUUID(); const lock = graphBuildLockPath(store.stateDir, id, budget, scope); await acquireBuildLock(lock, ownerToken);
+    const ownerToken = options.ownerToken ?? randomUUID(); const lock = graphBuildLockPath(store.stateDir, id, budget, scope, key); await acquireBuildLock(lock, ownerToken);
     try {
-      const raced = await readPublished(store.stateDir, id, budget, scope);
+      const raced = await readPublished(store.stateDir, id, budget, scope, key);
       if (raced) {
-        const graph = await this.openPublished(store.stateDir, id, budget, scope, raced);
-        return { graph, metrics: metricsForPublished(store.stateDir, id, budget, scope, raced, await checkpointBytes(graphCheckpointPath(store.stateDir, id, budget, scope))) };
+        const graph = await this.openPublished(store.stateDir, id, budget, scope, key, raced);
+        return { graph, metrics: metricsForPublished(store.stateDir, id, budget, scope, raced, await checkpointBytes(graphCheckpointPath(store.stateDir, id, budget, scope, key))) };
       }
-      return await this.build(store, budget, scope, started, options.testFault);
-    } finally { await releaseGraphBuildLock(store.stateDir, id, ownerToken, budget, scope); }
+      return await this.build(store, budget, scope, started, languages, key, options.testFault);
+    } finally { await releaseGraphBuildLock(store.stateDir, id, ownerToken, budget, scope, key); }
   }
 
   /** Evaluation-only: validate and open an already published generation without
    * creating directories, quarantining data, acquiring a builder lock, or rebuilding. */
-  static async openPublishedOnly(store: SnapshotStore, options: { budget?: GraphBuildBudget; scope?: GraphScope } = {}): Promise<{ graph: SqliteCodeGraph; metrics: GraphMetrics; manifest: PublishedManifest }> {
+  static async openPublishedOnly(store: SnapshotStore, options: { budget?: GraphBuildBudget; scope?: GraphScope; languages?: readonly string[] } = {}): Promise<{ graph: SqliteCodeGraph; metrics: GraphMetrics; manifest: PublishedManifest }> {
     const id = store.manifest.identity.id; const budget = options.budget ?? DEFAULT_GRAPH_BUDGET; const scope = options.scope ?? "core"; assertBudget(budget);
+    const key = graphLanguageKey(store, options.languages);
     let manifest: PublishedManifest | undefined;
     try {
-      manifest = await readPublished(store.stateDir, id, budget, scope);
+      manifest = await readPublished(store.stateDir, id, budget, scope, key);
       if (!manifest) throw new Error("No published graph generation");
-      const graph = await this.openPublished(store.stateDir, id, budget, scope, manifest);
-      const bytes = await checkpointBytes(graphCheckpointPath(store.stateDir, id, budget, scope));
+      const graph = await this.openPublished(store.stateDir, id, budget, scope, key, manifest);
+      const bytes = await checkpointBytes(graphCheckpointPath(store.stateDir, id, budget, scope, key));
       return { graph, metrics: metricsForPublished(store.stateDir, id, budget, scope, manifest, bytes), manifest };
     } catch (error) {
       const reason = error instanceof Error ? error.message : "Published graph validation failed";
@@ -254,19 +269,21 @@ export class SqliteCodeGraph implements CodeGraph {
     }
   }
 
-  private static async build(store: SnapshotStore, budget: GraphBuildBudget, scope: GraphScope, started: number, testFault?: "publish_enospc"): Promise<{ graph: SqliteCodeGraph; metrics: GraphMetrics }> {
-    const id = store.manifest.identity.id; const identity = graphIdentity(id, budget, scope); const stagingPath = graphCheckpointPath(store.stateDir, id, budget, scope);
-    const staging = openCheckpoint(stagingPath); let extractedFiles = 0; let resumedFiles = 0; let resumedResolutionFiles = 0; let resolvedFiles = 0; let extractor: { extract(input: { snapshotId: string; path: string; source: string }, limits?: { maxFacts?: number; deadline?: number }): Promise<SyntaxFacts>; dispose(): void } | undefined;
+  private static async build(store: SnapshotStore, budget: GraphBuildBudget, scope: GraphScope, started: number, languages: LanguageDescriptor[], key: LanguageIdentity, testFault?: "publish_enospc"): Promise<{ graph: SqliteCodeGraph; metrics: GraphMetrics }> {
+    const id = store.manifest.identity.id; const identity = graphIdentity(id, budget, scope, key); const stagingPath = graphCheckpointPath(store.stateDir, id, budget, scope, key);
+    const staging = openCheckpoint(stagingPath); let extractedFiles = 0; let resumedFiles = 0; let resumedResolutionFiles = 0; let resolvedFiles = 0; const extractors = new Map<string, LoadedExtractor>();
+    const disposeExtractors = () => { for (const item of extractors.values()) item.dispose(); extractors.clear(); };
     try {
       staging.exec(await readFile(new URL("../../schemas/graph-checkpoint.sql", import.meta.url), "utf8"));
       const now = new Date().toISOString();
       staging.prepare("INSERT OR IGNORE INTO graph_builds(cache_identity,snapshot_id,schema_version,resolver_version,parser_version,policy_version,budget,state,attempts,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
-        .run(identity, id, GRAPH_SCHEMA_VERSION, RESOLVER_VERSION, PARSER_VERSION, GRAPH_POLICY_VERSION, JSON.stringify({ scope, ...budget }), "building", 0, now, now);
+        .run(identity, id, GRAPH_SCHEMA_VERSION, key.resolver, key.parser, key.policy, JSON.stringify({ scope, ...budget }), "building", 0, now, now);
       const build = staging.prepare("SELECT snapshot_id,schema_version,resolver_version,parser_version,policy_version,budget FROM graph_builds WHERE cache_identity=?").get(identity) as Record<string, unknown>;
-      if (build.snapshot_id !== id || build.schema_version !== GRAPH_SCHEMA_VERSION || build.resolver_version !== RESOLVER_VERSION || build.parser_version !== PARSER_VERSION || build.policy_version !== GRAPH_POLICY_VERSION || build.budget !== JSON.stringify({ scope, ...budget })) throw new Error("Checkpoint identity mismatch");
+      if (build.snapshot_id !== id || build.schema_version !== GRAPH_SCHEMA_VERSION || build.resolver_version !== key.resolver || build.parser_version !== key.parser || build.policy_version !== key.policy || build.budget !== JSON.stringify({ scope, ...budget })) throw new Error("Checkpoint identity mismatch");
       staging.prepare("UPDATE graph_builds SET state='building',attempts=attempts+1,failure_kind=NULL,failure_reason=NULL,updated_at=? WHERE cache_identity=?").run(now, identity);
 
-      const catalog = pythonCatalog(store.manifest.head, store.manifest.changedPaths, scope); const included = catalog.filter(entry => entry.included); const paths = included.map(entry => entry.path); const includedPaths = new Set(paths);
+      const catalog = languageCatalog(store.manifest.head, store.manifest.changedPaths, scope, languages); const byId = new Map(languages.map(item => [item.id, item])); const languageOf = new Map(catalog.map(entry => [entry.path, entry.language]));
+      const extractorFor = async (path: string) => { const language = languageOf.get(path)!; let found = extractors.get(language); if (!found) extractors.set(language, found = await loadExtractor(byId.get(language)!)); return found; }; const included = catalog.filter(entry => entry.included); const paths = included.map(entry => entry.path); const includedPaths = new Set(paths);
       let rows = checkpointRows(staging, identity);
       for (const row of rows) if (!includedPaths.has(row.path) || !store.manifest.head[row.path] || store.manifest.head[row.path]!.hash !== row.content_sha256) {
         staging.prepare("DELETE FROM resolution_checkpoints WHERE cache_identity=? AND path=?").run(identity, row.path); staging.prepare("DELETE FROM file_checkpoints WHERE cache_identity=? AND path=?").run(identity, row.path);
@@ -274,13 +291,12 @@ export class SqliteCodeGraph implements CodeGraph {
       rows = checkpointRows(staging, identity); const existing = new Map(rows.map(row => [row.path, row]));
       resumedFiles = rows.filter(row => row.status === "complete" || row.status === "incomplete").length;
       let totalFacts = rows.reduce((sum, row) => sum + row.fact_count, 0); let limitReason: string | undefined;
-      const { PythonTreeSitterExtractor } = await import("../../integrations/tree-sitter/src/python-extractor.ts"); extractor = await PythonTreeSitterExtractor.create();
       for (const path of paths) {
         if (existing.has(path)) continue;
         const frozen = store.manifest.head[path]!;
         if (frozen.status !== "text") { commitCheckpoint(staging, identity, { path, content_sha256: frozen.hash, status: "unsupported", fact_count: 0, facts: null, diagnostics: "[]", failure_kind: "invalid_source", failure_reason: "Unsupported snapshot file" }); continue; }
         let facts: SyntaxFacts;
-        try { facts = await extractor.extract({ snapshotId: id, path, source: await store.text("head", path) }, { maxFacts: budget.maxFileFacts, deadline: performance.now() + budget.maxFileMs }); }
+        try { facts = await (await extractorFor(path)).extract({ snapshotId: id, path, source: await store.text("head", path) }, { maxFacts: budget.maxFileFacts, deadline: performance.now() + budget.maxFileMs }); }
         catch (error) {
           const reason = error instanceof Error ? error.message : "Extraction failed"; const deterministic = reason.includes("per-file extraction");
           if (!deterministic) throw error;
@@ -291,7 +307,7 @@ export class SqliteCodeGraph implements CodeGraph {
         commitCheckpoint(staging, identity, { path, content_sha256: frozen.hash, status: facts.parseComplete ? "complete" : "incomplete", fact_count: count, facts: JSON.stringify(facts), diagnostics: JSON.stringify(facts.diagnostics), failure_kind: null, failure_reason: null });
         totalFacts += count; extractedFiles++;
       }
-      extractor.dispose(); extractor = undefined;
+      disposeExtractors();
       rows = checkpointRows(staging, identity); const rowMap = new Map(rows.map(row => [row.path, row]));
       const parsedRows = rows.filter(row => row.status === "complete" || row.status === "incomplete");
       const coverage = emptyCoverage(); coverage.totalLanguageFiles = catalog.length; coverage.eligibleFiles = paths.length; coverage.plannedFiles = paths.length; coverage.indexedFiles = parsedRows.length;
@@ -299,9 +315,14 @@ export class SqliteCodeGraph implements CodeGraph {
       coverage.excludedTestFiles = excludedCount(catalog, "test"); coverage.excludedExampleFiles = excludedCount(catalog, "example"); coverage.excludedBenchmarkFiles = excludedCount(catalog, "benchmark"); coverage.excludedGeneratedFiles = excludedCount(catalog, "generated"); coverage.excludedVendorFiles = excludedCount(catalog, "vendor");
       coverage.parseIncompleteFiles = rows.filter(row => row.status === "incomplete").length; coverage.unsupportedFiles = rows.filter(row => row.status === "unsupported").length; coverage.failedFiles = rows.filter(row => row.status === "failed").length;
       coverage.omittedFiles = Math.max(0, paths.length - rows.length); if (limitReason) coverage.limitReason = limitReason;
+      if (languages.length > 1) coverage.byLanguage = Object.fromEntries(languages.map(language => {
+        const mine = rows.filter(row => languageOf.get(row.path) === language.id); const planned = paths.filter(path => languageOf.get(path) === language.id).length;
+        return [language.id, { eligibleFiles: planned, indexedFiles: mine.filter(row => row.status === "complete" || row.status === "incomplete").length, parseIncompleteFiles: mine.filter(row => row.status === "incomplete").length,
+          unsupportedFiles: mine.filter(row => row.status === "unsupported").length, failedFiles: mine.filter(row => row.status === "failed").length, omittedFiles: Math.max(0, planned - mine.length) }];
+      }));
       const checkpointedPaths = new Set(rows.map(row => row.path)); coverage.omittedChangedFiles = included.filter(entry => entry.layer === "changed" && !checkpointedPaths.has(entry.path)).length; coverage.omittedProductionFiles = included.filter(entry => entry.layer === "production" && !checkpointedPaths.has(entry.path)).length;
-      const warnings = [warning]; const excluded = catalog.length - paths.length;
-      if (excluded) warnings.push(`Core scope intentionally excluded ${excluded} unchanged test/example/benchmark/generated/vendor Python files; request scope=all for an explicit supplemental graph.`);
+      const names = displayNames(languages); const warnings = [warningFor(names)]; const excluded = catalog.length - paths.length;
+      if (excluded) warnings.push(`Core scope intentionally excluded ${excluded} unchanged test/example/benchmark/generated/vendor ${names} files; request scope=all for an explicit supplemental graph.`);
       for (const row of rows) {
         for (const diagnostic of JSON.parse(row.diagnostics) as string[]) if (warnings.length < 50) warnings.push(`${row.path.slice(0, 256)}: ${boundedWarning(diagnostic)}`);
         if (row.failure_reason && warnings.length < 50) warnings.push(`${row.path.slice(0, 256)}: ${boundedWarning(row.failure_reason)}`);
@@ -310,27 +331,32 @@ export class SqliteCodeGraph implements CodeGraph {
       if (coverage.parseIncompleteFiles) warnings.push("Parse-incomplete files contribute declarations but no proven semantic edges.");
       if (coverage.unsupportedFiles || coverage.failedFiles || coverage.omittedFiles) warnings.push("Coverage is partial. Empty caller results cannot establish repository-wide absence.");
       setBuildState(staging, identity, "resolving");
-      const resolver = new PythonResolver(id); let structuralRelations: RelationFact[] = [];
+      // One resolver per language; no cross-language edges. Structure is shared (ADR 0022).
+      const resolvers = new Map<string, LanguageResolver>(); const headPaths = Object.keys(store.manifest.head);
+      for (const language of languages) resolvers.set(language.id, await language.createResolver({ snapshotId: id, paths: headPaths, readText: path => store.text("head", path) }));
+      const resolverFor = (path: string) => resolvers.get(languageOf.get(path)!)!; const resolverVersionFor = (path: string) => byId.get(languageOf.get(path)!)!.versions.resolver;
+      const structure = new StructureIndexer(id, key.resolvers); let structuralRelations: RelationFact[] = []; let entities: SymbolFact[] = [];
       try {
         // Pass 1 retains only declarations/bindings needed for cross-file resolution.
-        const parsedPaths = new Set(parsedRows.map(row => row.path)); for (const entry of catalog) if (!parsedPaths.has(entry.path)) resolver.markModuleUnavailable(pythonModuleName(entry.path));
-        for (const row of parsedRows) resolver.index(checkpointFact(staging, identity, row.path));
-        resolver.finalize(); structuralRelations = resolver.structuralRelations(); let relationFacts = structuralRelations.length;
+        const parsedPaths = new Set(parsedRows.map(row => row.path)); for (const entry of catalog) if (!parsedPaths.has(entry.path)) resolverFor(entry.path).markModuleUnavailable(byId.get(entry.language)!.moduleName(entry.path));
+        for (const row of parsedRows) resolverFor(row.path).index(checkpointFact(staging, identity, row.path));
+        for (const resolver of resolvers.values()) resolver.finalize();
+        entities = structure.entities([...resolvers.values()].flatMap(resolver => resolver.languageEntities)); structuralRelations = structure.relations(entities); let relationFacts = structuralRelations.length;
         let resolutionMeta = resolutionRows(staging, identity); const validRows = new Map(parsedRows.map(row => [row.path, row]));
         for (const item of resolutionMeta) {
           const extraction = validRows.get(item.path);
-          if (!extraction || extraction.content_sha256 !== item.content_sha256 || item.resolver_version !== RESOLVER_VERSION) staging.prepare("DELETE FROM resolution_checkpoints WHERE cache_identity=? AND path=?").run(identity, item.path);
+          if (!extraction || extraction.content_sha256 !== item.content_sha256 || item.resolver_version !== resolverVersionFor(item.path)) staging.prepare("DELETE FROM resolution_checkpoints WHERE cache_identity=? AND path=?").run(identity, item.path);
         }
         resolutionMeta = resolutionRows(staging, identity); const existingResolution = new Map(resolutionMeta.map(row => [row.path, row]));
         for (const row of parsedRows) {
           const cached = existingResolution.get(row.path);
           if (cached) { relationFacts += Number(cached.relation_count); resumedResolutionFiles++; }
           else {
-            const fact = checkpointFact(staging, identity, row.path); const relations = resolver.resolveFile(fact); relationFacts += relations.length;
+            const fact = checkpointFact(staging, identity, row.path); const relations = resolverFor(row.path).resolveFile(fact); relationFacts += relations.length;
             if (relationFacts > budget.maxRelations) throw new Error("Graph relation limit exceeded");
             const sites = storedSites(fact, relations); const counts = { resolved: 0, candidate: 0, unresolved: 0 };
             for (const call of fact.calls) if (call.resolution === "candidate") counts.candidate++; else if (call.resolution === "unresolved") counts.unresolved++; else counts.resolved++;
-            commitResolutionCheckpoint(staging, identity, { path: row.path, content_sha256: row.content_sha256, resolver_version: RESOLVER_VERSION, site_count: sites.length, relation_count: relations.length, sites: JSON.stringify(sites), relations: JSON.stringify(relations), call_counts: JSON.stringify(counts) }); resolvedFiles++;
+            commitResolutionCheckpoint(staging, identity, { path: row.path, content_sha256: row.content_sha256, resolver_version: resolverVersionFor(row.path), site_count: sites.length, relation_count: relations.length, sites: JSON.stringify(sites), relations: JSON.stringify(relations), call_counts: JSON.stringify(counts) }); resolvedFiles++;
           }
           if (relationFacts > budget.maxRelations) throw new Error("Graph relation limit exceeded");
         }
@@ -338,7 +364,7 @@ export class SqliteCodeGraph implements CodeGraph {
       catch (error) {
         const reason = error instanceof Error ? error.message : "Resolver failed"; const deterministic = reason.includes("limit exceeded");
         setBuildState(staging, identity, "error", deterministic ? "capacity" : "internal", boundedWarning(reason));
-        if (deterministic) await writeJson(graphFailurePath(store.stateDir, id, budget, scope), { cacheIdentity: identity, kind: "capacity", reason, coverage, warnings: [...warnings, reason], failedAt: new Date().toISOString() });
+        if (deterministic) await writeJson(graphFailurePath(store.stateDir, id, budget, scope, key), { cacheIdentity: identity, kind: "capacity", reason, coverage, warnings: [...warnings, reason], failedAt: new Date().toISOString() });
         throw error;
       }
       const resolvedRows = resolutionRows(staging, identity);
@@ -346,18 +372,18 @@ export class SqliteCodeGraph implements CodeGraph {
         const counts = JSON.parse(resolutionCheckpoint(staging, identity, row.path).call_counts) as { resolved: number; candidate: number; unresolved: number };
         coverage.resolvedCalls += counts.resolved; coverage.candidateCalls += counts.candidate; coverage.unresolvedCalls += counts.unresolved;
       }
-      const entities = resolver.entities; coverage.entityCount = entities.length; coverage.callSiteCount = coverage.resolvedCalls + coverage.candidateCalls + coverage.unresolvedCalls;
+      coverage.entityCount = entities.length; coverage.callSiteCount = coverage.resolvedCalls + coverage.candidateCalls + coverage.unresolvedCalls;
       if (coverage.unresolvedCalls || coverage.candidateCalls) warnings.push("Unresolved/candidate call sites are retained as diagnostics but excluded from proven CALLS traversal.");
       const generationState: GraphGenerationState = coverage.parseIncompleteFiles || coverage.unsupportedFiles || coverage.failedFiles || coverage.omittedFiles ? "partial" : "ready"; coverage.generationState = generationState;
       setBuildState(staging, identity, "publishing");
 
-      const generationId = randomUUID(); const cache = graphCacheDir(store.stateDir, id, budget, scope); const candidate = join(cache, "generations", `${generationId}.sqlite`);
+      const generationId = randomUUID(); const cache = graphCacheDir(store.stateDir, id, budget, scope, key); const candidate = join(cache, "generations", `${generationId}.sqlite`);
       const counts: PublishedManifest["counts"] = { files: catalog.length, entities: entities.length, sites: resolvedRows.reduce((sum, row) => sum + Number(row.site_count), 0), relations: 0, relationSites: 0 };
       const db = new DatabaseSync(candidate);
       try {
         db.exec(await readFile(new URL("../../schemas/graph.sql", import.meta.url), "utf8")); db.exec("BEGIN IMMEDIATE");
         db.prepare("INSERT INTO graph_snapshots(snapshot_id,schema_version,resolver_version,parser_version,policy_version,graph_scope,revision,state,cache_identity,generation_id,coverage,warnings,file_count,entity_count,site_count,relation_count,relation_site_count,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-          .run(id, GRAPH_SCHEMA_VERSION, RESOLVER_VERSION, PARSER_VERSION, GRAPH_POLICY_VERSION, scope, "head", generationState, identity, generationId, "{}", "[]", counts.files, counts.entities, counts.sites, 0, 0, new Date().toISOString());
+          .run(id, GRAPH_SCHEMA_VERSION, key.resolver, key.parser, key.policy, scope, "head", generationState, identity, generationId, "{}", "[]", counts.files, counts.entities, counts.sites, 0, 0, new Date().toISOString());
         db.exec("CREATE TEMP TABLE raw_edges(relation_id TEXT NOT NULL,site_id TEXT NOT NULL,path TEXT NOT NULL,start_line INTEGER NOT NULL,end_line INTEGER NOT NULL,start_column INTEGER NOT NULL,end_column INTEGER NOT NULL,declaration_order INTEGER,source_entity_id TEXT NOT NULL,target_entity_id TEXT NOT NULL,kind TEXT NOT NULL,resolution TEXT NOT NULL,resolver_version TEXT NOT NULL,PRIMARY KEY(relation_id,site_id))");
         const fileInsert = db.prepare("INSERT INTO files VALUES(?,?,?,?,?,?,?,?)"); const entityInsert = db.prepare("INSERT INTO entities VALUES(?,?,?,?,?,?,?,?,?,?,?,?)");
         const siteInsert = db.prepare("INSERT INTO dependency_sites VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"); const rawInsert = db.prepare("INSERT OR IGNORE INTO raw_edges VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)"); const relationInsert = db.prepare("INSERT INTO relations VALUES(?,?,?,?,?,?,?,?)");
@@ -390,18 +416,18 @@ export class SqliteCodeGraph implements CodeGraph {
         const reason = error instanceof Error ? error.message : "Graph publication failed"; setBuildState(staging, identity, "error", (error as NodeJS.ErrnoException).code === "ENOSPC" ? "transient" : "internal", boundedWarning(reason)); throw error;
       }
       db.close(); await syncFile(candidate); const databaseBytes = await fileBytes(candidate);
-      const manifest: PublishedManifest = { manifestVersion: 1, snapshotId: id, cacheIdentity: identity, schemaVersion: GRAPH_SCHEMA_VERSION, resolverVersion: RESOLVER_VERSION, parserVersion: PARSER_VERSION, policyVersion: GRAPH_POLICY_VERSION, scope, budget, generationId, generationState, databaseFile: `generations/${generationId}.sqlite`, databaseBytes, coverage, warnings, counts, publishedAt: new Date().toISOString() };
-      await writeJson(graphPublishPath(store.stateDir, id, budget, scope), manifest); setBuildState(staging, identity, "complete"); staging.exec("PRAGMA wal_checkpoint(TRUNCATE)");
-      const graph = await this.openPublished(store.stateDir, id, budget, scope, manifest);
+      const manifest: PublishedManifest = { manifestVersion: 1, snapshotId: id, cacheIdentity: identity, schemaVersion: GRAPH_SCHEMA_VERSION, resolverVersion: key.resolver, parserVersion: key.parser, policyVersion: key.policy, scope, budget, generationId, generationState, databaseFile: `generations/${generationId}.sqlite`, databaseBytes, coverage, warnings, counts, publishedAt: new Date().toISOString() };
+      await writeJson(graphPublishPath(store.stateDir, id, budget, scope, key), manifest); setBuildState(staging, identity, "complete"); staging.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+      const graph = await this.openPublished(store.stateDir, id, budget, scope, key, manifest);
       return { graph, metrics: { buildMs: performance.now() - started, queryMs: 0, cacheHit: false, coverage, resumedFiles, extractedFiles, resumedResolutionFiles, resolvedFiles, storage: { generationBytes: databaseBytes, checkpointBytes: await checkpointBytes(stagingPath) }, generationId, generationState, scope } };
-    } finally { extractor?.dispose(); staging.close(); }
+    } finally { disposeExtractors(); staging.close(); }
   }
 
   close(): void { this.db.close(); }
   private page<T>(input: { snapshotId: string; limit: number; cursor?: string }, key: unknown, query: (offset: number) => T[]): GraphPage<T> {
     if (input.snapshotId !== this.snapshotId) throw new Error("Graph snapshot mismatch");
     if (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 100) throw new Error("Graph limit must be 1..100");
-    const fingerprint = sha256(JSON.stringify([this.snapshotId, this.generationId, GRAPH_SCHEMA_VERSION, RESOLVER_VERSION, key])); let offset = 0;
+    const fingerprint = sha256(JSON.stringify([this.snapshotId, this.generationId, GRAPH_SCHEMA_VERSION, this.resolverVersion, key])); let offset = 0;
     if (input.cursor) {
       if (input.cursor.length > 256) throw new Error("Invalid graph cursor"); const parsed = JSON.parse(Buffer.from(input.cursor, "base64url").toString("utf8"));
       if (parsed.key !== fingerprint || !Number.isSafeInteger(parsed.offset) || parsed.offset < 0) throw new Error("Graph cursor belongs to another query/snapshot/generation"); offset = parsed.offset;
@@ -416,6 +442,18 @@ export class SqliteCodeGraph implements CodeGraph {
     if (!input.query.trim() || input.query.length > 256) throw new Error("Invalid graph lookup");
     return this.page(input, ["lookup", input.query], offset => (this.db.prepare("SELECT snapshot_id,entity_id,kind,function_kind,path,qualified_name,name,start_line,end_line,start_column,end_column,parent_entity_id FROM entities WHERE snapshot_id=? AND (entity_id=? OR name=? OR qualified_name=? OR path=?) ORDER BY entity_id LIMIT ? OFFSET ?").all(this.snapshotId, input.query, input.query, input.query, input.query, input.limit + 1, offset) as EntityRow[]).map(entityFromRow));
   }
+  /** Host-only navigation metadata (ADR 0021). Exact ids only; unknown ids are omitted, never guessed. */
+  async describe(input: { snapshotId: string; entityIds: string[] }): Promise<SymbolFact[]> {
+    if (input.snapshotId !== this.snapshotId) throw new Error("Graph snapshot mismatch");
+    if (!Array.isArray(input.entityIds) || input.entityIds.length > 5000 || input.entityIds.some(id => typeof id !== "string" || id.length > 128)) throw new Error("Invalid graph describe request");
+    const ids = [...new Set(input.entityIds)].sort(); const facts: SymbolFact[] = [];
+    for (let offset = 0; offset < ids.length; offset += 200) {
+      const chunk = ids.slice(offset, offset + 200);
+      const rows = this.db.prepare(`SELECT snapshot_id,entity_id,kind,function_kind,path,qualified_name,name,start_line,end_line,start_column,end_column,parent_entity_id FROM entities WHERE snapshot_id=? AND entity_id IN (${chunk.map(() => "?").join(",")}) ORDER BY entity_id`).all(this.snapshotId, ...chunk) as EntityRow[];
+      facts.push(...rows.map(entityFromRow));
+    }
+    return facts;
+  }
   async neighbors(input: Parameters<CodeGraph["neighbors"]>[0]): Promise<GraphPage<RelationFact>> {
     if (!["CONTAINS", "IMPORTS", "CALLS", "INHERITS"].includes(input.relation) || !["incoming", "outgoing"].includes(input.direction)) throw new Error("Invalid graph relation/direction");
     if (!this.db.prepare("SELECT 1 FROM entities WHERE snapshot_id=? AND entity_id=?").get(this.snapshotId, input.symbolId)) throw new Error("Entity is not in this snapshot/generation");
@@ -425,14 +463,14 @@ export class SqliteCodeGraph implements CodeGraph {
   }
 }
 
-export async function graphBuildAudit(state: string, snapshotId: string, budget: GraphBuildBudget = DEFAULT_GRAPH_BUDGET, scope: GraphScope = "core"): Promise<{ attempts: number; files: { path: string; status: string; factCount: number }[]; resolutionFiles: { path: string; siteCount: number; relationCount: number }[] }> {
-  const path = graphCheckpointPath(state, snapshotId, budget, scope); const db = new DatabaseSync(path, { readOnly: true });
-  try { const identity = graphIdentity(snapshotId, budget, scope); const build = db.prepare("SELECT attempts FROM graph_builds WHERE cache_identity=?").get(identity) as { attempts: number }; const rows = db.prepare("SELECT path,status,fact_count FROM file_checkpoints WHERE cache_identity=? ORDER BY path").all(identity) as unknown as { path: string; status: string; fact_count: number }[]; const resolved = db.prepare("SELECT path,site_count,relation_count FROM resolution_checkpoints WHERE cache_identity=? ORDER BY path").all(identity) as unknown as { path: string; site_count: number; relation_count: number }[]; return { attempts: Number(build.attempts), files: rows.map(row => ({ path: row.path, status: row.status, factCount: Number(row.fact_count) })), resolutionFiles: resolved.map(row => ({ path: row.path, siteCount: Number(row.site_count), relationCount: Number(row.relation_count) })) }; }
+export async function graphBuildAudit(state: string, snapshotId: string, budget: GraphBuildBudget = DEFAULT_GRAPH_BUDGET, scope: GraphScope = "core", key: LanguageIdentity = PYTHON_IDENTITY): Promise<{ attempts: number; files: { path: string; status: string; factCount: number }[]; resolutionFiles: { path: string; siteCount: number; relationCount: number }[] }> {
+  const path = graphCheckpointPath(state, snapshotId, budget, scope, key); const db = new DatabaseSync(path, { readOnly: true });
+  try { const identity = graphIdentity(snapshotId, budget, scope, key); const build = db.prepare("SELECT attempts FROM graph_builds WHERE cache_identity=?").get(identity) as { attempts: number }; const rows = db.prepare("SELECT path,status,fact_count FROM file_checkpoints WHERE cache_identity=? ORDER BY path").all(identity) as unknown as { path: string; status: string; fact_count: number }[]; const resolved = db.prepare("SELECT path,site_count,relation_count FROM resolution_checkpoints WHERE cache_identity=? ORDER BY path").all(identity) as unknown as { path: string; site_count: number; relation_count: number }[]; return { attempts: Number(build.attempts), files: rows.map(row => ({ path: row.path, status: row.status, factCount: Number(row.fact_count) })), resolutionFiles: resolved.map(row => ({ path: row.path, siteCount: Number(row.site_count), relationCount: Number(row.relation_count) })) }; }
   finally { db.close(); }
 }
 
-export async function pruneUnpublishedGenerations(state: string, snapshotId: string, budget: GraphBuildBudget = DEFAULT_GRAPH_BUDGET, scope: GraphScope = "core"): Promise<void> {
-  const manifest = await readPublished(state, snapshotId, budget, scope); const directory = join(graphCacheDir(state, snapshotId, budget, scope), "generations");
+export async function pruneUnpublishedGenerations(state: string, snapshotId: string, budget: GraphBuildBudget = DEFAULT_GRAPH_BUDGET, scope: GraphScope = "core", key: LanguageIdentity = PYTHON_IDENTITY): Promise<void> {
+  const manifest = await readPublished(state, snapshotId, budget, scope, key); const directory = join(graphCacheDir(state, snapshotId, budget, scope, key), "generations");
   let entries: string[]; try { entries = await readdir(directory); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
   for (const entry of entries) if (/^[a-f0-9-]+\.sqlite$/.test(entry) && entry !== `${manifest?.generationId}.sqlite`) await rm(join(directory, entry), { force: true });
 }

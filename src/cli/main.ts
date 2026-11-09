@@ -25,6 +25,7 @@ npm run cli -- skills list|learn|unlock [--state PATH]
 npm run cli -- skills show|disable --id SKILL_ID [--state PATH]
 npm run cli -- skills rollback --id SKILL_ID --revision N [--state PATH]
 npm run cli -- skills pending|usage [--state PATH]
+npm run cli -- navigation --run ID [--format mermaid|json] [--max-nodes N] [--state PATH]
 npm run cli -- skills curate [--stage true] [--state PATH]   (report only unless --stage stages retirements for approval)
 npm run cli -- skills diff --proposal ID [--state PATH]
 npm run cli -- skills approve|reject --proposal ID|all [--note TEXT] [--state PATH]
@@ -50,7 +51,7 @@ Exit codes: 0 completed/read-only/no_changes; 2 input or persistence failure; 3 
 No cost estimate is produced. Model requests occur in review/rerun (including bounded learning), and explicitly authenticated feedback/skills learn.`;
 function parse(argv: string[]) {
   const values = new Map<string, string[]>();
-  const known = new Set(["repo", "state", "scope", "base", "head", "provider", "model", "auth", "api-key-env", "timeout-ms", "max-tools", "thinking", "max-output-tokens", "include-untracked", "run", "finding", "skills", "learn", "id", "revision", "comment", "comment-file", "event", "version", "path", "start-line", "end-line", "verdict", "withdrawn", "retry", "max-jobs", "proposal", "note", "stage", "investigation"]);
+  const known = new Set(["repo", "state", "scope", "base", "head", "provider", "model", "auth", "api-key-env", "timeout-ms", "max-tools", "thinking", "max-output-tokens", "include-untracked", "run", "finding", "skills", "learn", "id", "revision", "comment", "comment-file", "event", "version", "path", "start-line", "end-line", "verdict", "withdrawn", "retry", "max-jobs", "proposal", "note", "stage", "investigation", "format", "max-nodes"]);
   for (let i = 0; i < argv.length; i += 2) {
     const flag = argv[i]!; const value = argv[i + 1]; const key = flag.slice(2);
     if (!flag.startsWith("--") || !known.has(key) || !value || value.startsWith("--")) throw new Error(`Invalid option: ${flag}`);
@@ -75,6 +76,20 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   const state = resolve(options.get("state") ?? join(process.env.LOCALAPPDATA ?? homedir(), "MergeWarden2"));
   if (command === "models") { console.log(JSON.stringify(await (await adapter()).listModels(options.get("provider")), null, 2)); return 0; }
   if (command === "history") { console.log(JSON.stringify(await history(state), null, 2)); return 0; }
+  if (command === "navigation") {
+    const format = options.get("format") ?? "mermaid"; if (!["mermaid", "json"].includes(format)) throw new Error("--format must be mermaid or json");
+    const { readNavigation, readRun } = await import("../engine/reports.ts");
+    const { projectNavigation, validateNavigation } = await import("../application/workbench/navigation-view.ts");
+    const runId = options.require("run"); const run = await readRun(state, runId);
+    if (run.status !== "delivered") throw new Error("Run has no confirmed report delivery");
+    if (run.navigation?.state !== "recorded") { console.log(JSON.stringify({ runId, state: run.navigation?.state ?? "not_recorded", ...(run.navigation?.state === "unavailable" ? { reason: run.navigation.reason } : {}) }, null, 2)); return 0; }
+    const { text, record } = await readNavigation(state, runId); if (sha256(text) !== run.navigation.sha256) throw new Error("Navigation record does not match its delivered hash");
+    const report = await readReport(state, runId); const snapshot = await SnapshotStore.load(state, run.snapshotId);
+    const view = projectNavigation(validateNavigation(record, { runId, snapshotId: run.snapshotId, headPaths: Object.keys(snapshot.manifest.head) }), report as unknown as import("../../packages/contracts/src/types.ts").ReportDto, snapshot.manifest.changedPaths);
+    if (format === "json") console.log(JSON.stringify(view, null, 2));
+    else { const { navigationMermaid } = await import("../application/workbench/navigation-mermaid.ts"); const max = options.get("max-nodes"); process.stdout.write(navigationMermaid(view, max ? { maxNodes: Number(max) } : {})); }
+    return 0;
+  }
   if (command === "show" || command === "evidence") {
     const report = await readReport(state, options.require("run"));
     if (command === "show") console.log(JSON.stringify(report, null, 2));

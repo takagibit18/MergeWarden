@@ -1,6 +1,7 @@
 import type { SymbolFact } from '../graph/contracts.ts';
 import type { ChangeHint, ChangeUnit } from './investigation-contracts.ts';
 import { mergeRanges, stableId } from './investigation-focus.ts';
+import { languageForPath } from '../graph/languages/index.ts';
 
 export const dispatchEntity = (s: SymbolFact) => ({ entityId: s.id, snapshotId: s.snapshotId, path: s.path,
   name: s.name, qualifiedName: s.qualifiedName, kind: s.kind, startLine: s.startLine, endLine: s.endLine });
@@ -15,10 +16,9 @@ export function resolveChangeHints(symbols: readonly SymbolFact[], snapshotId: s
     if(hint.declaration?.head?.importItem) {
       const d=hint.declaration.head, item=d.importItem!;
       if(item.uncertain || hint.declaration.match!=='matched') return {inputIndex,status:'ambiguous' as const,items:[]};
-      const packageParts=hint.path.replace(/\/[^/]+$/,'').split('/');
-      const module=item.relativeLevel ? [...packageParts.slice(0,packageParts.length-item.relativeLevel+1),...item.module.split('.').filter(Boolean)].join('.') : item.module;
-      const stem=module.replaceAll('.','/');
-      const matches=symbols.filter(s=>s.snapshotId===snapshotId && [stem+'.py',stem+'/__init__.py'].includes(s.path)
+      const language=languageForPath(hint.path); if(!language) return {inputIndex,status:'missing' as const,items:[]};
+      const {module,files}=language.importTarget(hint.path,item);
+      const matches=symbols.filter(s=>s.snapshotId===snapshotId && files.includes(s.path)
         && (item.importedName ? s.name===item.importedName && s.qualifiedName===module+'.'+item.importedName : s.kind==='file'));
       return {inputIndex,status:matches.length===1?'resolved' as const:matches.length?'ambiguous' as const:'missing' as const,items:matches.map(dispatchEntity)};
     }

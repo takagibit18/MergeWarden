@@ -18,6 +18,8 @@ interface Options {
   runId: string; snapshotId: string; changedPaths: string[]; signal: AbortSignal;
   operation: DispatchOperation; source: (path: string, startLine: number, endLine: number) => Promise<Record<string, unknown>>;
   promote(source: CandidateSource): void; budget?: Partial<RoutingBudget>; onPersistenceFailure?(error: PersistenceFailure): void;
+  /** Read-only navigation observer (ADR 0021). It receives copies and can never affect delivery or tool results. */
+  navigation?: { investigationDelivered(pack: ContextPackageV2): void; candidateExpanded(candidateRefId: string, entity: CandidateCard['entity'], requestId: string, generationId?: string): void };
 }
 const contains = (payload: unknown, text: string): boolean => typeof payload === 'string' ? payload.includes(text)
   : Array.isArray(payload) ? payload.some(v => contains(v, text)) : isObject(payload) ? Object.values(payload).some(v => contains(v, text)) : false;
@@ -25,6 +27,7 @@ class BudgetStop extends Error {}
 
 export class ProgressiveInvestigation {
   readonly version = INVESTIGATION_VERSION;
+  private notifyNavigation(action: () => void) { try { action(); } catch { /* Navigation observers cannot alter the investigation. */ } }
   private options: Options; private focus: InvestigationFocus;
   private requested = new Set<string>();
   private sharedRemaining = {maxVisitedNodes:30,maxVisitedEdges:200,maxExpandedStates:200};
@@ -81,6 +84,7 @@ export class ProgressiveInvestigation {
       }
       for (const source of pending.pack.sources) { this.options.promote(source); this.visible.push(source); this.cache.set(source.candidateRefId, source); }
       this.pending.delete(requestId); this.metrics.packagesDelivered++; this.metrics.contextBytes += Buffer.byteLength(pending.text);
+      const delivered = pending.pack; this.notifyNavigation(() => this.options.navigation?.investigationDelivered(structuredClone(delivered)));
     }
   }
   /** Already inside the model OperationGate. Do not enqueue another operation here. */
@@ -96,6 +100,7 @@ export class ProgressiveInvestigation {
     }
     this.record({ type: 'candidate_expanded', requestId: entry.requestId, generationId: entry.generationId, candidateRefId, source, cached });
     this.options.promote(source); this.cache.set(candidateRefId, source);
+    this.notifyNavigation(() => this.options.navigation?.candidateExpanded(candidateRefId, structuredClone(entry.card.entity), entry.requestId, entry.generationId));
     return { ...structuredClone(source), status: 'ok', cached, requestId: entry.requestId, generationId: entry.generationId,
       _mergewarden: { schemaVersion: 1, evidenceRefId: source.evidenceRefId, candidateRefId, requestId: entry.requestId, generationId: entry.generationId } };
   }

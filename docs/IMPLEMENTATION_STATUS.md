@@ -1,5 +1,11 @@
 # 当前实现状态 · 2026-10-11
 
+## 结构导航视图与语言包 · 2026-11-08
+
+- 导航视图（[ADR 0021](adr/0021-navigation-view.md)）：图工具与 dispatch_v2 调查在交付时写入 `navigation.json`，哈希提交在 `run.json`。工作台“结构导航”区块按需加载，提供步骤时间线、React Flow + ELK 图（懒加载分包）、实体列表与 HEAD 源码；CLI `navigation --run ID` 输出 Mermaid 或 JSON。写入失败只标记不可用。对审查理解的帮助未测。
+- 语言包（[ADR 0022](adr/0022-language-packs.md)）：建图、变更识别、导入解析、Skill 语言匹配与工具描述都通过语言描述符。Python 单语言图的身份、实体、关系、依赖站点、文件行和覆盖与重构前逐字节一致（固定夹具前后对比）。TypeScript v1 已实现并通过公共一致性用例；产品默认启用，评测与历史重跑仍只用 Python。TypeScript 审查质量未评测。
+- 已知基线：`integrations/pi` 的 `pre-registered Pi main loop: isolated` 在本次改动前即失败（Node 权限模型环境问题），未改动。
+
 ## 本地 Web 工作台（M0 + M1）
 
 React/TypeScript 工作台通过同源本地 HTTP 服务读取原生审查历史、报告和冻结证据。SQLite 持久化显式登记的项目与工作树元数据，并保存可重建的历史索引；报告、会话与源码快照继续由现有原生存储管理。旧历史在对应仓库重新登记后归入项目。

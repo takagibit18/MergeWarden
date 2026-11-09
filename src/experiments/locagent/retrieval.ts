@@ -5,6 +5,8 @@ import { SparseIndex, fuzzyScore } from './sparse.ts';
 import {resolveChangeHints} from '../../engine/change-resolution.ts';
 import {hostStructuralInvestigation} from './host-investigation.ts';
 import {declarationPreview} from '../../engine/candidate-catalog.ts';
+import {loadExtractor} from '../../graph/languages/index.ts';
+import {python} from '../../graph/languages/python.ts';
 const order = (a:string,b:string)=>a<b?-1:a>b?1:0;
 const size = (v:unknown)=>Buffer.byteLength(JSON.stringify(v));
 const measured = <T extends {responseBytes:number}>(value:T):T=>{let next=size(value);while(next!==value.responseBytes){value.responseBytes=next;next=size(value);}return value;};
@@ -75,11 +77,11 @@ export class LocAgentRetrieval {
   private receiverNavigation: {rootId:string;entity:SymbolFact;callerId:string;memberId:string;line:number}[]=[];
   async prepareNavigation(input: Parameters<typeof hostStructuralInvestigation>[0]) {
     this.receiverNavigation=[]; if(!input.changeAware)return;
-    const modulePath='../../../integrations/tree-sitter/src/python-extractor.ts';
-    const {PythonTreeSitterExtractor}=await import(modulePath),parser=await PythonTreeSitterExtractor.create();
+    // LocAgent replication stays Python-only (eval); the parser comes through the language manifest.
+    const parser=await loadExtractor(python); if(!parser.receiverCalls){parser.dispose();return;}
     try {
       for(const path of new Set(input.roots.map(id=>this.byId.get(id)?.path).filter((x):x is string=>!!x))) {
-        for(const call of parser.receiverCalls(this.data.sources[path]??'')) {
+        for(const call of parser.receiverCalls!(this.data.sources[path]??'')) {
           const caller=this.symbols.find(s=>s.path===path&&s.kind==='function'&&s.startLine===call.callerLine);
           const owner=this.symbols.find(s=>s.path===path&&s.kind==='class'&&s.startLine===call.classLine);
           if(!caller||!owner||caller.parentSymbolId!==owner.id)continue;

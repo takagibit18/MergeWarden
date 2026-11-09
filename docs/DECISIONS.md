@@ -1,5 +1,9 @@
 # 顶层决策索引
 
+新增产品决策：[ADR 0022：语言包与 TypeScript](adr/0022-language-packs.md)。图构建只面对语言描述符；Python 重构后图身份与发布内容逐字节不变，TypeScript 已实现，评测语料仍只有 Python。
+
+新增产品决策：[ADR 0021：只读导航视图](adr/0021-navigation-view.md)。宿主在交付时写入哈希校验的 `navigation.json`，工作台只读展示一次运行的结构导航；写入失败标记为不可用，不影响报告交付。
+
 新增产品决策：[ADR 0020：已接受取舍与安全事实调查](adr/0020-accepted-tradeoffs-and-safety-facts.md)。人工确认的 accepted trade-off Skill 锚定到具体代码，模型引用后由宿主按确定性条件把 finding 折叠进 Known and accepted 区，不删除；critical/high 永不折叠。安全事实调查为默认关闭的提示词变体，评测通过前不改默认。
 
 新增产品决策：[ADR 0019：SKILL.md 格式的学习经验](adr/0019-skill-md-format.md)。学习器按 SKILL.md（frontmatter + 四个列表段 + 可选 references）输出并由宿主严格解析；审查目录只显示名称与描述，正文和引用按需读取；审查方法按模块目录限定范围；同一变更的审查与反馈只算一次支持。不允许脚本。
@@ -30,3 +34,5 @@
 | [ADR-0012](adr/0012.md) | MVP 快照、原生持久化、可靠交付和版本验收 | 已实施 v0.1 离线闭环；真实模型待配置 |
 | [ADR-0013](adr/0013.md) | 可恢复图 generation 与严格停止 | 已实施；实体图语义层见 ADR-0014 |
 | [ADR-0014](adr/0014.md) | LocAgent 风格实体图与分层范围 | 已实施；真实仓库容量已测，质量增益未证明 |
+| [ADR-0021](adr/0021-navigation-view.md) | 只读运行导航视图 | 已实施；对审查理解的帮助未测 |
+| [ADR-0022](adr/0022-language-packs.md) | 语言包与 TypeScript | 已实施；Python 等价已证，TypeScript 质量未评测 |

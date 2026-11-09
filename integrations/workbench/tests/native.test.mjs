@@ -125,3 +125,30 @@ test('actual port-zero loopback launcher serves app and API with a maximal opaqu
   running = undefined;
   await assert.rejects(fetch(origin));
 });
+
+test('HTTP serves a verified navigation view and only the head source of entities it shows', async t => {
+  let service, server;
+  t.after(async () => { if (server) await server.close(); else await service?.close(); });
+  const f = await repositoryFixture(t, { 'app.py': 'def ratio(total, count):\n    return total / max(count, 1)\n', 'use.py': 'from app import ratio\n\ndef mean(values):\n    return ratio(sum(values), len(values))\n' });
+  await f.write('app.py', 'def ratio(total, count):\n    return total / count\n'); await f.git('add', 'app.py');
+  const runtime = async options => ({ journal: new MemoryJournal(), async prompt() {
+    const tools = Object.fromEntries(options.tools.map(tool => [tool.name, tool.execute]));
+    const found = await tools.graph_lookup({ query: 'ratio', limit: 10 }); const target = found.items.find(item => item.kind === 'function');
+    await tools.graph_neighbors({ symbolId: target.id, relation: 'CALLS', direction: 'incoming', limit: 10 });
+    await tools.read_diff({ path: 'app.py' }); await tools.submit_review({ summary: 'Synthetic navigation fixture.', reviewedPaths: ['app.py'], findings: [] });
+  }, async abort() {}, dispose() {}, usage() { return { input: 0, output: 0, total: 0 }; } });
+  const result = await new ReviewEngine(runtime).run({ repositoryPath: f.repository, stateDir: f.state, input: { kind: 'staged' }, model: { provider: 'fixture', modelId: 'offline' }, skills: 'off', learn: 'off', timeoutMs: 60_000, maxToolCalls: 10 });
+  const assets = await assetsFixture(t);
+  service = await openWorkbench({ repositoryPath: f.repository, stateDir: f.state });
+  server = createWorkbenchServer({ service, assetsDir: assets.assetsDir, origin: ORIGIN });
+  const cookie = await authenticate(server), api = `/api/v1/projects/${service.defaultProjectId}/runs/${result.runId}`;
+  const navigation = await get(server.app, `${api}/navigation`, cookie);
+  assert.equal(navigation.statusCode, 200, navigation.body);
+  const view = navigation.json().view; assert.equal(navigation.json().state, 'recorded');
+  assert.deepEqual(view.steps.map(step => step.op), ['graph_lookup', 'graph_neighbors']);
+  const mean = view.nodes.find(node => node.name === 'mean'); assert.ok(mean, 'caller node is drawn');
+  const source = await get(server.app, `${api}/navigation/entities/${encodeURIComponent(mean.id)}/source`, cookie);
+  assert.equal(source.statusCode, 200, source.body); assert.equal(source.json().source.path, 'use.py'); assert.match(source.json().source.text, /def mean/);
+  assertError(await get(server.app, `${api}/navigation/entities/unknown-entity/source`, cookie), 404, 'NOT_FOUND');
+  assertError(await get(server.app, `${api}/navigation?x=1`, cookie), 400, 'INVALID_QUERY');
+});

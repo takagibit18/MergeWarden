@@ -9,6 +9,7 @@ import {
   historyQuerySchema, historyResponseSchema, reportResponseSchema, taskParamsSchema, taskResponseSchema, decodeFindingId,
   projectsResponseSchema, projectSchema, projectRegistrationSchema, workspaceRegistrationSchema,
   diffQuerySchema, evidenceDiffResponseSchema,
+  navigationEntityParamsSchema, navigationResponseSchema, navigationSourceResponseSchema,
 } from '@mergewarden/contracts';
 import type { ConfigResponse } from '@mergewarden/contracts';
 import { WorkbenchError } from '../../../src/application/workbench/index.ts';
@@ -19,7 +20,7 @@ import { HttpError } from './http-error.ts';
 import { LocalAuth } from './local-auth.ts';
 
 export type ReadService = Pick<WorkbenchService, 'repositoryPath' | 'defaultProjectId' | 'listProjects' | 'registerProject' |
-  'registerWorkspace' | 'listReviews' | 'task' | 'report' | 'evidence' | 'evidenceDiff' | 'close'>;
+  'registerWorkspace' | 'listReviews' | 'task' | 'report' | 'evidence' | 'evidenceDiff' | 'navigation' | 'navigationSource' | 'close'>;
 export interface ServerOptions {
   service: ReadService;
   assetsDir?: string;
@@ -180,6 +181,16 @@ export function createWorkbenchServer(options: ServerOptions): WorkbenchHttpServ
     const { id, findingId, index } = evidenceParams(request);
     const query = input(diffQuerySchema, request.query);
     return output(evidenceDiffResponseSchema, await options.service.evidenceDiff(project, id, findingId, index, query));
+  });
+
+  app.get(`${prefix}/runs/:id/navigation`, async request => {
+    input(noQuerySchema, request.query);
+    return output(navigationResponseSchema, await options.service.navigation(projectId(request), runId(request)));
+  });
+  app.get(`${prefix}/runs/:id/navigation/entities/:entityId/source`, async request => {
+    input(noQuerySchema, request.query);
+    const params = input(navigationEntityParamsSchema, request.params);
+    return output(navigationSourceResponseSchema, await options.service.navigationSource(params.projectId, params.id, params.entityId));
   });
 
   const page = async (request: FastifyRequest, reply: FastifyReply) => {
