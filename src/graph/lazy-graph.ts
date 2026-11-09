@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Worker } from "node:worker_threads";
 import { emptyCoverage } from "./contracts.ts";
 import type { CodeGraph, GraphPage, RelationFact, SymbolFact } from "./contracts.ts";
-import { releaseGraphBuildLock } from "./sqlite-store.ts";
+import { releaseOwnedGraphBuildLock } from "./sqlite-store.ts";
 import type { GraphMetrics } from "./sqlite-store.ts";
 
 type WorkerResult<T> = { id: number; page?: GraphPage<T>; metrics?: GraphMetrics; error?: string; entities?: SymbolFact[] };
@@ -33,7 +33,7 @@ export class LazyCodeGraph implements CodeGraph {
       worker.ref();
       await worker.terminate().catch(() => undefined);
     }
-    await releaseGraphBuildLock(this.stateDir, this.snapshotId, this.ownerToken).catch(() => undefined);
+    await releaseOwnedGraphBuildLock(this.stateDir, this.snapshotId, this.ownerToken, this.languages).catch(() => undefined);
   }
   private async query<T>(method: string, input: { snapshotId: string }, signal?: AbortSignal): Promise<GraphPage<T>> {
     signal?.throwIfAborted(); if (input.snapshotId !== this.snapshotId) throw new Error("Graph snapshot mismatch");

@@ -39,7 +39,9 @@ the Tree-sitter adapter directly. Adding a language had no seam.
 6. **Coverage (D13).** Top-level coverage fields stay totals. `coverage.byLanguage` appears only when a
    graph spans more than one language.
 7. **Defaults.** Product reviews enable every registered language. Evaluations and reruns of
-   historical runs stay Python-only unless they choose (`ReviewOptions.languages`).
+   historical runs stay Python-only unless they choose (`ReviewOptions.languages`). Skill language
+   matching counts only the run's enabled languages, so Python-pinned runs select the same Skills
+   as before.
 
 ### Seams for later languages
 
@@ -66,12 +68,15 @@ must pass the same equivalence check.
 - Module resolution (D14): `ts.resolveModuleName` over a host backed only by the frozen head
   (`tsconfig.json` `baseUrl`/`paths`, extensions, index files, `.js` specifiers). `extends` and project
   references are not followed. Packages, `node_modules` and declaration files are external. Without
-  the `typescript` package the resolver falls back to snapshot-relative resolution.
+  the `typescript` package the build fails (graph unavailable) rather than publishing weaker edges under
+  the same cache identity.
 - Names: named, default, namespace and side-effect imports; `export {…}`, `export … from`,
   `export *` (bounded depth, cycles stop, several sources → candidate). Type-only imports bind no
   value and create no edge. Block and branch declarations bind conditionally (candidate). Function
   declarations and imports are hoisted; other bindings used before their definition in the same scope
   are unresolved. Anonymous callbacks get their own scope.
+- Object-literal methods and named function expressions get their own scope: parameters and the
+  expression's own name shadow outer functions.
 - Not resolved: `obj.m()`, `this.m()` (receiver navigation candidates only), `require()`, `import()`,
   `eval`, `with`, JSX components as calls.
 

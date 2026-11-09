@@ -28,7 +28,7 @@ export class TypeScriptResolver implements LanguageResolver {
   private finished = false;
 
   constructor(snapshotId: string, resolveSpecifier: SpecifierResolver, moduleName: (path: string) => string) { this.snapshotId = snapshotId; this.resolveSpecifier = resolveSpecifier; this.moduleName = moduleName; }
-  markModuleUnavailable(moduleName: string): void { if (this.finished) throw new Error("TypeScript resolver index is already finalized"); this.unavailable.add(moduleName); }
+  markModuleUnavailable(_moduleName: string, path: string): void { if (this.finished) throw new Error("TypeScript resolver index is already finalized"); this.unavailable.add(path); }
 
   index(fact: SyntaxFacts): void {
     if (this.finished) throw new Error("TypeScript resolver index is already finalized");
@@ -55,7 +55,7 @@ export class TypeScriptResolver implements LanguageResolver {
     const key = `${fromPath}\0${specifier}`;
     if (!this.specifiers.has(key)) { let path: string | undefined; try { path = this.resolveSpecifier(specifier, fromPath); } catch { path = undefined; } this.specifiers.set(key, path); }
     const path = this.specifiers.get(key); if (!path) return "module_external_or_unknown";
-    if (this.unavailable.has(this.moduleName(path))) return "module_outside_published_scope";
+    if (this.unavailable.has(path)) return "module_outside_published_scope";
     const file = this.files.get(path); if (!file) return "module_not_indexed";
     return this.incomplete.has(file.id) ? "module_parse_incomplete" : file;
   }

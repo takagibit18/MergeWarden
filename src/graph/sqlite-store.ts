@@ -118,6 +118,12 @@ export async function releaseGraphBuildLock(state: string, snapshotId: string, o
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
 }
 
+/** Releases a build lock owned by a lazy service, under the identity of the languages it opened with. */
+export async function releaseOwnedGraphBuildLock(state: string, snapshotId: string, ownerToken: string, languages?: readonly string[]): Promise<void> {
+  const key = languages ? graphLanguageKey(await SnapshotStore.load(state, snapshotId), languages) : PYTHON_IDENTITY;
+  await releaseGraphBuildLock(state, snapshotId, ownerToken, DEFAULT_GRAPH_BUDGET, "core", key);
+}
+
 function openCheckpoint(path: string): DatabaseSync { return new DatabaseSync(path); }
 function checkpointRows(db: DatabaseSync, identity: string): CheckpointRow[] { return db.prepare("SELECT path,content_sha256,status,fact_count,diagnostics,failure_kind,failure_reason FROM file_checkpoints WHERE cache_identity=? ORDER BY path").all(identity) as unknown as CheckpointRow[]; }
 function checkpointFact(db: DatabaseSync, identity: string, path: string): SyntaxFacts {
@@ -338,7 +344,7 @@ export class SqliteCodeGraph implements CodeGraph {
       const structure = new StructureIndexer(id, key.resolvers); let structuralRelations: RelationFact[] = []; let entities: SymbolFact[] = [];
       try {
         // Pass 1 retains only declarations/bindings needed for cross-file resolution.
-        const parsedPaths = new Set(parsedRows.map(row => row.path)); for (const entry of catalog) if (!parsedPaths.has(entry.path)) resolverFor(entry.path).markModuleUnavailable(byId.get(entry.language)!.moduleName(entry.path));
+        const parsedPaths = new Set(parsedRows.map(row => row.path)); for (const entry of catalog) if (!parsedPaths.has(entry.path)) resolverFor(entry.path).markModuleUnavailable(byId.get(entry.language)!.moduleName(entry.path), entry.path);
         for (const row of parsedRows) resolverFor(row.path).index(checkpointFact(staging, identity, row.path));
         for (const resolver of resolvers.values()) resolver.finalize();
         entities = structure.entities([...resolvers.values()].flatMap(resolver => resolver.languageEntities)); structuralRelations = structure.relations(entities); let relationFacts = structuralRelations.length;

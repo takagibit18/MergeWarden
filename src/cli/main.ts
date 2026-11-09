@@ -87,7 +87,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     const report = await readReport(state, runId); const snapshot = await SnapshotStore.load(state, run.snapshotId);
     const view = projectNavigation(validateNavigation(record, { runId, snapshotId: run.snapshotId, headPaths: Object.keys(snapshot.manifest.head) }), report as unknown as import("../../packages/contracts/src/types.ts").ReportDto, snapshot.manifest.changedPaths);
     if (format === "json") console.log(JSON.stringify(view, null, 2));
-    else { const { navigationMermaid } = await import("../application/workbench/navigation-mermaid.ts"); const max = options.get("max-nodes"); process.stdout.write(navigationMermaid(view, max ? { maxNodes: Number(max) } : {})); }
+    else { const { navigationMermaid } = await import("../application/workbench/navigation-mermaid.ts"); const max = options.get("max-nodes"); if (max !== undefined && !(/^[0-9]+$/.test(max) && Number(max) >= 1 && Number(max) <= 500)) throw new Error("--max-nodes must be an integer from 1 to 500"); process.stdout.write(navigationMermaid(view, max ? { maxNodes: Number(max) } : {})); }
     return 0;
   }
   if (command === "show" || command === "evidence") {

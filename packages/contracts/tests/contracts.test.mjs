@@ -47,4 +47,8 @@ test('navigation responses carry a view only when recorded, and edges must conne
   assert.equal(navigationResponseSchema.safeParse({ ...base, state: 'recorded' }).success, false);
   assert.equal(navigationResponseSchema.safeParse({ ...base, state: 'recorded', view: { ...view, edges: [{ ...view.edges[0], toId: 'ghost' }] } }).success, false);
   assert.equal(navigationResponseSchema.safeParse({ ...base, state: 'recorded', view: { ...view, nodes: [{ ...node('a'), roles: ['guessed'] }, node('b')] } }).success, false);
+  const directory = { ...node('d'), kind: 'directory', path: '/', qualifiedName: '/', name: '/', startLine: 0, endLine: 0 };
+  assert.equal(navigationResponseSchema.safeParse({ ...base, state: 'recorded', view: { ...view, nodes: [...view.nodes, directory] } }).success, true, 'directories have lines 0..0');
+  for (const bad of [{ ...directory, endLine: 3 }, { ...node('z'), startLine: 0, endLine: 0 }, { ...node('z'), startLine: 3, endLine: 2 }])
+    assert.equal(navigationResponseSchema.safeParse({ ...base, state: 'recorded', view: { ...view, nodes: [...view.nodes, bad] } }).success, false);
 });

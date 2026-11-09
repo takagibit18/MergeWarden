@@ -183,14 +183,15 @@ export const evidenceParamsSchema = z.object({
 }).strict();
 export const scopedEvidenceParamsSchema = evidenceParamsSchema.extend({ projectId: idSchema }).strict();
 
-const lineNumber = z.number().int().positive();
+const lineNumber = z.number().int().nonnegative();
 const graphId = z.string().min(1).max(160);
 export const navigationNodeSchema: z.ZodType<NavigationNodeDto> = z.object({
   id: graphId, kind: z.enum(NAVIGATION_ENTITY_KINDS), functionKind: z.enum(['function', 'method']).optional(),
   path: z.string().min(1).max(4096), qualifiedName: z.string().max(4096), name: z.string().max(1024),
   startLine: lineNumber, endLine: lineNumber, roles: z.array(z.enum(NAVIGATION_NODE_ROLES)).max(NAVIGATION_NODE_ROLES.length),
   findingIds: z.array(z.string().max(4000)).max(100), firstSeq: z.number().int().positive().nullable(),
-}).strict().refine(node => node.endLine >= node.startLine, { message: 'End line must not precede start line' });
+}).strict().refine(node => node.kind === 'directory' ? node.startLine === 0 && node.endLine === 0 : node.startLine > 0 && node.endLine >= node.startLine,
+  { message: 'Directories have lines 0..0; other entities need a positive span' });
 export const navigationEdgeSchema: z.ZodType<NavigationEdgeDto> = z.object({
   id: graphId, fromId: graphId, toId: graphId, relation: z.enum(NAVIGATION_RELATIONS), resolution: z.enum(NAVIGATION_RESOLUTIONS),
   origin: z.enum(['graph_neighbors', 'host_investigation']), firstSeq: z.number().int().positive().nullable(),

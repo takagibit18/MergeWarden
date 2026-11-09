@@ -1,17 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { language, loadExtractor } from '../src/graph/languages/index.ts';
 import { typescript, classifyTypeScriptPath, relativeCandidates } from '../src/graph/languages/typescript.ts';
 import { StructureIndexer } from '../src/graph/structure-indexer.ts';
 import { SnapshotStore } from '../src/snapshot/store.ts';
-import { DEFAULT_GRAPH_BUDGET, graphCacheDir, graphLanguageKey, publishedGraphPath, readGraphEntities, readGraphRelations, SqliteCodeGraph } from '../src/graph/sqlite-store.ts';
+import { DEFAULT_GRAPH_BUDGET, graphBuildLockPath, graphCacheDir, graphLanguageKey, publishedGraphPath, readGraphEntities, readGraphRelations, SqliteCodeGraph } from '../src/graph/sqlite-store.ts';
 import { snapshotChanges } from '../src/engine/snapshot-changes.ts';
 import { ReviewEngine } from '../src/engine/review.ts';
 import { MemoryJournal } from '../src/adapters/memory-journal.ts';
 import { readRun } from '../src/engine/reports.ts';
+import { LazyCodeGraph } from '../src/graph/lazy-graph.ts';
+import { resolveChangeHints } from '../src/engine/change-resolution.ts';
 import { repositoryFixture } from './repository-fixture.mjs';
 
 /** Pure pipeline: extract → resolve → structure, returning all relations with readable labels. */
@@ -50,6 +53,39 @@ test('hoisting, temporal dead zone, conditional bindings and callbacks follow th
   assert.deepEqual(calls(edges).sort(), ['resolved_scoped src/m.ts#f -> src/m.ts#early', 'resolved_scoped src/m.ts -> src/m.ts#early'].sort());
   assert.equal(sites.find(s => s[0] === 'late')[2], 'binding_used_before_definition');
   assert.equal(sites.find(s => s[0] === 'maybe')[1], 'candidate');
+});
+
+test('object-literal method parameters and a named function expression shadow outer functions', async () => {
+  const { edges } = await relations({
+    'src/m.ts': "function helper() {}\nfunction g() {}\nfunction cb() {}\n"
+      + "export const api = { run(helper: () => void) { helper(); }, get v() { return cb(); }, k: function (cb: () => void) { cb(); } };\n"
+      + "export const f = function g() { g(); };\n",
+  });
+  assert.deepEqual(calls(edges).sort(), ['resolved_scoped src/m.ts -> src/m.ts#cb', 'resolved_scoped src/m.ts#f -> src/m.ts#f'].sort(),
+    'only the getter reaches the module cb; the parameter and the expression name never resolve to outer functions');
+});
+
+test('an unavailable .tsx file does not hide the .ts module with the same module name', async () => {
+  const extractor = await loadExtractor(typescript); const snapshotId = 'ts-unavailable';
+  const files = { 'src/a.ts': 'export function x() {}\n', 'src/a.tsx': 'export function x() {}\n', 'src/u.ts': "import { x } from './a';\nexport function f() { x(); }\n" };
+  try {
+    const paths = Object.keys(files); const resolver = await typescript.createResolver({ snapshotId, paths, readText: async path => files[path] });
+    resolver.markModuleUnavailable(typescript.moduleName('src/a.tsx'), 'src/a.tsx');
+    const facts = []; for (const path of ['src/a.ts', 'src/u.ts']) facts.push(await extractor.extract({ snapshotId, path, source: files[path] }));
+    for (const fact of facts) resolver.index(fact); resolver.finalize();
+    const called = facts.flatMap(fact => resolver.resolveFile(fact)).filter(r => r.relation === 'CALLS');
+    assert.equal(called.length, 1); assert.equal(called[0].resolution, 'resolved_import_alias');
+  } finally { extractor.dispose(); }
+});
+
+test('a changed TypeScript import resolves to the imported entity for change-aware dispatch', async () => {
+  const extractor = await loadExtractor(typescript);
+  try {
+    const util = await extractor.extract({ snapshotId: 's', path: 'src/util.ts', source: 'export function helper() {}\n' });
+    const declaration = extractor.declarations('src/use.ts', "import { helper } from './util';\n").declarations.find(d => d.importItem);
+    const [resolved] = resolveChangeHints(util.symbols, 's', [{ path: 'src/use.ts', startLine: 1, endLine: 1, declaration: { match: 'matched', head: declaration } }]);
+    assert.equal(resolved.status, 'resolved'); assert.deepEqual(resolved.items.map(item => item.qualifiedName), ['src/util.helper']);
+  } finally { extractor.dispose(); }
 });
 
 test('a module with syntax errors is not a resolution target', async () => {
@@ -118,4 +154,26 @@ test('product reviews enable TypeScript while evaluations stay Python-only, and 
   await assert.rejects(new ReviewEngine(runtime(async () => {})).run({ ...base, languages: ['cobol'] }), /Unknown graph language/);
   const text = JSON.parse(await readFile(join(f.state, 'runs', product.runId, 'run.json'), 'utf8'));
   assert.equal(text.navigation.state, 'recorded');
+});
+
+test('a lazy multi-language graph releases its own build lock on dispose', async t => {
+  const { store } = await mixed(t); const id = store.manifest.identity.id; const languages = ['python', 'typescript'];
+  const lazy = new LazyCodeGraph(store.stateDir, id, { languages });
+  const lock = graphBuildLockPath(store.stateDir, id, DEFAULT_GRAPH_BUDGET, 'core', graphLanguageKey(store, languages));
+  await mkdir(dirname(lock), { recursive: true }); await writeFile(lock, JSON.stringify({ pid: process.pid, ownerToken: lazy.ownerToken }));
+  await lazy.dispose();
+  await assert.rejects(access(lock), { code: 'ENOENT' });
+  const opened = await SqliteCodeGraph.open(store, { languages }); opened.graph.close();
+});
+
+test('reruns keep their run\'s graph languages and historical runs rerun Python-only', async t => {
+  const f = await mixed(t); const base = { repositoryPath: f.repository, stateDir: f.state, input: { kind: 'commits', base: f.base, head: f.head }, model: { provider: 'fixture', modelId: 'offline' } };
+  const review = new ReviewEngine(runtime(async tools => { await tools.read_diff.execute({ path: 'web/lib/math.ts' }); await tools.submit_review.execute({ summary: 'r', reviewedPaths: ['web/lib/math.ts'], findings: [] }); }));
+  const first = await review.run(base);
+  const rerun = await review.run({ ...base, input: undefined, rerunId: first.runId });
+  assert.deepEqual((await readRun(f.state, rerun.runId)).graphLanguages, ['python', 'typescript']);
+  const path = join(f.state, 'runs', first.runId, 'run.json'); const historical = JSON.parse(await readFile(path, 'utf8')); delete historical.graphLanguages;
+  await writeFile(path, JSON.stringify(historical, null, 2) + '\n');
+  const legacy = await review.run({ ...base, input: undefined, rerunId: first.runId });
+  assert.deepEqual((await readRun(f.state, legacy.runId)).graphLanguages, ['python']);
 });

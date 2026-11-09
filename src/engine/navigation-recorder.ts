@@ -106,7 +106,7 @@ export class NavigationRecorder {
     if (this.fault) return undefined;
     const byId = <T extends { id: string }>(values: Iterable<T>) => [...values].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
     return structuredClone({ version: NAVIGATION_VERSION, runId: this.runId, snapshotId: this.snapshotId, toolExposure: this.toolExposure,
-      generationIds: [...this.generations].sort(), steps: this.steps, entities: byId(this.entities.values()), relations: byId(this.relations.values()),
+      generationIds: [...this.generations].sort().slice(0, 16), steps: this.steps, entities: byId(this.entities.values()), relations: byId(this.relations.values()),
       candidates: [...this.candidates.values()].sort((a, b) => a.candidateRefId < b.candidateRefId ? -1 : 1),
       truncated: this.truncated, entityFactsComplete: this.missingEntityIds().length === 0, limitations: [...this.limitations] });
   }

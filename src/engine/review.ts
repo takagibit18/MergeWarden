@@ -127,13 +127,13 @@ export class ReviewEngine {
       const repositoryKey = options.skillRepositoryKey ?? oldRun?.skills?.repositoryKey ?? store.manifest.identity.repositoryId;
       if (!repositoryKey || repositoryKey.length > 200) throw Error('Invalid host Skill repository key');
       const skillMode = options.skills ?? (options.rerunId ? 'replay' : options.evaluation ? 'off' : 'auto');
-      const skillPackage = await freezeSkills(stateDir, store, skillMode, repositoryKey, oldRun);
-      manifest.skills = await savePackage(runDir, skillPackage); manifest.learningPolicy = learningPolicy; const rules = skillRules(skillPackage);
-      const skillReads = skillReader(skillPackage, runDir);
-      manifest.reviewPolicy = variant ? { version: `${REVIEW_DECISION_POLICY_VERSION}+${investigation}`, sha256: sha256(JSON.stringify([REVIEW_DECISION_POLICY, variant.prompt, variant.summary])) } : { version: REVIEW_DECISION_POLICY_VERSION, sha256: sha256(REVIEW_DECISION_POLICY) };
       // Reruns keep their run's languages; historical runs were Python-only. Evaluations pin Python unless they choose.
       const graphLanguages = enabledLanguages(options.languages ?? oldRun?.graphLanguages ?? (oldRun || options.evaluation ? LEGACY_LANGUAGE_IDS : DEFAULT_LANGUAGE_IDS)).map(item => item.id);
       manifest.graphLanguages = graphLanguages;
+      const skillPackage = await freezeSkills(stateDir, store, skillMode, repositoryKey, oldRun, graphLanguages);
+      manifest.skills = await savePackage(runDir, skillPackage); manifest.learningPolicy = learningPolicy; const rules = skillRules(skillPackage);
+      const skillReads = skillReader(skillPackage, runDir);
+      manifest.reviewPolicy = variant ? { version: `${REVIEW_DECISION_POLICY_VERSION}+${investigation}`, sha256: sha256(JSON.stringify([REVIEW_DECISION_POLICY, variant.prompt, variant.summary])) } : { version: REVIEW_DECISION_POLICY_VERSION, sha256: sha256(REVIEW_DECISION_POLICY) };
       const languageNames = displayNames(effectiveLanguages(graphLanguages, Object.keys(store.manifest.head)));
       await writeJson(join(runDir, "run.json"), manifest);
       const preparedOnly = options.evaluation?.graphMode === "prepared_only";

@@ -6,7 +6,7 @@ import { ReviewEngine } from '../src/engine/review.ts';
 import { MemoryJournal } from '../src/adapters/memory-journal.ts';
 import { NavigationRecorder } from '../src/engine/navigation-recorder.ts';
 import { NAVIGATION_FILE } from '../src/engine/navigation-contracts.ts';
-import { readRun } from '../src/engine/reports.ts';
+import { deliver, readRun } from '../src/engine/reports.ts';
 import { sha256 } from '../src/infrastructure/files.ts';
 import { VerifiedArtifacts } from '../src/application/workbench/verified-artifacts.ts';
 import { projectNavigation, validateNavigation } from '../src/application/workbench/navigation-view.ts';
@@ -79,6 +79,40 @@ test('validation rejects records that do not belong to the frozen run', () => {
   assert.throws(() => validateNavigation(record, { ...expected, headPaths: ['other.py'] }), /outside the frozen head/);
   assert.throws(() => validateNavigation({ ...record, steps: [{ ...record.steps[0], entityIds: ['ghost'] }] }, expected), /unknown facts/);
   assert.throws(() => validateNavigation({ ...record, relations: [{ id: 'x', fromId: 'a', toId: 'b', relation: 'CALLS', resolution: 'guessed', origin: 'graph_neighbors' }] }, expected), /relation/);
+});
+
+test('directories carry lines 0..0; other entities still need a positive span', () => {
+  const directory = entity('dir', { kind: 'directory', functionKind: undefined, path: '/', qualifiedName: '/', name: '/', startLine: 0, endLine: 0 });
+  const r = recorder(); r.graphPage('graph_lookup', { query: '/', limit: 1 }, page([directory])); const record = r.finish();
+  const expected = { runId: RUN, snapshotId: SNAPSHOT, headPaths: ['app.py'] };
+  assert.equal(validateNavigation(structuredClone(record), expected).entities[0].kind, 'directory');
+  const lines = (kind, startLine, endLine) => ({ ...record, entities: [{ ...record.entities[0], kind, startLine, endLine }] });
+  assert.throws(() => validateNavigation(lines('directory', 0, 3), expected), /Invalid navigation entity/);
+  assert.throws(() => validateNavigation({ ...lines('file', 0, 0), entities: [{ ...lines('file', 0, 0).entities[0], path: 'app.py' }] }, expected), /Invalid navigation entity/);
+  assert.equal(projectNavigation(validateNavigation(structuredClone(record), expected), { findings: [] }, ['app.py']).nodes[0].startLine, 0);
+});
+
+test('validation rejects malformed optional step fields and investigations; generation ids stay within the header limit', () => {
+  const r = recorder(); for (let index = 0; index < 20; index++) r.graphPage('graph_lookup', { query: 'ratio', limit: 1 }, page([entity('ratio')], { generationId: `g${String(index).padStart(2, '0')}` }));
+  const record = r.finish(); const expected = { runId: RUN, snapshotId: SNAPSHOT, headPaths: ['app.py'] };
+  assert.equal(record.generationIds.length, 16); assert.equal(validateNavigation(structuredClone(record), expected).steps.length, 20);
+  const withStep = extra => ({ ...record, steps: [{ ...record.steps[0], ...extra }] });
+  assert.throws(() => validateNavigation(withStep({ error: { message: 'x' } }), expected), /Invalid navigation step/);
+  assert.throws(() => validateNavigation(withStep({ requestId: 7 }), expected), /Invalid navigation step/);
+  assert.throws(() => validateNavigation(withStep({ investigations: [{ investigationId: 'i', routeType: 'r', status: 's', changeUnits: 'not-a-list', candidateRefIds: [], limitations: [] }] }), expected), /Invalid navigation step/);
+  const unit = { changeUnitId: 'u', path: 'app.py', kind: 'function', resolution: 'resolved', entityId: 'ratio' };
+  assert.equal(validateNavigation(withStep({ investigations: [{ investigationId: 'i', routeType: 'r', status: 's', changeUnits: [unit], candidateRefIds: [], limitations: [] }] }), expected).steps.length, 1);
+});
+
+test('a record over the size limit is delivered as unavailable while the report is still delivered', async t => {
+  const f = await repositoryFixture(t, {}); const runId = '00000000-0000-4000-8000-000000000009';
+  await mkdir(join(f.state, 'runs', runId), { recursive: true });
+  const record = recorder().finish(); record.limitations = ['x'.repeat(9 * 1024 * 1024)];
+  const report = { status: 'completed', runId, snapshot: { id: SNAPSHOT }, summary: 's', reviewedPaths: [], findings: [], warnings: [], coverage: {} };
+  await deliver(f.state, { runId, status: 'running' }, report, { navigation: record });
+  const run = JSON.parse(await readFile(join(f.state, 'runs', runId, 'run.json'), 'utf8'));
+  assert.equal(run.status, 'delivered'); assert.deepEqual(run.navigation, { state: 'unavailable', reason: 'Navigation record exceeds its size limit' });
+  await assert.rejects(readFile(join(f.state, 'runs', runId, NAVIGATION_FILE)), { code: 'ENOENT' });
 });
 
 test('mermaid export is deterministic, escapes labels and draws candidate edges dotted', () => {
@@ -168,4 +202,56 @@ test('CLI navigation verifies the delivered hash and prints Mermaid or JSON', as
   const json = JSON.parse((await call(['--format', 'json'])).stdout); assert.equal(json.edges.length, 1);
   const file = join(f.state, 'runs', r.runId, NAVIGATION_FILE); await writeFile(file, (await readFile(file, 'utf8')) + ' ');
   await assert.rejects(call([]), e => /does not match its delivered hash/.test(e.stderr));
+});
+
+test('a model CONTAINS query records the directory and the view, source route and CLI accept it', async t => {
+  const f = await setup(t);
+  const r = await new ReviewEngine(runtime(async tools => {
+    const found = await tools.graph_lookup({ query: 'app.py', limit: 5 }); const file = found.items.find(item => item.kind === 'file');
+    const parent = await tools.graph_neighbors({ symbolId: file.id, relation: 'CONTAINS', direction: 'incoming', limit: 5 });
+    assert.equal(parent.items.length, 1);
+    await tools.read_diff({ path: 'app.py' }); await tools.submit_review({ summary: 'structure', reviewedPaths: ['app.py'], findings: [] });
+  })).run(f.options);
+  const record = JSON.parse(await readFile(join(f.state, 'runs', r.runId, NAVIGATION_FILE), 'utf8'));
+  assert.deepEqual(record.entities.filter(e => e.kind === 'directory').map(e => [e.path, e.startLine, e.endLine]), [['/', 0, 0]]);
+  const a = await artifacts(f, r.runId); const response = await a.navigation(r.runId);
+  assert.equal(response.state, 'recorded'); const directory = response.view.nodes.find(n => n.kind === 'directory');
+  assert.ok(directory); await assert.rejects(a.navigationSource(r.runId, directory.id), e => e.code === 'INVALID_QUERY');
+  const { execFile } = await import('node:child_process'); const { promisify } = await import('node:util'); const { fileURLToPath } = await import('node:url');
+  const cli = fileURLToPath(new URL('../src/cli/main.ts', import.meta.url));
+  const call = args => promisify(execFile)(process.execPath, ['--experimental-strip-types', cli, 'navigation', '--run', r.runId, '--state', f.state, ...args], { windowsHide: true });
+  assert.match((await call([])).stdout, /^flowchart LR/);
+  await assert.rejects(call(['--max-nodes', 'abc']), e => /--max-nodes must be an integer/.test(e.stderr));
+  await assert.rejects(call(['--max-nodes', '0']), e => /--max-nodes must be an integer/.test(e.stderr));
+});
+
+test('an internal recorder fault makes navigation unavailable and the report is still delivered', async t => {
+  const f = await setup(t); const original = NavigationRecorder.prototype.entity;
+  NavigationRecorder.prototype.entity = function () { throw new Error('synthetic recorder fault'); };
+  try {
+    const r = await new ReviewEngine(graphReview()).run(f.options);
+    const run = await readRun(f.state, r.runId); assert.equal(run.status, 'delivered'); assert.equal(r.report.status, 'completed');
+    assert.deepEqual(run.navigation, { state: 'unavailable', reason: 'synthetic recorder fault' });
+    await assert.rejects(readFile(join(f.state, 'runs', r.runId, NAVIGATION_FILE)), { code: 'ENOENT' });
+  } finally { NavigationRecorder.prototype.entity = original; }
+});
+
+test('graph tool results are byte-identical with and without the recorder', async t => {
+  const f = await setup(t);
+  const capture = outputs => runtime(async tools => {
+    const found = await tools.graph_lookup({ query: 'ratio', limit: 10 }); outputs.push(JSON.stringify(found));
+    const target = found.items.find(item => item.kind === 'function');
+    outputs.push(JSON.stringify(await tools.graph_neighbors({ symbolId: target.id, relation: 'CALLS', direction: 'incoming', limit: 10 })));
+    outputs.push(JSON.stringify(await tools.graph_neighbors({ symbolId: target.id, relation: 'CONTAINS', direction: 'incoming', limit: 10 })));
+    await tools.read_diff({ path: 'app.py' }); await tools.submit_review({ summary: 'compare', reviewedPaths: ['app.py'], findings: [] });
+  });
+  // Warm the published generation so both compared runs read the same one.
+  await new ReviewEngine(capture([])).run(f.options);
+  const recorded = []; const recordedRun = await new ReviewEngine(capture(recorded)).run(f.options);
+  const methods = ['graphPage', 'graphError', 'investigationDelivered', 'candidateExpanded', 'describe']; const saved = methods.map(name => NavigationRecorder.prototype[name]);
+  for (const name of methods) NavigationRecorder.prototype[name] = function () {};
+  const silent = [];
+  try { await new ReviewEngine(capture(silent)).run(f.options); } finally { methods.forEach((name, index) => { NavigationRecorder.prototype[name] = saved[index]; }); }
+  assert.equal((await readRun(f.state, recordedRun.runId)).navigation.steps, 3);
+  assert.equal(recorded.length, 3); assert.deepEqual(silent, recorded);
 });

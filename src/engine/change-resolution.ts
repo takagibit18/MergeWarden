@@ -17,9 +17,10 @@ export function resolveChangeHints(symbols: readonly SymbolFact[], snapshotId: s
       const d=hint.declaration.head, item=d.importItem!;
       if(item.uncertain || hint.declaration.match!=='matched') return {inputIndex,status:'ambiguous' as const,items:[]};
       const language=languageForPath(hint.path); if(!language) return {inputIndex,status:'missing' as const,items:[]};
-      const {module,files}=language.importTarget(hint.path,item);
+      // Each candidate file's own module name qualifies its members (for Python it equals the import's module).
+      const {files}=language.importTarget(hint.path,item);
       const matches=symbols.filter(s=>s.snapshotId===snapshotId && files.includes(s.path)
-        && (item.importedName ? s.name===item.importedName && s.qualifiedName===module+'.'+item.importedName : s.kind==='file'));
+        && (item.importedName ? s.name===item.importedName && s.qualifiedName===(languageForPath(s.path)?.moduleName(s.path)??'')+'.'+item.importedName : s.kind==='file'));
       return {inputIndex,status:matches.length===1?'resolved' as const:matches.length?'ambiguous' as const:'missing' as const,items:matches.map(dispatchEntity)};
     }
     let matches = symbols.filter(s => s.snapshotId === snapshotId && s.path === hint.path

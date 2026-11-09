@@ -92,10 +92,16 @@ export class TypeScriptTreeSitterExtractor implements LanguageExtractor {
       const symbol: SymbolFact = { ...source(n, kind, `${ctx.owner.qualifiedName}.${name}`, ctx.owner.id), name, kind, ...(kind === "function" ? { functionKind: functionKind ?? "function" } : {}) };
       facts.symbols.push(symbol); return symbol;
     };
+    /** A named function expression sees its own name first, never an outer binding of that name. */
+    const ownName = (n: Node, scopeId: string, target?: string) => {
+      if (n.type !== "function_expression" && n.type !== "function" && n.type !== "generator_function") return;
+      const name = field(n, "name"); if (name?.type === "identifier") bind(scopeId, name.text, target ? "definition" : "unknown", false, name, target);
+    };
     /** A function body: its own scope; class bodies are skipped for name lookup, as in Python methods. */
     const functionBody = (symbol: SymbolFact, n: Node, ctx: Context, lookupParent: string) => {
       scope({ id: symbol.id, parentId: ctx.scope, lookupParentId: lookupParent, opaque: false });
       const inner: Context = { scope: symbol.id, owner: symbol, conditional: false, uncertain: ctx.uncertain };
+      ownName(n, symbol.id, symbol.id);
       bindParameters(field(n, "parameters"), symbol.id, ctx);
       const single = field(n, "parameter"); if (single?.type === "identifier") bind(symbol.id, single.text, "unknown", false, single);
       const body = field(n, "body"); if (!body) return;
@@ -204,12 +210,15 @@ export class TypeScriptTreeSitterExtractor implements LanguageExtractor {
       if (n.type === "internal_module" || n.type === "module") { const name = field(n, "name"); if (name?.type === "identifier") bind(ctx.scope, name.text, "unknown", ctx.conditional, name); facts.diagnostics.push("TypeScript namespaces are not indexed."); return; }
       if (n.type === "enum_declaration") { const name = field(n, "name"); if (name) bind(ctx.scope, name.text, "unknown", ctx.conditional, name); return; }
       if (["interface_declaration", "type_alias_declaration", "ambient_declaration", "type_annotation", "type_arguments", "type_parameters"].includes(n.type)) return;
-      if (FUNCTION_VALUES.has(n.type) || n.type === "class") {
+      if (FUNCTION_VALUES.has(n.type) || n.type === "class" || n.type === "method_definition") {
         if (n.type === "class") { facts.diagnostics.push("Anonymous class expressions are not indexed."); return; }
-        // Anonymous callback: its own lexical scope, calls stay owned by the enclosing entity.
+        // Anonymous callback or object-literal method (class methods are handled by classDeclaration):
+        // its own lexical scope, calls stay owned by the enclosing entity.
+        if (n.type === "method_definition") { const name = field(n, "name"); if (name?.type === "computed_property_name") walk(name, ctx); }
         const id = idFor([input.snapshotId, input.path, "scope", n.startIndex, n.endIndex]);
         scope({ id, parentId: ctx.scope, lookupParentId: ctx.scope, opaque: false });
         const inner: Context = { scope: id, owner: ctx.owner, conditional: false, uncertain: ctx.uncertain };
+        ownName(n, id);
         bindParameters(field(n, "parameters"), id, ctx);
         const single = field(n, "parameter"); if (single?.type === "identifier") bind(id, single.text, "unknown", false, single);
         const body = field(n, "body"); if (body) { if (body.type === "statement_block") for (const child of body.namedChildren) walk(child, inner); else walk(body, inner); }

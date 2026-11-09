@@ -42,13 +42,10 @@ export const typescript: LanguageDescriptor = {
   moduleName: typescriptModuleName,
   importTarget(importerPath, item) { return { module: item.module, files: relativeCandidates(item.module, importerPath), ...(item.importedName ? { importedName: item.importedName } : {}) }; },
   async createResolver(context: ResolverContext) {
-    let resolve: SpecifierResolver;
-    try {
-      const adapter = await import(new URL("../../../integrations/tree-sitter/src/typescript-modules.ts", import.meta.url).href) as { createSpecifierResolver(context: ResolverContext): Promise<SpecifierResolver> };
-      resolve = await adapter.createSpecifierResolver(context);
-    } catch {
-      const paths = new Set(context.paths); resolve = (specifier, fromPath) => relativeCandidates(specifier, fromPath).find(path => paths.has(path));
-    }
+    // No silent fallback: a weaker resolver would publish different edges under the same cache identity.
+    // If the adapter or the TypeScript compiler cannot load, the build fails and the graph is unavailable.
+    const adapter = await import(new URL("../../../integrations/tree-sitter/src/typescript-modules.ts", import.meta.url).href) as { createSpecifierResolver(context: ResolverContext): Promise<SpecifierResolver> };
+    const resolve: SpecifierResolver = await adapter.createSpecifierResolver(context);
     return new TypeScriptResolver(context.snapshotId, resolve, typescriptModuleName);
   },
   extractor: { module: "../../../integrations/tree-sitter/src/typescript-extractor.ts", export: "TypeScriptTreeSitterExtractor" },

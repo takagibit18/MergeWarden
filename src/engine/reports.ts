@@ -1,4 +1,5 @@
-import { readFile, readdir } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { open as openFile, readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { FindingCandidate, ReviewReport } from "../domain/contracts.ts";
 import { atomicWrite, sha256, writeJson } from "../infrastructure/files.ts";
@@ -44,9 +45,19 @@ async function writeNavigation(directory: string, record: NavigationRecord | { u
     return { state: "recorded", sha256: sha256(text), steps: record.steps.length, entities: record.entities.length, relations: record.relations.length, truncated: record.truncated };
   } catch { return { state: "unavailable", reason: "Navigation record could not be written" }; }
 }
+/**
+ * Reads navigation.json without following a symlink and never beyond maxBytes: the file checked is the
+ * file read (no check-then-open race), and an oversized or replaced file fails before it is parsed.
+ */
 export async function readNavigation(state: string, id: string): Promise<{ text: string; record: NavigationRecord }> {
-  const text = await readFile(join(runPath(state, id), NAVIGATION_FILE), "utf8");
-  return { text, record: JSON.parse(text) as NavigationRecord };
+  const handle = await openFile(join(runPath(state, id), NAVIGATION_FILE), fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+  try {
+    const info = await handle.stat(); if (!info.isFile() || info.size > NAVIGATION_LIMITS.maxBytes) throw new Error("Navigation record is not a bounded regular file");
+    const buffer = Buffer.alloc(info.size + 1); const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    if (bytesRead > info.size) throw new Error("Navigation record changed while reading");
+    const text = buffer.subarray(0, bytesRead).toString("utf8");
+    return { text, record: JSON.parse(text) as NavigationRecord };
+  } finally { await handle.close(); }
 }
 export async function readRun(state: string, id: string): Promise<RunManifest> {
   const manifest = JSON.parse(await readFile(join(runPath(state, id), "run.json"), "utf8")) as RunManifest;

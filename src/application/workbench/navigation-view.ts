@@ -10,8 +10,16 @@ const OPERATIONS = new Set(['graph_lookup', 'graph_neighbors', 'investigation_de
 const ROLE_ORDER: NavigationNodeRole[] = ['change_root', 'in_changed_file', 'evidence_overlap', 'expanded', 'candidate', 'visited'];
 const isId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 160;
 const isLine = (value: unknown): value is number => Number.isInteger(value) && (value as number) > 0;
+/** Directory entities carry no source span: the graph stores them with lines 0..0. */
+const validSpan = (kind: string, start: unknown, end: unknown) => kind === 'directory' ? start === 0 && end === 0 : isLine(start) && isLine(end) && end >= start;
 const isText = (value: unknown, max: number) => typeof value === 'string' && value.length <= max;
 const ids = (value: unknown, max: number): value is string[] => Array.isArray(value) && value.length <= max && value.every(isId);
+const optionalText = (value: unknown, max: number) => value === undefined || (typeof value === 'string' && value.length <= max);
+const validChangeUnit = (unit: unknown) => isRecord(unit) && isId(unit.changeUnitId) && isText(unit.path, 4096) && isText(unit.kind, 16) && isText(unit.resolution, 64)
+  && (unit.entityId === undefined || isId(unit.entityId));
+const validInvestigation = (item: unknown) => isRecord(item) && isId(item.investigationId) && isText(item.routeType, 64) && isText(item.status, 64)
+  && Array.isArray(item.changeUnits) && item.changeUnits.length <= 64 && item.changeUnits.every(validChangeUnit) && ids(item.candidateRefIds, 500)
+  && Array.isArray(item.limitations) && item.limitations.length <= 16 && item.limitations.every(text => isText(text, 512));
 
 /**
  * Structural validation of a native navigation record against its run and frozen snapshot.
@@ -28,7 +36,7 @@ export function validateNavigation(value: unknown, expected: { runId: string; sn
   const inHead = (kind: string, path: string) => kind === 'directory' ? path === '/' || expected.headPaths.some(item => item.startsWith(path + '/')) : files.has(path);
   for (const entity of entities) {
     if (!isRecord(entity) || !isId(entity.id) || !KINDS.has(String(entity.kind)) || !isText(entity.path, 4096) || !entity.path || !isText(entity.qualifiedName, 4096) || !isText(entity.name, 1024)
-      || !isLine(entity.startLine) || !isLine(entity.endLine) || (entity.endLine as number) < (entity.startLine as number)) throw new Error('Invalid navigation entity');
+      || !validSpan(String(entity.kind), entity.startLine, entity.endLine)) throw new Error('Invalid navigation entity');
     if (!inHead(String(entity.kind), String(entity.path))) throw new Error('Navigation entity is outside the frozen head');
     if (entityIds.has(entity.id)) throw new Error('Duplicate navigation entity'); entityIds.add(entity.id);
   }
@@ -42,7 +50,9 @@ export function validateNavigation(value: unknown, expected: { runId: string; sn
   for (const step of steps) {
     if (!isRecord(step) || !Number.isInteger(step.seq) || (step.seq as number) <= previous || !OPERATIONS.has(String(step.op)) || !['model_tool', 'host_dispatch'].includes(String(step.origin))
       || !isText(step.status, 64) || typeof step.coverageLimited !== 'boolean' || typeof step.pageTruncated !== 'boolean' || !isRecord(step.input)
-      || !ids(step.entityIds, 5000) || !ids(step.relationIds, 5000)) throw new Error('Invalid navigation step');
+      || !ids(step.entityIds, 5000) || !ids(step.relationIds, 5000)
+      || !optionalText(step.error, 512) || !optionalText(step.requestId, 160) || !optionalText(step.candidateRefId, 80) || !optionalText(step.terminal, 64) || !optionalText(step.generationId, 160)
+      || (step.investigations !== undefined && (!Array.isArray(step.investigations) || step.investigations.length > 32 || !step.investigations.every(validInvestigation)))) throw new Error('Invalid navigation step');
     previous = step.seq as number;
     if (!value.truncated && (step.entityIds.some(id => !entityIds.has(id)) || step.relationIds.some(id => !relationIds.has(id)))) throw new Error('Navigation step references unknown facts');
   }

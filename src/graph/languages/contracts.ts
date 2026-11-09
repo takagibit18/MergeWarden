@@ -17,7 +17,8 @@ export interface ResolverContext { snapshotId: string; paths: readonly string[];
 
 /** Per-language name and module resolution over SyntaxFacts. Directories and CONTAINS belong to the StructureIndexer. */
 export interface LanguageResolver {
-  markModuleUnavailable(moduleName: string): void;
+  /** A file outside the published scope. Python keys by module name; languages whose module names collide (a.ts / a.tsx) key by path. */
+  markModuleUnavailable(moduleName: string, path: string): void;
   index(fact: SyntaxFacts): void;
   finalize(): void;
   resolveFile(fact: SyntaxFacts): RelationFact[];

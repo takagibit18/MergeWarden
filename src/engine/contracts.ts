@@ -49,8 +49,6 @@ export interface RunManifest {
   /** Run-level policy identity; historical snapshots and reports remain immutable. */
   reviewPolicy?: { version: string; sha256: string };
   investigation?: import('./prompt.ts').Investigation;
-  /** Graph languages (ADR 0022). Defaults to every registered language; evaluations default to Python only. */
-  languages?: readonly string[];
   status: "running" | "delivered" | "delivery_failed"; createdAt: string; finishedAt?: string;
   parentRunId?: string; outcome?: ReviewReport["status"]; error?: string;
   termination?: { reason: 'completed' | 'tool_budget' | 'time_budget' | 'cancelled' | 'runtime_error' | 'incomplete'; finalSubmission: boolean };
