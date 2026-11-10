@@ -1,5 +1,7 @@
 # 顶层决策索引
 
+提议中（草案）：[ADR 0023：分层语言包与候选线索](adr/0023-tiered-language-packs-and-candidate-leads.md)。新增只靠 Tree-sitter 查询的名字级语言层；有歧义的调用以带 candidate 标签的一跳线索交给模型，不成为图边，也不进入确定性逻辑。默认关闭，Python 配对评测通过前不改默认。
+
 新增产品决策：[ADR 0022：语言包与 TypeScript](adr/0022-language-packs.md)。图构建只面对语言描述符；Python 重构后图身份与发布内容逐字节不变，TypeScript 已实现，评测语料仍只有 Python。
 
 新增产品决策：[ADR 0021：只读导航视图](adr/0021-navigation-view.md)。宿主在交付时写入哈希校验的 `navigation.json`，工作台只读展示一次运行的结构导航；写入失败标记为不可用，不影响报告交付。
@@ -36,3 +38,4 @@
 | [ADR-0014](adr/0014.md) | LocAgent 风格实体图与分层范围 | 已实施；真实仓库容量已测，质量增益未证明 |
 | [ADR-0021](adr/0021-navigation-view.md) | 只读运行导航视图 | 已实施；对审查理解的帮助未测 |
 | [ADR-0022](adr/0022-language-packs.md) | 语言包与 TypeScript | 已实施；Python 等价已证，TypeScript 质量未评测 |
+| [ADR-0023](adr/0023-tiered-language-packs-and-candidate-leads.md) | 分层语言包与候选线索 | 提议（草案）；未实现，未评测 |
