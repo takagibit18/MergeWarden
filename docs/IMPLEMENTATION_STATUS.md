@@ -1,5 +1,11 @@
 # 当前实现状态 · 2026-10-11
 
+## GitHub Actions 通道 · 2026-11-10
+
+- [ADR 0024](adr/0024-github-actions-channel.md)：复用工作流 `mergewarden-channel.yml` 在托管 runner 上审查同仓库 PR，并把可信协作者的 `/mw` 评论作为反馈免审批学习。状态存放在私有状态仓库的项目目录，白名单只提交 Skill、交付报告、快照清单与 PR 运行映射；冻结源码按 commit 从 Git 恢复并逐个校验哈希。推送被拒时 rebase 重试。
+- 已验证：`tests/github-channel.test.mjs` 以本地 bare 仓库代替状态仓库，覆盖新 runner 恢复、幂等与撤回、自动应用、推送重试和下一次审查绑定新 Skill。
+- 未验证：真实 GitHub Actions 运行、GitHub API 重新读取评论、PR 评论与反应发布。需要配置 secrets 后实际验收。状态仓库无保留策略。
+
 ## 结构导航视图与语言包 · 2026-11-08
 
 - 导航视图（[ADR 0021](adr/0021-navigation-view.md)）：图工具与 dispatch_v2 调查在交付时写入 `navigation.json`，哈希提交在 `run.json`。工作台“结构导航”区块按需加载，提供步骤时间线、React Flow + ELK 图（懒加载分包）、实体列表与 HEAD 源码；CLI `navigation --run ID` 输出 Mermaid 或 JSON。写入失败只标记不可用。对审查理解的帮助未测。

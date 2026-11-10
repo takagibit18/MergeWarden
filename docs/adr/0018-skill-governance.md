@@ -45,7 +45,8 @@ run artifacts ─▶ usage projection ─▶ Layer 3: curate ─▶ retire propo
 - Product paths use approval `required`. `ReviewOptions.skillApproval: 'auto'`
   and `learnPending({ approval: 'auto' })` exist for internal evaluation only;
   the engine refuses `auto` without `evaluation`. Auto decisions are recorded
-  as `host_auto`.
+  as `host_auto`. Revised by ADR 0024: the GitHub Actions channel applies trusted
+  collaborator `/mw` feedback with `host_auto`; run-sourced learning stays out of that path.
 - Direct human actions (`disable`, `rollback`, `pin`, `unpin`) stay immediate.
 
 ### Layer 1 — compare before extracting (`novelty-gated-1`)
