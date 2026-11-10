@@ -1,5 +1,7 @@
 # 顶层决策索引
 
+新增产品决策：[ADR 0024：GitHub Actions 审查与评论学习通道](adr/0024-github-actions-channel.md)。托管 runner 审查同仓库 PR，状态存放在私有状态仓库（只提交 Skill、交付报告与快照清单，源码按 commit 从 Git 恢复并校验哈希）；owner/member/collaborator 的 `/mw` 评论作为可信人工反馈，免审批学习。本地端到端已验证，真实 Actions 运行未验收。
+
 提议中（草案）：[ADR 0023：分层语言包与候选线索](adr/0023-tiered-language-packs-and-candidate-leads.md)。新增只靠 Tree-sitter 查询的名字级语言层；有歧义的调用以带 candidate 标签的一跳线索交给模型，不成为图边，也不进入确定性逻辑。默认关闭，Python 配对评测通过前不改默认。
 
 新增产品决策：[ADR 0022：语言包与 TypeScript](adr/0022-language-packs.md)。图构建只面对语言描述符；Python 重构后图身份与发布内容逐字节不变，TypeScript 已实现，评测语料仍只有 Python。
@@ -39,3 +41,4 @@
 | [ADR-0021](adr/0021-navigation-view.md) | 只读运行导航视图 | 已实施；对审查理解的帮助未测 |
 | [ADR-0022](adr/0022-language-packs.md) | 语言包与 TypeScript | 已实施；Python 等价已证，TypeScript 质量未评测 |
 | [ADR-0023](adr/0023-tiered-language-packs-and-candidate-leads.md) | 分层语言包与候选线索 | 提议（草案）；未实现，未评测 |
+| [ADR-0024](adr/0024-github-actions-channel.md) | GitHub Actions 审查与评论学习通道 | 已实施；本地端到端已验证，真实 Actions 运行未验收 |

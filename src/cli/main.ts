@@ -30,6 +30,9 @@ npm run cli -- skills curate [--stage true] [--state PATH]   (report only unless
 npm run cli -- skills diff --proposal ID [--state PATH]
 npm run cli -- skills approve|reject --proposal ID|all [--note TEXT] [--state PATH]
 npm run cli -- skills pin --id SKILL_ID [--note TEXT] | unpin --id SKILL_ID [--state PATH]
+npm run cli -- github record-run --repo PATH --repository OWNER/NAME --pull N --run ID --state PATH
+npm run cli -- github feedback --repo PATH --repository OWNER/NAME --event-name issue_comment|pull_request_review_comment --event-file PATH --state PATH [--fetch false] [--provider NAME --model ID --api-key-env NAME]
+npm run cli -- github publish --repo PATH --state PATH --state-repo PATH --message TEXT
 npm run cli -- history [--state PATH]
 npm run cli -- show --run ID [--state PATH]
 npm run cli -- evidence --run ID --finding ID [--state PATH]
@@ -43,7 +46,8 @@ Options: --skills auto|off|replay, --learn auto|off, --comment-file OUTSIDE_PATH
          --thinking LEVEL (must be supported by the selected model), --max-output-tokens 8192,
          --investigation safety_fact (review/rerun prompt variant; off by default, rerun inherits the original),
          --auth oauth (use explicit Pi login instead of --api-key-env),
-         --include-untracked PATH (repeat; worktree only, ignored files excluded)
+         --include-untracked PATH (repeat; worktree only, ignored files excluded),
+         --repository-key KEY (review: Skill bank partition, e.g. github:owner/name; default is the checkout path hash)
 Learned Skill changes are staged for approval; reviews never read a pending proposal.
 API keys come only from the named environment variable; OAuth uses STATE/auth/auth.json.
 No repository model config or existing Pi/Codex login is read. Models lists catalog capabilities, not account entitlements.
@@ -51,7 +55,7 @@ Exit codes: 0 completed/read-only/no_changes; 2 input or persistence failure; 3 
 No cost estimate is produced. Model requests occur in review/rerun (including bounded learning), and explicitly authenticated feedback/skills learn.`;
 function parse(argv: string[]) {
   const values = new Map<string, string[]>();
-  const known = new Set(["repo", "state", "scope", "base", "head", "provider", "model", "auth", "api-key-env", "timeout-ms", "max-tools", "thinking", "max-output-tokens", "include-untracked", "run", "finding", "skills", "learn", "id", "revision", "comment", "comment-file", "event", "version", "path", "start-line", "end-line", "verdict", "withdrawn", "retry", "max-jobs", "proposal", "note", "stage", "investigation", "format", "max-nodes"]);
+  const known = new Set(["repo", "state", "scope", "base", "head", "provider", "model", "auth", "api-key-env", "timeout-ms", "max-tools", "thinking", "max-output-tokens", "include-untracked", "run", "finding", "skills", "learn", "id", "revision", "comment", "comment-file", "event", "version", "path", "start-line", "end-line", "verdict", "withdrawn", "retry", "max-jobs", "proposal", "note", "stage", "investigation", "format", "max-nodes", "repository-key", "repository", "pull", "event-name", "event-file", "fetch", "state-repo", "message"]);
   for (let i = 0; i < argv.length; i += 2) {
     const flag = argv[i]!; const value = argv[i + 1]; const key = flag.slice(2);
     if (!flag.startsWith("--") || !known.has(key) || !value || value.startsWith("--")) throw new Error(`Invalid option: ${flag}`);
@@ -71,8 +75,8 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   if (command === "status") {
     console.log(JSON.stringify({ milestone: "v0.2 Python graph + reproducible evaluation; quality benefit unproven", review: "Pi + frozen source, CLI, final-only advisory reports", graph: "Lazy HEAD Python entity graph + core/all resumable SQLite generations + graph tools", evaluation: "20 frozen controlled cases; text-only ablation internal", ide: "pending", liveModelValidated: false, liveModelValidation: { historical: true, appliesToCurrentProviderPolicy: false, provider: "bigmodel", model: "glm-5.3-flash", date: "2026-09-20", scope: "Controlled Python CLI smoke and full 20-case paired A/B; 35/40 complete deliveries; 5 timeouts retained. Independent human Golden review pending; no Graph discovery benefit established." }, advisor: "off" }, null, 2)); return 0;
   }
-  const skillAction = command === 'skills' ? argv[1] : undefined;
-  const options = parse(argv.slice(command === 'skills' ? 2 : 1));
+  const skillAction = command === 'skills' || command === 'github' ? argv[1] : undefined;
+  const options = parse(argv.slice(skillAction !== undefined ? 2 : 1));
   const state = resolve(options.get("state") ?? join(process.env.LOCALAPPDATA ?? homedir(), "MergeWarden2"));
   if (command === "models") { console.log(JSON.stringify(await (await adapter()).listModels(options.get("provider")), null, 2)); return 0; }
   if (command === "history") { console.log(JSON.stringify(await history(state), null, 2)); return 0; }
@@ -127,6 +131,43 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     let learning:unknown={status:'pending'};
     if (options.get('auth') || options.get('api-key-env')) try { learning=await learnPending(admittedState,await learningAdapter(),{...learningOptions(),maxJobs:1,repositoryKey:result.source.repositoryKey,feedbackOnly:true}); } catch {learning={status:'pending',error:'Feedback saved; learning not completed'};}
     console.log(JSON.stringify({...result,learning},null,2));return 0;
+  }
+  if (command === 'github') {
+    const github = await import('../channels/github.ts');
+    const repositoryName = () => { const name = options.require('repository'); if (!/^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/.test(name)) throw Error('Invalid --repository; use OWNER/NAME'); return name; };
+    let result: unknown;
+    if (skillAction === 'record-run') {
+      const pull = Number(options.require('pull'));
+      result = await github.recordRun(admittedState, repositoryName(), pull, options.require('run'));
+    } else if (skillAction === 'feedback') {
+      const name = repositoryName(), eventName = options.require('event-name');
+      if (eventName !== 'issue_comment' && eventName !== 'pull_request_review_comment') throw Error('Invalid --event-name');
+      const fetchCurrent = options.get('fetch') ?? 'true'; if (!['true', 'false'].includes(fetchCurrent)) throw Error('Invalid --fetch');
+      const payload = JSON.parse(await readFile(resolve(options.require('event-file')), 'utf8'));
+      const pull = eventName === 'issue_comment' ? (payload.issue?.pull_request ? payload.issue.number : undefined) : payload.pull_request?.number;
+      if (!Number.isSafeInteger(pull)) { console.log(JSON.stringify({ ingest: { status: 'ignored', reason: 'Not a pull request comment' } }, null, 2)); return 0; }
+      let current = payload.action === 'deleted' ? null : payload.comment;
+      if (current && fetchCurrent === 'true') {
+        // Re-read the comment: the webhook body may be stale when events are redelivered or arrive out of order.
+        const url = String(payload.comment.url); if (!url.startsWith(`https://api.github.com/repos/${name}/`)) throw Error('Comment URL does not belong to this repository');
+        const token = process.env.GITHUB_TOKEN; if (!token) throw Error('Set GITHUB_TOKEN to re-read the comment, or pass --fetch false');
+        const response = await fetch(url, { headers: { accept: 'application/vnd.github+json', authorization: `Bearer ${token}`, 'x-github-api-version': '2022-11-28' } });
+        if (response.status === 404) current = null; else if (!response.ok) throw Error(`GitHub comment lookup failed with HTTP ${response.status}`); else current = await response.json();
+      }
+      const ingest = await github.ingestComment(admittedState, { repository: name, eventName, pullNumber: pull, commentId: Number(payload.comment?.id), current, repositoryPath: repository });
+      let learning: unknown = { status: 'skipped', reason: 'No model credentials supplied' };
+      if (ingest.status === 'saved' && (options.get('auth') || options.get('api-key-env'))) {
+        const hydration = await github.hydratePendingFeedback(admittedState, repository);
+        // ADR 0024: trusted collaborator feedback is applied without a staged approval; run-sourced learning stays out of this path.
+        try { learning = { hydration, jobs: await learnPending(admittedState, await learningAdapter(), { ...learningOptions(), maxJobs: 1, repositoryKey: ingest.source.repositoryKey, feedbackOnly: true, approval: 'auto' }) }; }
+        catch (e) { learning = { status: 'pending', hydration, error: e instanceof Error ? e.message : 'Learning not completed' }; }
+      }
+      result = { ingest, learning };
+    } else if (skillAction === 'publish') {
+      await github.writeStateIgnore(admittedState);
+      result = await github.publishState(resolve(options.require('state-repo')), options.require('message'));
+    } else throw Error('Invalid github command');
+    console.log(JSON.stringify(result, null, 2)); return 0;
   }
   if (command === 'skills') {
     const bank=new SkillBank(admittedState);let result:unknown;
@@ -214,8 +255,9 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     if(!['auto','off'].includes(learnMode)||!['auto','off','replay'].includes(skillsMode))throw Error('Invalid skills/learn mode');
     const investigation=options.get('investigation');if(investigation!==undefined&&investigation!=='safety_fact')throw Error('Invalid --investigation; use safety_fact');
     const learner=learnMode==='auto'?await learningAdapter():undefined;
-    if(learner)try{await learnPending(admittedState,learner,{model,inference,repositoryKey:sha256(repository),feedbackOnly:true,maxJobs:1});}catch{console.error(JSON.stringify({learning:'pending feedback unavailable; continuing review'}));}
-    const result = await new ReviewEngine(factory,undefined,learner).run({ skills:skillsMode as 'auto'|'off'|'replay',learn:learnMode as 'auto'|'off', repositoryPath: repository, stateDir: admittedState, model, signal: abort.signal,
+    const repositoryKey=options.get('repository-key');if(repositoryKey!==undefined&&!/^[A-Za-z0-9:._/-]{1,200}$/.test(repositoryKey))throw Error('Invalid --repository-key');
+    if(learner)try{await learnPending(admittedState,learner,{model,inference,repositoryKey:repositoryKey??sha256(repository),feedbackOnly:true,maxJobs:1});}catch{console.error(JSON.stringify({learning:'pending feedback unavailable; continuing review'}));}
+    const result = await new ReviewEngine(factory,undefined,learner).run({ ...(repositoryKey?{skillRepositoryKey:repositoryKey}:{}), skills:skillsMode as 'auto'|'off'|'replay',learn:learnMode as 'auto'|'off', repositoryPath: repository, stateDir: admittedState, model, signal: abort.signal,
       ...(Object.keys(inference).length ? { inference } : {}),
       ...(investigation ? { investigation } : {}),
       ...(input ? { input } : { rerunId: options.require("run") }),

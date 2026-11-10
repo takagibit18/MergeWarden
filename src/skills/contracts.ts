@@ -32,7 +32,7 @@ export interface Skill extends SkillContent {
 }
 export interface SkillSource {
   id: string; eventId: string; version: number; repositoryKey: string; runId: string; snapshotId: string; reportSha256: string;
-  kind: 'run' | 'feedback'; identity: 'review_runtime' | 'local_user' | 'simulation';
+  kind: 'run' | 'feedback'; identity: 'review_runtime' | 'local_user' | 'github_collaborator' | 'simulation';
   /** Repeated runs of the same source change are observations, not independent support. */
   independenceKey: string;
   trust: 'observed' | 'trusted'; simulated: boolean; withdrawn: boolean;
@@ -42,6 +42,12 @@ export interface SkillSource {
   anchor?: TradeoffAnchor;
   relationToReview?: 'supports' | 'contradicts' | 'adds_missing_issue' | 'adds_context';
   feedbackMetadata?: SimulatedFeedback;
+  /** github_collaborator only: where the comment lives and who wrote it. Never shown to the learner. */
+  channel?: GithubProvenance;
+}
+export interface GithubProvenance {
+  kind: 'github'; repository: string; pullNumber: number; commentKind: 'issue_comment' | 'review_comment'; commentId: number;
+  author: string; association: 'OWNER' | 'MEMBER' | 'COLLABORATOR'; url: string;
 }
 export interface SimulatedFeedback {
   feedbackId: string; sourceRunId: string; targetFindingId?: string; missedIssueAnchor?: SkillSource['range'];
