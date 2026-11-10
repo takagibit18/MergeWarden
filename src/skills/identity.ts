@@ -18,7 +18,7 @@ export function learningIdentity(input: LearningInput) {
   const shown = [...shownRefs.values()];
   const strip = (value: unknown): unknown => {
     if (Array.isArray(value)) return value.map(strip);
-    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).filter(([k]) => !['snapshotId','runId','contentSha256','fileHash','hash','reportSha256','sources','eventId','feedbackMetadata'].includes(k)).map(([k,v]) => [k,strip(v)]));
+    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).filter(([k]) => !['snapshotId','runId','contentSha256','fileHash','hash','reportSha256','sources','eventId','feedbackMetadata','channel'].includes(k)).map(([k,v]) => [k,strip(v)]));
     return value;
   };
   const visible = {

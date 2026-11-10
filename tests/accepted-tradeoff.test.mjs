@@ -90,10 +90,10 @@ test('accepted_tradeoff feedback requires a source range', async t => {
 test('run-derived and simulated sources cannot create an accepted trade-off', async t => {
   const f = await fixture(t);
   const [fromRun] = await learnPending(f.state, addSkill(TRADEOFF), { model: f.options.model, approval: 'auto' });
-  assert.equal(fromRun.status, 'failed'); assert.match(fromRun.error, /Accepted trade-offs come only from local user/);
+  assert.equal(fromRun.status, 'failed'); assert.match(fromRun.error, /Accepted trade-offs come only from human/);
   await feedback(f.state, { runId: f.run.runId, comment: 'Simulated acceptance.', range: { path: 'app.py', startLine: 1, endLine: 2 }, verdict: 'accepted_tradeoff' }, { simulated: true, trustedProjectReviewer: true });
   const [simulated] = await learnFeedback(f, addSkill(TRADEOFF));
-  assert.equal(simulated.status, 'failed'); assert.match(simulated.error, /Accepted trade-offs come only from local user/);
+  assert.equal(simulated.status, 'failed'); assert.match(simulated.error, /Accepted trade-offs come only from human/);
   assert.equal((await f.bank.skills()).length, 0);
 });
 

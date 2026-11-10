@@ -1,0 +1,200 @@
+name: MergeWarden channel
+# ADR 0024. Reusable: review same-repository pull requests and learn from trusted collaborator `/mw` comments.
+# State lives in a private state repository, one directory per reviewed project. Reviewed code is data only:
+# MergeWarden runs from its own checkout and never executes the reviewed repository.
+on:
+  workflow_call:
+    inputs:
+      state-repository:
+        description: Private OWNER/NAME repository that stores Skill banks and delivered runs.
+        required: true
+        type: string
+      provider:
+        required: true
+        type: string
+      model:
+        required: true
+        type: string
+      tool-repository:
+        required: false
+        type: string
+        default: takagibit18/MergeWarden
+      tool-ref:
+        required: false
+        type: string
+        default: main
+      max-tools:
+        required: false
+        type: string
+        default: '100'
+    secrets:
+      state-token:
+        description: Fine-grained token with contents read/write on the state repository only.
+        required: true
+      model-api-key:
+        required: true
+      tool-token:
+        description: Read token for a private tool repository; defaults to the workflow token.
+        required: false
+
+env:
+  MW_STATE_DIR: ${{ github.workspace }}/state/${{ github.repository }}
+
+jobs:
+  review:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # One writer per project state directory; queued, never cancelled, so no delivered run is lost.
+    concurrency:
+      group: mergewarden-state-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - &tool
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ inputs.tool-repository }}
+          ref: ${{ inputs.tool-ref }}
+          token: ${{ secrets.tool-token || github.token }}
+          path: tool
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          path: repo
+          persist-credentials: false
+      - &state
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ inputs.state-repository }}
+          token: ${{ secrets.state-token }}
+          path: state
+      - &node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.19.0'
+          cache: npm
+          cache-dependency-path: |
+            tool/integrations/pi/package-lock.json
+            tool/integrations/tree-sitter/package-lock.json
+      - &install
+        name: Install review runtime
+        working-directory: tool
+        run: |
+          npm ci --ignore-scripts --prefix integrations/pi
+          npm ci --ignore-scripts --prefix integrations/tree-sitter
+      - name: Review
+        id: review
+        working-directory: tool
+        env:
+          MW_MODEL_API_KEY: ${{ secrets.model-api-key }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          PROVIDER: ${{ inputs.provider }}
+          MODEL: ${{ inputs.model }}
+          MAX_TOOLS: ${{ inputs.max-tools }}
+        run: |
+          set +e
+          node --experimental-strip-types src/cli/main.ts review --repo "$GITHUB_WORKSPACE/repo" --base "$BASE" --head "$HEAD" \
+            --provider "$PROVIDER" --model "$MODEL" --api-key-env MW_MODEL_API_KEY --max-tools "$MAX_TOOLS" \
+            --state "$MW_STATE_DIR" --repository-key "github:${GITHUB_REPOSITORY,,}" --learn off > "$RUNNER_TEMP/review.json"
+          code=$?
+          set -e
+          # 3 = delivered but incomplete; that report is still published and can receive feedback.
+          if [ "$code" -ne 0 ] && [ "$code" -ne 3 ]; then exit "$code"; fi
+          echo "run=$(jq -r '.runId // empty' "$RUNNER_TEMP/review.json")" >> "$GITHUB_OUTPUT"
+      - name: Record run and publish state
+        if: steps.review.outputs.run != ''
+        working-directory: tool
+        env:
+          RUN: ${{ steps.review.outputs.run }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          node --experimental-strip-types src/cli/main.ts github record-run --repo "$GITHUB_WORKSPACE/repo" --state "$MW_STATE_DIR" \
+            --repository "$GITHUB_REPOSITORY" --pull "$PR" --run "$RUN"
+          node --experimental-strip-types src/cli/main.ts github publish --repo "$GITHUB_WORKSPACE/repo" --state "$MW_STATE_DIR" \
+            --state-repo "$GITHUB_WORKSPACE/state" --message "review $GITHUB_REPOSITORY#$PR run $RUN"
+      # Published only after the state push succeeded, so every visible report has a durable run behind it.
+      - name: Comment report
+        if: steps.review.outputs.run != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN: ${{ steps.review.outputs.run }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          {
+            cat "$MW_STATE_DIR/runs/$RUN/report.md"
+            echo
+            echo "---"
+            echo "Teach MergeWarden (owners, members and collaborators only): start a comment with \`/mw\`."
+            echo "\`/mw [wrong|missed|contract|tradeoff|unsure] [finding:ID] explanation\`. Inline comments on changed lines anchor the lesson; \`tradeoff\` requires one."
+          } > "$RUNNER_TEMP/comment.md"
+          gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --edit-last --body-file "$RUNNER_TEMP/comment.md" \
+            || gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/comment.md"
+
+  feedback:
+    # Edits that remove `/mw` must still run so the earlier lesson is withdrawn. Trust is decided by the CLI, not here.
+    if: >-
+      (github.event_name == 'pull_request_review_comment' || (github.event_name == 'issue_comment' && github.event.issue.pull_request)) &&
+      (contains(github.event.comment.body, '/mw') || contains(github.event.changes.body.from, '/mw'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: mergewarden-state-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - *tool
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          path: repo
+          persist-credentials: false
+      - name: Fetch pull request commits
+        env:
+          PR: ${{ github.event.issue.number || github.event.pull_request.number }}
+          TOKEN: ${{ github.token }}
+        run: |
+          git -C repo -c "http.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)" \
+            fetch --no-tags origin "+refs/pull/$PR/head:refs/remotes/origin/pr-$PR"
+      - *state
+      - *node
+      - *install
+      - name: Ingest comment and learn
+        working-directory: tool
+        env:
+          MW_MODEL_API_KEY: ${{ secrets.model-api-key }}
+          GITHUB_TOKEN: ${{ github.token }}
+          PROVIDER: ${{ inputs.provider }}
+          MODEL: ${{ inputs.model }}
+        run: |
+          node --experimental-strip-types src/cli/main.ts github feedback --repo "$GITHUB_WORKSPACE/repo" --state "$MW_STATE_DIR" \
+            --repository "$GITHUB_REPOSITORY" --event-name "$GITHUB_EVENT_NAME" --event-file "$GITHUB_EVENT_PATH" \
+            --provider "$PROVIDER" --model "$MODEL" --api-key-env MW_MODEL_API_KEY > "$RUNNER_TEMP/feedback.json"
+          { echo '```json'; cat "$RUNNER_TEMP/feedback.json"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish state
+        working-directory: tool
+        run: |
+          node --experimental-strip-types src/cli/main.ts github publish --repo "$GITHUB_WORKSPACE/repo" --state "$MW_STATE_DIR" \
+            --state-repo "$GITHUB_WORKSPACE/state" --message "feedback $GITHUB_REPOSITORY comment ${{ github.event.comment.id }}"
+      - name: Acknowledge
+        if: github.event.action != 'deleted'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.issue.number || github.event.pull_request.number }}
+          COMMENT: ${{ github.event.comment.id }}
+        run: |
+          status=$(jq -r '.ingest.status' "$RUNNER_TEMP/feedback.json")
+          applied=$(jq -r '[.learning.jobs[]?.status] | index("applied") != null' "$RUNNER_TEMP/feedback.json")
+          case "$status" in
+            saved) reaction=$([ "$applied" = true ] && echo rocket || echo eyes) ;;
+            unchanged|withdrawn) reaction='' ;;
+            rejected) reaction=confused ;;
+            *) exit 0 ;;
+          esac
+          if [ "$GITHUB_EVENT_NAME" = issue_comment ]; then path="issues/comments/$COMMENT"; else path="pulls/comments/$COMMENT"; fi
+          [ -n "$reaction" ] && gh api -X POST "repos/$GITHUB_REPOSITORY/$path/reactions" -f content="$reaction" > /dev/null
+          if [ "$status" = rejected ]; then
+            jq -r '"MergeWarden did not record this `/mw` comment: " + .ingest.reason' "$RUNNER_TEMP/feedback.json" > "$RUNNER_TEMP/reply.md"
+            gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/reply.md"
+          fi

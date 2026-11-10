@@ -1,0 +1,28 @@
+name: MergeWarden
+# Caller for this repository. Other projects copy this file and point `uses:` at
+# takagibit18/MergeWarden/.github/workflows/mergewarden-channel.yml@main. See docs/github-actions.md.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  issue_comment:
+    types: [created, edited, deleted]
+  pull_request_review_comment:
+    types: [created, edited, deleted]
+permissions:
+  contents: read
+jobs:
+  mergewarden:
+    # Inactive until the repository variable MW_STATE_REPOSITORY is configured.
+    if: vars.MW_STATE_REPOSITORY != ''
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    uses: ./.github/workflows/mergewarden-channel.yml
+    with:
+      state-repository: ${{ vars.MW_STATE_REPOSITORY }}
+      provider: ${{ vars.MW_PROVIDER }}
+      model: ${{ vars.MW_MODEL }}
+    secrets:
+      state-token: ${{ secrets.MW_STATE_TOKEN }}
+      model-api-key: ${{ secrets.MW_MODEL_API_KEY }}

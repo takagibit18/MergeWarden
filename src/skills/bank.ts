@@ -16,7 +16,9 @@ export function skillId(value: string): string { if (!/^sk_[a-z0-9_-]{1,64}$/.te
 export function proposalId(value: string): string { if (!/^pr_[a-f0-9]{24}$/.test(value)) throw Error('Invalid proposal ID'); return value; }
 export function contentOf(s: Skill): SkillContent { return { ...(s.name?{name:s.name}:{}), ...(s.description?{description:s.description}:{}), ...(s.references?{references:s.references}:{}), ...(s.scopeType?{scopeType:s.scopeType}:{}), ...(s.symbols?{symbols:s.symbols}:{}), type:s.type, title:s.title, conditions:s.conditions, steps:s.steps, counterexamples:s.counterexamples, stopConditions:s.stopConditions, ...(s.stillReportWhen?{stillReportWhen:s.stillReportWhen}:{}), paths:s.paths, languages:s.languages, keywords:s.keywords, dependencies:s.dependencies, ...(s.anchor?{anchor:s.anchor}:{}) }; }
 /** ADR 0020: only an explicit, non-simulated human decision on exact frozen lines can create or change an accepted trade-off. */
-export const acceptsTradeoff = (s: SkillSource): s is SkillSource & { anchor: TradeoffAnchor } => s.kind === 'feedback' && s.identity === 'local_user' && !s.simulated && s.verdict === 'accepted_tradeoff' && !!s.anchor;
+/** A person made this decision: local CLI feedback or a trusted GitHub collaborator comment, never a simulation or the review runtime. */
+export const humanFeedback = (s: SkillSource): boolean => s.kind === 'feedback' && !s.simulated && (s.identity === 'local_user' || s.identity === 'github_collaborator');
+export const acceptsTradeoff = (s: SkillSource): s is SkillSource & { anchor: TradeoffAnchor } => humanFeedback(s) && s.verdict === 'accepted_tradeoff' && !!s.anchor;
 /** Layer 2: normalize first, then validate the canonical form that will be hashed and stored. */
 function content(value: unknown): SkillContent {
   if (!value || typeof value !== 'object') throw Error('Missing skill content');
@@ -159,8 +161,8 @@ export class SkillBank {
       // The learner never supplies an anchor; an accepted trade-off takes it from the human source alone.
       if (op.content && 'anchor' in op.content) throw Error('Accepted trade-off anchor is host-recorded; remove anchor');
       const tradeoff = op.content?.type === 'accepted_tradeoff' || old?.type === 'accepted_tradeoff';
-      if (tradeoff && op.op !== 'retire' && !acceptsTradeoff(input.source)) throw Error('Accepted trade-offs come only from local user accepted_tradeoff feedback on a source range');
-      if (tradeoff && op.op === 'retire' && (input.source.identity !== 'local_user' || input.source.simulated)) throw Error('Retirement requires contextual trusted correction');
+      if (tradeoff && op.op !== 'retire' && !acceptsTradeoff(input.source)) throw Error('Accepted trade-offs come only from human accepted_tradeoff feedback on a source range');
+      if (tradeoff && op.op === 'retire' && !humanFeedback(input.source)) throw Error('Retirement requires contextual trusted correction');
       const c = op.content ? content(op.content.type === 'accepted_tradeoff' ? { ...op.content, anchor: input.source.anchor } : op.content) : contentOf(old!);
       if (c.type === 'accepted_tradeoff' && !c.anchor) throw Error('Accepted trade-offs require a host-recorded anchor');
       for (const dep of c.dependencies) {
